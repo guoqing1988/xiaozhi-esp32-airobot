@@ -16,6 +16,9 @@
 #include <driver/sdmmc_host.h>
 #include <sdmmc_cmd.h>
 #include <esp_vfs_fat.h>
+#include "driver/uart.h"
+#include <cstring>
+#include <cstdio>
 #include <memory>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
@@ -259,6 +262,122 @@ private:
             });
     }
 
+    void InitializeEchoUart() {
+        uart_config_t uart_config = {
+            .baud_rate = ECHO_UART_BAUD_RATE,
+            .data_bits = UART_DATA_8_BITS,
+            .parity    = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+            .source_clk = UART_SCLK_DEFAULT,
+        };
+        int intr_alloc_flags = 0;
+        ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));
+        ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
+        ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, UART_ECHO_TXD, UART_ECHO_RXD, UART_ECHO_RTS, UART_ECHO_CTS));
+        SendUartMessage("w2");
+    }
+
+    static bool SendUartMessage(const char* command_str) {
+        // 统一加 '@' 前缀, 让 Arduino 只认带前缀的命令行(过滤日志乱码)
+        int written = uart_write_bytes(ECHO_UART_PORT_NUM, "@", 1);
+        if (written < 0) return false;
+        written = uart_write_bytes(ECHO_UART_PORT_NUM, command_str, strlen(command_str));
+        if (written < 0) return false;
+        written = uart_write_bytes(ECHO_UART_PORT_NUM, "\n", 1);
+        return written >= 0;
+    }
+
+    void InitializeUnoTools() {
+        auto& mcp_server = McpServer::GetInstance();
+
+        mcp_server.AddTool(
+            "self.uno.action",
+            "麦克纳姆轮机器人控制。action: 0=停止,1=前进,2=后退,3=左转,4=右转,5=左移,6=右移,7=左上斜移,8=右上斜移,9=左下斜移,10=右下斜移; steps: 动作走多少步(1-100)",
+            PropertyList({Property("action", kPropertyTypeInteger, 0),
+                          Property("steps", kPropertyTypeInteger, 10, 5, 100)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int action_type = properties["action"].value<int>();
+                int steps = properties["steps"].value<int>();
+                const char* action_str = nullptr;
+                switch (action_type) {
+                    case 0: action_str = "stop"; break;
+                    case 1: action_str = "forward"; break;
+                    case 2: action_str = "back"; break;
+                    case 3: action_str = "left"; break;
+                    case 4: action_str = "right"; break;
+                    case 5: action_str = "leftmove"; break;
+                    case 6: action_str = "rightmove"; break;
+                    case 7: action_str = "leftup"; break;
+                    case 8: action_str = "rightup"; break;
+                    case 9: action_str = "leftdown"; break;
+                    case 10: action_str = "rightdown"; break;
+                    default: action_str = "stop"; break;
+                }
+                char cmd[32];
+                snprintf(cmd, sizeof(cmd), "go-%s-%d", action_str, steps);
+                return SendUartMessage(cmd);
+            });
+
+        mcp_server.AddTool(
+            "self.uno.servo",
+            "头部舵机控制，180度舵机，回正角度为82，大于82向左转，小于82向右转。degree: 0-180",
+            PropertyList({Property("degree", kPropertyTypeInteger, 82, 0, 180)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int degree = properties["degree"].value<int>();
+                char cmd[16];
+                snprintf(cmd, sizeof(cmd), "servo-%d", degree);
+                return SendUartMessage(cmd);
+            });
+
+        mcp_server.AddTool(
+            "self.uno.teji",
+            "执行特技，action: 1摇头 2闪电走位 3转圈 4蛇形走位 5调头 6开灯 7关灯",
+            PropertyList({Property("action", kPropertyTypeInteger, 1)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int action = properties["action"].value<int>();
+                const char* action_str = nullptr;
+                switch (action) {
+                    case 1: action_str = "yaotou"; break;
+                    case 2: action_str = "shandian"; break;
+                    case 3: action_str = "zhuanquan"; break;
+                    case 4: action_str = "sxzw"; break;
+                    case 5: action_str = "diaotou"; break;
+                    case 6: action_str = "ledon"; break;
+                    case 7: action_str = "ledoff"; break;
+                    default: action_str = "yaotou"; break;
+                }
+                char cmd[32];
+                snprintf(cmd, sizeof(cmd), "tj-%s", action_str);
+                return SendUartMessage(cmd);
+            });
+
+        mcp_server.AddTool(
+            "self.uno.speed",
+            "机器人速度控制。speed: 100-255",
+            PropertyList({Property("speed", kPropertyTypeInteger, 200, 100, 255)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int speed = properties["speed"].value<int>();
+                char cmd[16];
+                snprintf(cmd, sizeof(cmd), "speed-%d", speed);
+                return SendUartMessage(cmd);
+            });
+    }
+
+    // 调试工具: 临时切换系统日志级别(避免 GPIO43 日志污染 Arduino)
+    void InitializeDebugTools() {
+        auto& mcp_server = McpServer::GetInstance();
+        mcp_server.AddTool(
+            "self.debug.set_log_level",
+            "临时切换系统日志级别(调试用). level: 0=无日志,1=错误,2=警告,3=信息,4=调试",
+            PropertyList({Property("level", kPropertyTypeInteger, 3, 0, 4)}),
+            [](const PropertyList& properties) -> ReturnValue {
+                int lv = properties["level"].value<int>();
+                esp_log_level_set("*", (esp_log_level_t)lv);
+                return true;
+            });
+    }
+
 public:
     CompactWifiBoardS3CamAirobot() :
         boot_button_(BOOT_BUTTON_GPIO) {
@@ -268,6 +387,11 @@ public:
         InitializeCamera();
         InitializeSDCard();
         InitializeMusicTools();
+        InitializeEchoUart();
+        InitializeUnoTools();
+        InitializeDebugTools();
+        // 默认把日志压到 ERROR, 避免 GPIO43 日志污染 Arduino 串口(平时命令更稳定)
+        esp_log_level_set("*", ESP_LOG_ERROR);
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
