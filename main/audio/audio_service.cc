@@ -763,6 +763,49 @@ void AudioService::PlaySound(const std::string_view& ogg) {
     demuxer->Process(buf, size);
 }
 
+void AudioService::PushLocalPcm(std::vector<int16_t>&& pcm, int sample_rate) {
+    if (!codec_->output_enabled()) {
+        esp_timer_stop(audio_power_timer_);
+        esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+        codec_->EnableOutput(true);
+    }
+
+    // 重采样到 codec 输出采样率（使用独立重采样器，避免与 opus 解码共享）
+    if (sample_rate != codec_->output_sample_rate()) {
+        std::lock_guard<std::mutex> lock(local_resampler_mutex_);
+        if (local_resampler_ == nullptr || local_resampler_src_rate_ != sample_rate) {
+            if (local_resampler_ != nullptr) {
+                esp_ae_rate_cvt_close(local_resampler_);
+                local_resampler_ = nullptr;
+            }
+            esp_ae_rate_cvt_cfg_t cfg = RATE_CVT_CFG(sample_rate, codec_->output_sample_rate(), ESP_AUDIO_MONO);
+            auto ret = esp_ae_rate_cvt_open(&cfg, &local_resampler_);
+            if (local_resampler_ == nullptr) {
+                ESP_LOGE(TAG, "Failed to create local resampler, error code: %d", ret);
+                return;
+            }
+            local_resampler_src_rate_ = sample_rate;
+        }
+        uint32_t target_size = 0;
+        esp_ae_rate_cvt_get_max_out_sample_num(local_resampler_, pcm.size(), &target_size);
+        std::vector<int16_t> resampled(target_size);
+        uint32_t actual = target_size;
+        esp_ae_rate_cvt_process(local_resampler_, (esp_ae_sample_t)pcm.data(), pcm.size(),
+                                (esp_ae_sample_t)resampled.data(), &actual);
+        resampled.resize(actual);
+        pcm = std::move(resampled);
+    }
+
+    auto task = std::make_unique<AudioTask>();
+    task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+    task->pcm = std::move(pcm);
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        audio_playback_queue_.push_back(std::move(task));
+        audio_queue_cv_.notify_all();
+    }
+}
+
 bool AudioService::IsIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     return audio_encode_queue_.empty() && IsPlaybackDrainedLocked() && audio_testing_queue_.empty();

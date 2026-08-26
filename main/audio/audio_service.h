@@ -137,6 +137,8 @@ public:
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
+    // 播放本地解码的 PCM（注入播放队列，自动重采样到 codec 输出采样率）
+    void PushLocalPcm(std::vector<int16_t>&& pcm, int sample_rate);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
@@ -149,6 +151,10 @@ private:
     void* opus_encoder_ = nullptr;
     void* opus_decoder_ = nullptr;
     std::mutex decoder_mutex_;
+    // 本地播放独立重采样器（避免与 opus 解码共享 output_resampler_）
+    void* local_resampler_ = nullptr;
+    int local_resampler_src_rate_ = 0;
+    std::mutex local_resampler_mutex_;
     std::mutex input_resampler_mutex_;
     esp_ae_rate_cvt_handle_t input_resampler_ = nullptr;
     esp_ae_rate_cvt_handle_t output_resampler_ = nullptr;

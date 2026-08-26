@@ -37,6 +37,7 @@ Read the closest existing implementation before adding a new one. Prefer the nar
 - Guard target-specific features with Kconfig/component rules. Do not assume every target has PSRAM or S3/P4 resources.
 - Do not manually edit generated/vendor output: `build/`, `releases/`, `managed_components/`, `components/`, `sdkconfig*`, `main/assets/lang_config.h`, or generated mmap headers.
 - Format only touched C/C++ files with the repository `.clang-format`; avoid unrelated mass formatting.
+- Prefer official Espressif/vendor components and the C/C++ standard library over writing custom parsers or decoders. Reuse existing in-repo implementations before writing new code; keep any change to core modules additive and minimal.
 
 ## Boards and Configuration
 

@@ -9,9 +9,14 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "esp32_camera.h"
+#include "local_music_player.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
+#include <driver/sdmmc_host.h>
+#include <sdmmc_cmd.h>
+#include <esp_vfs_fat.h>
+#include <memory>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -66,6 +71,8 @@ private:
     Button boot_button_;
     LcdDisplay* display_;
     Esp32Camera* camera_;
+    std::unique_ptr<LocalMusicPlayer> music_player_;
+    bool sd_card_mounted_ = false;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -164,6 +171,94 @@ private:
         });
     }
 
+    void InitializeSDCard() {
+        ESP_LOGI(TAG, "Initializing SD card");
+        sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+        host.slot = SDMMC_HOST_SLOT_0;
+        host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+        host.flags = SDMMC_HOST_FLAG_1BIT;
+
+        sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+        slot.cd = SDMMC_SLOT_NO_CD;
+        slot.wp = SDMMC_SLOT_NO_WP;
+        slot.width = 1;
+        slot.cmd = SD_MMC_CMD_GPIO;
+        slot.clk = SD_MMC_CLK_GPIO;
+        slot.d0  = SD_MMC_D0_GPIO;
+
+        const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+            .format_if_mount_failed = false,
+            .max_files = 5,
+            .allocation_unit_size = 64 * 1024,
+        };
+
+        sdmmc_card_t* card = nullptr;
+        esp_err_t ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT_POINT, &host, &slot, &mount_config, &card);
+        if (ret == ESP_OK) {
+            sd_card_mounted_ = true;
+            ESP_LOGI(TAG, "SD card mounted at %s", SD_MOUNT_POINT);
+        } else {
+            sd_card_mounted_ = false;
+            ESP_LOGW(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
+        }
+    }
+
+    LocalMusicPlayer* GetMusicPlayer() {
+        if (music_player_ == nullptr) {
+            music_player_ = std::make_unique<LocalMusicPlayer>(Application::GetInstance().GetAudioService());
+            music_player_->ScanSongs();
+        }
+        return music_player_.get();
+    }
+
+    void InitializeMusicTools() {
+        auto& mcp = McpServer::GetInstance();
+        mcp.AddTool("self.music.play_random",
+            "Play a random song from the TF card's music folder",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                return GetMusicPlayer()->PlayRandom();
+            });
+        mcp.AddTool("self.music.play",
+            "Play a specific song from the TF card by name",
+            PropertyList({ Property("name", kPropertyTypeString) }),
+            [this](const PropertyList& props) -> ReturnValue {
+                return GetMusicPlayer()->PlaySong(props["name"].value<std::string>());
+            });
+        mcp.AddTool("self.music.list",
+            "List song names available on the TF card",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                auto songs = GetMusicPlayer()->ListSongs();
+                std::string result;
+                for (const auto& s : songs) {
+                    result += s + "\n";
+                }
+                return result;
+            });
+        mcp.AddTool("self.music.pause",
+            "Pause the current TF card song",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                GetMusicPlayer()->Pause();
+                return true;
+            });
+        mcp.AddTool("self.music.resume",
+            "Resume the paused TF card song",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                GetMusicPlayer()->Resume();
+                return true;
+            });
+        mcp.AddTool("self.music.stop",
+            "Stop playing the TF card song",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                GetMusicPlayer()->Stop();
+                return true;
+            });
+    }
+
 public:
     CompactWifiBoardS3CamAirobot() :
         boot_button_(BOOT_BUTTON_GPIO) {
@@ -171,6 +266,8 @@ public:
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeCamera();
+        InitializeSDCard();
+        InitializeMusicTools();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
