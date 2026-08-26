@@ -21,6 +21,44 @@
 | 摄像头 | OV2640 | 视觉 |
 | TF 卡 | MicroSD（板载槽） | 本地歌曲存储 |
 
+## 开发板信息（ESP32-S3-CAM）
+
+### 板载资源
+
+| 项目 | 信息 |
+|------|------|
+| 主控 | ESP32-S3 双核 LX7 @240MHz |
+| 内存 | 512KB SRAM + 8MB PSRAM |
+| Flash | 16MB |
+| 板载 TF 卡槽 | 有（SDMMC 1-bit） |
+| 板载摄像头 | OV2640（24-Pin FPC 排线直连）|
+| 板载 RGB LED | GPIO48 |
+| USB | GPIO19/20（本板改作 LCD SPI）|
+| 串口 | GPIO43(TX) / 44(RX) |
+
+### GPIO 引脚分配（本板使用）
+
+| 功能 | GPIO |
+|------|------|
+| 摄像头 D0~D7 | 11, 9, 8, 10, 12, 18, 17, 16 |
+| 摄像头 XCLK / PCLK / VSYNC / HREF | 15, 13, 6, 7 |
+| 摄像头 I2C SIOD / SIOC | 4, 5 |
+| 麦克风 WS / SCK / SD | 1, 2, 42 |
+| 功放 DIN / BCLK / LRC | 3, 14, 46 |
+| LCD SCLK / MOSI / RST / CS / DC | 19, 20, 21, 45, 47 |
+| LCD 背光 | 3.3V 常亮（无 GPIO）|
+| TF 卡 SDMMC | 38(CMD) / 39(CLK) / 40(D0) |
+| RGB LED / BOOT | 48 / 0 |
+
+### 不可用 / 受限引脚
+
+| GPIO | 原因 |
+|------|------|
+| 26~32 | 内部 flash/PSRAM |
+| 35, 36, 37 | 8MB PSRAM |
+| 43, 44 | UART0 TX/RX（串口调试）|
+| 19, 20 | USB D+/D-（本板改作 LCD SPI）|
+
 ## 接线表（重要，按此接线）
 
 ### 麦克风 INMP441
