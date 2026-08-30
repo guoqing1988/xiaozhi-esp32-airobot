@@ -333,7 +333,7 @@ main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot/MecanumRobot.i
 | Arduino ←→ ESP32 | 说明 |
 |---|---|
 | **RX ← GPIO43** | ESP32 UART0 TX 发指令 |
-| **TX → GPIO44** | ESP32 UART0 RX（可选回传）|
+| **TX → GPIO44** | ESP32 UART0 RX（**双向回执**，需接线）|
 | GND | 共地 |
 | 波特率 | **115200** |
 
@@ -346,6 +346,8 @@ main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot/MecanumRobot.i
 | `@servo-{degree}` | 设置舵机1 角度(0-180) |
 | `@speed-{value}` | 设置电机速度(70-255) |
 | `@tj-yaotou` / `@tj-shandian` / `@tj-zhuanquan` / `@tj-sxzw` / `@tj-diaotou` | 特技动作 |
+
+**双向回执（Arduino → ESP32）**：耗时动作（`go-*` / `tj-*`）开始执行时回传 `@busy`，执行完毕回传 `@done`。ESP32 的 UART0 RX 解析任务维护状态，AI 可通过 `self.uno.get_status` 查询（返回 `moving` / `idle (last: ...)`）。
 
 ### PS2 手柄键位
 | 按键 | 功能 |

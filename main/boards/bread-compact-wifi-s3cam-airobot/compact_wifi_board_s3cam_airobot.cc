@@ -23,6 +23,10 @@
 #include <cstring>
 #include <cstdio>
 #include <memory>
+#include <atomic>
+#include <mutex>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -80,6 +84,12 @@ private:
     std::unique_ptr<LocalMusicPlayer> music_player_;
     bool sd_card_mounted_ = false;
     esp_timer_handle_t ip_timer_ = nullptr;  // 待机状态底部显示 IP 的定时器
+    // Arduino 下位机双向状态(RX 解析任务写, MCP 工具读)
+    std::atomic<bool> uno_busy_{false};       // Arduino 正在执行动作
+    std::mutex uno_status_mutex_;             // 保护 uno_last_*
+    std::string uno_last_action_;             // 最近动作(如 go-forward-10)
+    std::string uno_last_result_;             // 最近结果(busy/done)
+    TaskHandle_t uno_status_task_ = nullptr;  // UART0 RX 解析任务
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -357,6 +367,45 @@ private:
         ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
         ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, UART_ECHO_TXD, UART_ECHO_RXD, UART_ECHO_RTS, UART_ECHO_CTS));
         SendUartMessage("w2");
+        // 启动 UART0 RX 解析任务, 读取 Arduino 回执(@busy/@done), 供 self.uno.get_status 查询
+        xTaskCreate(UnoStatusTask, "uno_status", 4096, this, 3, &uno_status_task_);
+    }
+
+    // 静态任务包装: 解析 Arduino 下位机回执
+    static void UnoStatusTask(void* arg) {
+        auto* self = static_cast<CompactWifiBoardS3CamAirobot*>(arg);
+        self->UnoStatusLoop();
+    }
+
+    void UnoStatusLoop() {
+        char line[64];
+        while (true) {
+            int len = uart_read_bytes(ECHO_UART_PORT_NUM, line, sizeof(line) - 1, pdMS_TO_TICKS(200));
+            if (len <= 0) {
+                continue;
+            }
+            line[len] = '\0';
+            // 按行解析 @busy / @done(可能一次读到多行)
+            char* tok = strtok(line, "\r\n");
+            while (tok != nullptr) {
+                if (strncmp(tok, "@busy", 5) == 0) {
+                    uno_busy_ = true;
+                    std::lock_guard<std::mutex> lock(uno_status_mutex_);
+                    uno_last_result_ = "busy";
+                    if (tok[5] == ' ') {
+                        uno_last_action_ = tok + 6;
+                    }
+                } else if (strncmp(tok, "@done", 5) == 0) {
+                    uno_busy_ = false;
+                    std::lock_guard<std::mutex> lock(uno_status_mutex_);
+                    uno_last_result_ = "done";
+                    if (tok[5] == ' ') {
+                        uno_last_action_ = tok + 6;
+                    }
+                }
+                tok = strtok(nullptr, "\r\n");
+            }
+        }
     }
 
     // 发送 UART 指令并返回描述性结果(成功/失败), 避免 AI 看到 true/false 无法确认执行结果而重复调用
@@ -455,6 +504,22 @@ private:
                 char cmd[16];
                 snprintf(cmd, sizeof(cmd), "speed-%d", speed);
                 return SendUartMessage(cmd);
+            });
+
+        mcp_server.AddTool(
+            "self.uno.get_status",
+            "获取 Arduino 下位机(麦克纳姆轮机器人)的实时状态。返回 moving(正在执行动作)或 idle(空闲)；"
+            "若刚执行完动作会附上最近动作与结果(如 idle (last: go-forward-10 done))。",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                if (uno_busy_) {
+                    return std::string("moving");
+                }
+                std::lock_guard<std::mutex> lock(uno_status_mutex_);
+                if (!uno_last_result_.empty()) {
+                    return std::string("idle (last: ") + uno_last_action_ + " " + uno_last_result_ + ")";
+                }
+                return std::string("idle");
             });
     }
 

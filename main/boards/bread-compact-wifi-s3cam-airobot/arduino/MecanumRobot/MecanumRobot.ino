@@ -304,6 +304,8 @@ void executeCommand() {
                 t = steps * 10;
             }
 
+            Serial.println("@busy");         // 上报动作开始(双向状态)
+
             if (strcmp(action, "forward") == 0) {
                 NewTone(A0, 2349, 50);
                 moveForward(t);
@@ -329,51 +331,58 @@ void executeCommand() {
                 moveRightBackward(t);
             }
 
+            Serial.println("@done");         // 上报动作完成(双向状态)
+
         } else if (strncmp(p, "servo-", 6) == 0) {
             // 格式: @servo-{degree}
             setServo1(atoi(p + 6));
 
-        } else if (strcmp(p, "tj-yaotou") == 0) {
-            // 特技: 摇头
-            setServo1(180);
-            delay(1000);
-            setServo1(90);
-            delay(1000);
-            setServo1(0);
-            delay(1000);
-            setServo1(servo1Zero);
-            delay(500);
-            NewTone(A0, 3136, 500);
+        } else if (strncmp(p, "tj-", 3) == 0) {
+            // 特技动作
+            Serial.println("@busy");         // 上报动作开始
+            if (strcmp(p, "tj-yaotou") == 0) {
+                // 特技: 摇头
+                setServo1(180);
+                delay(1000);
+                setServo1(90);
+                delay(1000);
+                setServo1(0);
+                delay(1000);
+                setServo1(servo1Zero);
+                delay(500);
+                NewTone(A0, 3136, 500);
 
-        } else if (strcmp(p, "tj-shandian") == 0) {
-            // 特技: 闪电走位
-            moveRightForward(1000);
-            moveLeft(1000);
-            moveRightForward(2000);
-            NewTone(A0, 587, 500);
+            } else if (strcmp(p, "tj-shandian") == 0) {
+                // 特技: 闪电走位
+                moveRightForward(1000);
+                moveLeft(1000);
+                moveRightForward(2000);
+                NewTone(A0, 587, 500);
 
-        } else if (strcmp(p, "tj-zhuanquan") == 0) {
-            // 特技: 转圈
-            turnLeft(1500);
-            turnRight(1500);
-            NewTone(A0, 587, 500);
+            } else if (strcmp(p, "tj-zhuanquan") == 0) {
+                // 特技: 转圈
+                turnLeft(1500);
+                turnRight(1500);
+                NewTone(A0, 587, 500);
 
-        } else if (strcmp(p, "tj-sxzw") == 0) {
-            // 特技: 蛇形走位
-            moveRightForward(1500);
-            moveLeftForward(1500);
-            moveRightForward(1500);
-            moveLeftForward(1000);
-            moveRightForward(1000);
-            moveLeftForward(1000);
+            } else if (strcmp(p, "tj-sxzw") == 0) {
+                // 特技: 蛇形走位
+                moveRightForward(1500);
+                moveLeftForward(1500);
+                moveRightForward(1500);
+                moveLeftForward(1000);
+                moveRightForward(1000);
+                moveLeftForward(1000);
+
+            } else if (strcmp(p, "tj-diaotou") == 0) {
+                // 特技: 调头
+                turnLeft(900);
+            }
+            Serial.println("@done");         // 上报动作完成
 
         } else if (strncmp(p, "speed-", 6) == 0) {
             // 格式: @speed-{value}
             setSpeed(atoi(p + 6));
-
-        } else if (strcmp(p, "tj-diaotou") == 0) {
-            // 特技: 调头
-            turnLeft(900);
         }
     }
 }
