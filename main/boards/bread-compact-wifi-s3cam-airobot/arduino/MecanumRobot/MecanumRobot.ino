@@ -419,6 +419,7 @@ void aiControl() {
 
 // 初始化串口、电机驱动、速度/舵机角度、PS2 手柄和蜂鸣器。
 void setup() {
+    Serial.setRxBufferSize(256);        // 加大 RX 缓冲(默认 64B≈4-5 条指令, 长序列会溢出丢指令)
     Serial.begin(9600);                 // 先以 9600 启动(米思齐遗留)
 
     mMotorDriver.begin(50);             // 电机驱动板初始化, PWM 频率 50Hz
