@@ -9,6 +9,7 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "esp32_camera.h"
+#include "driver/gpio.h"
 #include "settings.h"
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 #include "local_music_player.h"
@@ -462,6 +463,9 @@ private:
         ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));
         ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
         ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, UART_ECHO_TXD, UART_ECHO_RXD, UART_ECHO_RTS, UART_ECHO_CTS));
+        // 未接 Arduino 时 GPIO44(RX) 悬空, 噪声会触发 RX 中断风暴(偶发中断看门狗复位);
+        // 内部上拉稳定电平; 接 Arduino 时上拉不影响正常通信
+        gpio_set_pull_mode(UART_ECHO_RXD, GPIO_PULLUP_ONLY);
         SendUartMessage("w2");
         // 启动 UART0 RX 解析任务, 读取 Arduino 回执(@busy/@done), 供 self.uno.get_status 查询
         xTaskCreate(UnoStatusTask, "uno_status", 4096, this, 3, &uno_status_task_);
