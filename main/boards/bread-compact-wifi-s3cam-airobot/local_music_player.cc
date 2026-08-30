@@ -183,17 +183,12 @@ std::vector<std::string> LocalMusicPlayer::ListSongs() const {
     return songs_;
 }
 
-std::string LocalMusicPlayer::PickNextSong(bool random) {
-    std::lock_guard<std::mutex> lock(songs_mutex_);
-    if (songs_.empty()) {
-        return "";
+std::string LocalMusicPlayer::PickNextSong() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (queue_pos_ < play_queue_.size()) {
+        return play_queue_[queue_pos_++];
     }
-    if (random) {
-        static std::mt19937 rng(std::random_device{}());
-        std::uniform_int_distribution<size_t> dist(0, songs_.size() - 1);
-        return songs_[dist(rng)];
-    }
-    return songs_[0];
+    return "";  // 队列播完
 }
 
 std::string LocalMusicPlayer::FindSong(const std::string& name) {
@@ -219,11 +214,15 @@ std::string LocalMusicPlayer::FindSong(const std::string& name) {
 bool LocalMusicPlayer::PlayRandom() {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        continuous_ = true;
-        random_ = true;
+        // 随机顺序: 洗牌全部歌曲作为播放队列, 播完队列自动停止
+        play_queue_ = songs_;
+        std::shuffle(play_queue_.begin(), play_queue_.end(),
+                     std::mt19937(std::random_device{}()));
+        queue_pos_ = 0;
+        pending_song_.clear();
     }
     if (playing_.load()) {
-        return true;  // 已在播放，保持随机连播
+        return true;  // 已在播放，保持当前队列(不打断)
     }
     playing_ = true;
     paused_ = false;
@@ -244,8 +243,14 @@ bool LocalMusicPlayer::PlaySong(const std::string& name) {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         pending_song_ = found;
-        random_ = false;
-        continuous_ = true;
+        // 顺序播放: 队列 = 全部歌曲(字典序), 从指定歌曲的下一首开始播, 播完队列停止
+        play_queue_ = songs_;
+        auto it = std::find(play_queue_.begin(), play_queue_.end(), found);
+        if (it != play_queue_.end()) {
+            queue_pos_ = static_cast<size_t>(it - play_queue_.begin()) + 1;
+        } else {
+            queue_pos_ = play_queue_.size();  // 未找到(理论上不会), 队列为空
+        }
     }
     if (playing_.load()) {
         return true;  // 正在播放，PlayTask 下一轮会处理 pending_song_
@@ -292,18 +297,15 @@ void LocalMusicPlayer::PlayTask() {
                 song = pending_song_;
                 pending_song_.clear();
             } else {
-                song = PickNextSong(random_.load());
+                song = PickNextSong();
             }
         }
         if (song.empty()) {
-            // 没有任何歌曲
+            // 队列播完(顺序/随机均到末尾)或没有任何歌曲
             playing_ = false;
             break;
         }
         PlayOneSong(std::string(MUSIC_DIR) + "/" + song);
-        if (!continuous_.load()) {
-            break;
-        }
     }
     playing_ = false;
     // 自然播完(非外部停止)且状态仍是我们钉住的 Speaking -> 回到待命；

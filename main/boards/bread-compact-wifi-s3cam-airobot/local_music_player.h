@@ -35,7 +35,7 @@ public:
 private:
     void PlayTask();
     void PlayOneSong(const std::string& path);
-    std::string PickNextSong(bool random);
+    std::string PickNextSong();                   // 从播放队列取下一首(空=队列播完)
     std::string FindSong(const std::string& name);
 
     AudioService& audio_service_;
@@ -44,9 +44,9 @@ private:
     std::atomic<bool> playing_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> stop_requested_{false};
-    std::atomic<bool> continuous_{true};         // 默认连播
-    std::atomic<bool> random_{true};             // 随机播放
-    std::string pending_song_;                    // 指定要播的歌曲
+    std::string pending_song_;                    // 指定要播的歌曲(下一首优先)
+    std::vector<std::string> play_queue_;         // 本次播放队列(顺序=字典序 / 随机=洗牌)
+    size_t queue_pos_ = 0;                        // 队列当前位置(播完队列即停止)
     std::mutex state_mutex_;
     std::thread play_thread_;
 
