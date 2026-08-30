@@ -123,9 +123,11 @@
 
 > 麦克风、LCD 主接口、摄像头、LED、BOOT 引脚均与原方案一致。
 
-## 编译配置命令
+## 环境准备：ESP-IDF v6.0.2
 
-### 在 Windows 11 上安装 ESP-IDF v6.0.2（备查）
+> ⚠️ 本项目必须使用 **ESP-IDF v6.0.2**。v6 使用**独立的 Python 虚拟环境**（`idf6.0_py3.12_env`），与 v5.5（`idf5.5_py3.11_env`）**完全隔离**，两者共存于 `D:\Espressif`，互不影响。
+
+### 安装（Windows 11，备查）
 
 以下是在 **Windows 11 + cmd** 上安装 v6.0.2 的完整流程，与 v5.5 共存于 `D:\Espressif`，互不覆盖。
 
@@ -174,10 +176,8 @@ idf.py --version   :: 应显示 ESP-IDF v6.0.2(-dirty)
 
 安装完即得到了：源码 `D:\Espressif\frameworks\esp-idf-v6.0.2`、共享工具链 `D:\Espressif\tools`（按版本子目录与 v5.5 共存）、隔离 Python 环境 `D:\Espressif\python_env\idf6.0_py3.12_env`。
 
-### 加载 ESP-IDF v6.0.2 环境
+### 加载环境
 
-> ⚠️ 本项目必须使用 **ESP-IDF v6.0.2**。v6 使用**独立的 Python 虚拟环境**（`idf6.0_py3.12_env`），与 v5.5（`idf5.5_py3.11_env`）**完全隔离**，两者共存于 `D:\Espressif`，互不影响。
->
 > 关键：激活时必须设置 `IDF_PYTHON_ENV_PATH` 指向 v6 环境，否则 `export` 会误用 v5.5 环境（会污染/报依赖缺失）。
 
 **Windows（本机已装，推荐用快捷脚本）：**
@@ -199,13 +199,23 @@ source ~/esp/v6.0.2/esp-idf/export.sh
 idf.py --version      # 应显示 ESP-IDF v6.0.2
 ```
 
-**② 配置编译目标为 ESP32S3：**
+## 编译与烧录（ESP32 固件）
+
+> 编译前先加载环境，见上节「环境准备：ESP-IDF v6.0.2」。
+
+### 方式一：构建脚本（推荐，自动配置板子/屏幕）
+
+```bash
+python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
+```
+
+> `scripts/build.py` 会读取 `config.json` 的 `sdkconfig_append`（屏幕类型、console 配置等）并自动配置，推荐日常使用。
+
+### 方式二：idf.py（需手动 menuconfig）
 
 ```bash
 idf.py set-target esp32s3
 ```
-
-**打开 menuconfig：**
 
 ```bash
 idf.py menuconfig
@@ -223,15 +233,22 @@ Xiaozhi Assistant -> Board Type -> Bread Compact Wi-Fi + LCD + Camera AI Robot (
 idf.py build flash
 ```
 
-> **查看编译日志**：`idf.py build` / `scripts/build.py` 都会把编译进度**打印到终端**，报错也会完整输出。若想留存日志，用
-> ```bash
-> idf.py build 2>&1 | tee build.log
-> ```
-> 编译产物在 `build/` 目录：`build/xiaozhi.bin`、`build/merged-binary.bin`。
-> 烧录后看**运行日志**（monitor，端口按实际修改）：
-> ```bash
-> idf.py -p /dev/cu.usbserial-XXXX flash monitor
-> ```
+> ⚠️ `idf.py build` **不读取** config.json 的 `sdkconfig_append`（如屏幕类型、console 配置），需通过 `menuconfig` 手动设置——详见下方「踩坑记录」。
+
+### 查看编译日志与运行日志
+
+- `idf.py build` / `scripts/build.py` 都会把编译进度**打印到终端**，报错也会完整输出。若想留存日志：
+
+```bash
+idf.py build 2>&1 | tee build.log
+```
+
+- 编译产物在 `build/` 目录：`build/xiaozhi.bin`、`build/merged-binary.bin`。
+- 烧录后看**运行日志**（monitor，端口按实际修改）：
+
+```bash
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+```
 
 ### 📦 打包合并固件（Flash 下载工具直接烧录）
 
@@ -259,37 +276,7 @@ packages/bread-compact-wifi-s3cam-airobot-no-tfcard-merged-20260830.bin
 
 > **注意**：每次 `idf.py build` 重新编译后，都要**重新运行一次打包命令**（包不会自动更新）；可选参数：`--build-dir`（构建目录）、`--output-dir`（输出目录）。
 
-或使用构建脚本（自动配置板子/屏幕，推荐）：
-
-```bash
-python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
-```
-
-> 区别：`idf.py build` **不读取** config.json 的 `sdkconfig_append`（如屏幕类型、console 配置），需通过 `menuconfig` 手动设置；`scripts/build.py` 会读取 config.json 并自动配置。
-
-### ⚠️ 踩坑记录：改 config.json 后 `idf.py build` 不生效
-
-> **教训**：只修改 `config.json` 的 `sdkconfig_append`，再用 `idf.py build` 编译，新配置**完全不会生效**——`idf.py build` / `idf.py menuconfig` 根本不读 config.json，它只被 `scripts/build.py` 读取。本次调试 TF 卡中文文件名乱码时就因此误以为改动无效，浪费了时间。
-
-改 Kconfig 配置有三条路径，按推荐度排序：
-
-1. **统一用 `scripts/build.py` 构建**（推荐）：配置只写在 `config.json` 的 `sdkconfig_append`，一处维护，脚本每次重新生成 sdkconfig 自动带上。
-2. **`idf.py menuconfig` 手动设置**：直观，但每次改动都要手动操作，易漏。
-3. **直接改 `sdkconfig` 文件**：当前构建立即生效，但 `sdkconfig` 是构建生成物（已被 .gitignore），kconfig 在 cmake 阶段可能回写/重建，改动可能被覆盖，不推荐作为长期维护方式。
-
-**本板实例**：TF 卡中文文件名乱码的根因是 FATFS API 编码为 ANSI/OEM(CP437，不含中文字符)，需改为 `CONFIG_FATFS_API_ENCODING_UTF_8=y`。该配置按标准做法写入两处**持久入口**：
-- **`sdkconfig.defaults`**（项目级）：`idf.py build` 重建 sdkconfig 时生效；
-- **`config.json` 的 `sdkconfig_append`**（本板）：`scripts/build.py` 构建时生效。
-
-> ⚠️ **不要直接改 `sdkconfig` 文件**——它是构建生成物（`.gitignore`），`reconfigure`/`build.py` 重建时会被覆盖丢失，不是配置入口。验证方法：
-
-```bash
-# Windows PowerShell
-Select-String FATFS_API_ENCODING sdkconfig
-# 应看到 CONFIG_FATFS_API_ENCODING_UTF_8=y
-```
-
-### 🔧 无 TF 卡模式（原始接线，砍掉音乐/上传功能）
+### 无 TF 卡模式（编译变体，砍掉音乐/上传功能）
 
 板子支持编译成**不依赖 TF 卡**的版本：接线完全不变，只是不挂载 SD 卡、不提供本地音乐播放与网页上传（`self.music.*` 工具、歌词、上传页均无）。适合没插卡或不需要本地音乐的场景。
 
@@ -321,7 +308,29 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 >
 > **引脚自动切换（重要）**：无 TF 卡模式下功放恢复与**原始板 `bread-compact-wifi-s3cam` 完全一致**的接线：DOUT=`39`、BCLK=`40`、LRCK=`41`（TF 版为 `3/14/46`），背光也恢复 `38`（TF 版为 NC）。若你的功放仍按 `3/14/46` 接线（TF 版），无 TF 卡版会无声——此时把功放三根线改回 `39/40/41` 即可。
 
-## 功能：TF 卡本地歌曲播放（AI 控制）
+### ⚠️ 踩坑记录：改 config.json 后 `idf.py build` 不生效
+
+> **教训**：只修改 `config.json` 的 `sdkconfig_append`，再用 `idf.py build` 编译，新配置**完全不会生效**——`idf.py build` / `idf.py menuconfig` 根本不读 config.json，它只被 `scripts/build.py` 读取。本次调试 TF 卡中文文件名乱码时就因此误以为改动无效，浪费了时间。
+
+改 Kconfig 配置有三条路径，按推荐度排序：
+
+1. **统一用 `scripts/build.py` 构建**（推荐）：配置只写在 `config.json` 的 `sdkconfig_append`，一处维护，脚本每次重新生成 sdkconfig 自动带上。
+2. **`idf.py menuconfig` 手动设置**：直观，但每次改动都要手动操作，易漏。
+3. **直接改 `sdkconfig` 文件**：当前构建立即生效，但 `sdkconfig` 是构建生成物（已被 .gitignore），kconfig 在 cmake 阶段可能回写/重建，改动可能被覆盖，不推荐作为长期维护方式。
+
+**本板实例**：TF 卡中文文件名乱码的根因是 FATFS API 编码为 ANSI/OEM(CP437，不含中文字符)，需改为 `CONFIG_FATFS_API_ENCODING_UTF_8=y`。该配置按标准做法写入两处**持久入口**：
+- **`sdkconfig.defaults`**（项目级）：`idf.py build` 重建 sdkconfig 时生效；
+- **`config.json` 的 `sdkconfig_append`**（本板）：`scripts/build.py` 构建时生效。
+
+> ⚠️ **不要直接改 `sdkconfig` 文件**——它是构建生成物（`.gitignore`），`reconfigure`/`build.py` 重建时会被覆盖丢失，不是配置入口。验证方法：
+
+```bash
+# Windows PowerShell
+Select-String FATFS_API_ENCODING sdkconfig
+# 应看到 CONFIG_FATFS_API_ENCODING_UTF_8=y
+```
+
+## TF 卡本地歌曲播放（AI 控制）
 
 本板在面包板基础上新增「TF 卡本地歌曲播放」能力，让 AI 语音助手直接播放 TF 卡上的本地音乐（MP3），替代官方云端曲库中数量有限的歌曲。
 
@@ -373,7 +382,7 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 上传/播放源码位于本板目录：`http_upload_server.h` / `http_upload_server.cc`（由 CMake `file(GLOB)` 自动编译）。
 - 日志说明：上传成功路径不打日志（避免刷屏），仅错误（缺参数/写卡失败/同名跳过等）和启动（`Upload server started`）打印；板子日志级别为 ERROR，见串口日志需保留。
 
-### 摄像头画面翻转（AI 控制 + 本地持久化）
+## 摄像头画面翻转（AI 控制 + 本地持久化）
 - 说「画面翻转 / 镜像 / 上下翻转」→ `self.camera.set_flip`（mode: `0`=正常, `1`=左右镜像, `2`=上下翻转, `3`=旋转180）。
 - 设置写入 NVS（`camera/flip`），**断电重启自动恢复该设置**。
 - 实现：板级 `ApplyCameraFlip()` 开机应用 + `Esp32Camera::SetHMirror/SetVFlip`（官方 sensor 寄存器接口）。
@@ -381,6 +390,8 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 ## Arduino 下位机（Mecanum 机器人）
 
 本板可选配一个 **Arduino 下位机**（麦克纳姆轮机器人），由 ESP32 通过串口控制。
+
+> 完整操作手册（编译/烧录/排错）见 **`arduino/MecanumRobot/README.md`**，以下为要点。
 
 ### 代码位置
 ```
@@ -468,12 +479,12 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 > **RX 缓冲（无需额外参数）**：`arduino:avr 1.8.8+` 的 HardwareSerial 没有 `setRxBufferSize` API，RX 缓冲由编译期宏 `SERIAL_RX_BUFFER_SIZE` 控制（默认 64B≈4-5 条指令，AI 长指令序列会溢出丢指令）。已在本机核心目录建好 `platform.local.txt`（内容 `compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256`），**IDE 和 CLI 编译都会自动带上**，命令无需再加长参数。
 > **换电脑/重装核心后**：在核心目录 `D:\Arduino15\packages\arduino\hardware\avr\1.8.8\` 重新建 `platform.local.txt`，或改用 `arduino-cli compile --build-property "compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" ...`。
 
-**方式二：Arduino IDE**
+**方式三：Arduino IDE**
 1. 用 Arduino IDE 打开 `MecanumRobot.ino`。
 2. 库管理器搜索安装上述 3 个库（或手动安装）。
 3. 选择板型（Arduino UNO）和端口，编译烧录。
 
-### ⚠️ 使用注意
+### 使用注意
 - **看日志/烧录 ESP32 时，请先断开 Arduino 与 ESP32 的接线**（因为 ESP32 的 GPIO43/44（板载 USB-UART）与 Arduino 共用，插电脑会产生干扰）。
 - ESP32 默认日志已降到 **`ERROR`**，且命令带 **`@` 前缀**（Arduino 只认 `@` 开头的行），日志乱码会被忽略，命令更稳定。
 - Arduino 程序用**固定 `char` 缓冲**解析命令（不用 `String`），适合 UNO 的 2KB SRAM，抗内存碎片。
@@ -482,7 +493,35 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 - **顺序执行**：Arduino 读一条执行一条（`runMotors` 内 `delay` 阻塞），先到先执行，**不会乱序**。
 - **RX 缓冲**：UNO 默认 HardwareSerial 接收缓冲仅 **64 字节（≈4-5 条指令）**。动作阻塞执行期间（如 `go-forward-15` 执行 1.5 秒）不读串口，后续指令积压在缓冲里，超出部分**溢出丢弃**（表现为“后面的指令跳过了”）。已通过编译期宏 `SERIAL_RX_BUFFER_SIZE=256`（≈17 条）加大——**注意该宏须在编译时传入**（见上文 arduino-cli `--build-property` / IDE `platform.local.txt`），.ino 内无法设置（`arduino:avr 1.8.8+` 无 `setRxBufferSize` API）；正常 AI 编排序列（3-10 条）不会丢；若实测超长序列仍丢，可再加大或让 ESP32 读 Arduino 回执（`Serial.println("F")` 等已存在）判断动作完成再发下一条。
 
-### 踩坑：AI 重复调用 uno 工具（已修复）
+### ⚠️ 踩坑记录
+
+#### 1. CH340 新驱动导致 Arduino 上传失败（`cannot set com-state`）
+
+**现象**（Windows + CH340 方案的 UNO 克隆板，本机实测）：
+
+- 上传报 `avrdude: ser_open(): can't set com-state for "\\.\COMx"` / `Error: unable to open port ...`；PowerShell 直接打开串口报「设备没有发挥作用」（ERROR_GEN_FAILURE）。
+- **间歇性**：同一板、同一端口时好时坏；用 Mixly 先「打开串口监视器 → 关掉窗口」再上传基本能成功（即「预热」现象，可作应急 workaround）。
+- 设备管理器里 CH340 **枚举正常、驱动正常**——注意：**枚举正常 ≠ 串口可用**（设备不响应 `SetCommState`）。
+
+**根因**：WCH CH340 **新版驱动 3.8+（含 3.9.2024.9）在 Windows 11 上的驱动 bug**。avrdude 官方确认（[avrdudes/avrdude#1328](https://github.com/avrdudes/avrdude/issues/1328)，标签 `not our bug`）：Win10 一般正常、Win11 复现；**与 avrdude 版本无关**（6.3/8.0 同样受影响），不是板子/线材/代码问题。多台 Windows 电脑出现同类问题属正常。
+
+**解决：降级 CH340 驱动到 3.5.2019.1**（官方验证可靠，一步到位）：
+
+1. 获取驱动：本机备份在 `C:\Users\liuguoqing\Downloads\ch340_v35\wch340_v35\`；或下载 avrdude issue 附件 `wch340_v35.zip` / `https://github.com/wemos/ch340_driver`。
+2. 设备管理器 → 端口(COM 和 LPT) → **USB-SERIAL CH340** → 右键 → **更新驱动程序** → 浏览我的电脑 → **让我从列表选取** → **从磁盘安装** → 选 `CH341SER.INF` → 弹警告选「仍然安装」。
+3. 确认版本变为 **3.5.2019.1** → 拔插 USB 线。
+4. ⚠️ **Windows 更新可能自动升回新版驱动**——若日后复现，设备管理器 → CH340 属性 → 驱动 → **回滚驱动**。
+
+**备选方案**（仅 3.8 驱动有效，3.9 无此选项）：设备管理器 → CH340 属性 → **高级** 选项卡 → 勾选 **「Enabling the Serial Port Enumerator (SerEnum)」** → 拔插 USB。
+
+**烧录前检查清单**：
+
+- 端口用 `arduino-cli board list` 确认（**别用 COM1**，那是主板通信口；Arduino 在 CH340 端口上）。
+- **完全退出 Mixly / Arduino IDE**（它们会独占串口；被占用时报「拒绝访问」而非上面的错误）。
+- 烧录 ESP32 时保持 Arduino 接线断开（见上方「使用注意」）。
+
+#### 2. AI 重复调用 uno 工具（已修复）
+
 **现象**：说一次“前进”，ESP32 串口发出几十次 `@go-forward-10`，机器人反复动。
 **根因**：服务端 AI 无执行确认机制，对 `uno` 工具反复生成相同调用（实测 30 次、间隔约 700-900ms、JSON-RPC id 递增）；设备端每次毫秒级正确回复，**设备端无 bug**——同一日志里 `music.*` 工具全部只调用一次（同样返回 `true` 却不重复），对照即可实锤。
 **修复**（ESP32 端三重机制，均在板级文件 `compact_wifi_board_s3cam_airobot.cc`）：
