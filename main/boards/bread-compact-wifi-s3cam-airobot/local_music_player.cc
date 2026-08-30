@@ -367,25 +367,15 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
     // 避免逐帧 sleep_for 的累积漂移导致越播越慢。
     auto play_start = std::chrono::steady_clock::now();
     uint64_t injected_samples = 0;
-    // [TEMP 诊断] 播放进度日志(每 5 秒一条, 定位播放卡死问题后移除)
-    auto last_progress_log = std::chrono::steady_clock::now();
-    const char* song_name = strrchr(path.c_str(), '/');
-    song_name = song_name ? song_name + 1 : path.c_str();
 
     while (!stop_requested_.load() && playing_.load()) {
-        // [TEMP 诊断] 进度日志：线程活着则持续输出，卡住时最后一条指示卡点附近
-        auto now_p = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now_p - last_progress_log)
-                .count() >= 5000) {
-            last_progress_log = now_p;
-            ESP_LOGI(TAG, "[play] %s pos=%llu samples sr=%d paused=%d", song_name,
-                     (unsigned long long)injected_samples, sample_rate, (int)paused_.load());
-        }
-
-        // 打断检测：仅当设备状态从 Idle 变为非 Idle（唤醒词/按钮触发交互）时打断；
-        // 若播放由 AI 命令启动（状态为 Speaking/Listening），保持播放不被打断
+        // 打断检测：仅当设备从 Idle 变为 Listening/Connecting(真正的用户唤醒/交互信号)时打断。
+        // 播放线程每帧自钉 Speaking, 服务器 goodbye 也会造成 idle->speaking 波动,
+        // 若按“非Idle即打断”会把会话超时误判为用户交互导致误停(实测: 听歌时服务器
+        // 长时间无交互自动结束会话 -> 播放被误停)。唤醒词/按钮打断走明确 hook, 不受影响。
         auto state = Application::GetInstance().GetDeviceState();
-        if (interaction_state_ == kDeviceStateIdle && state != kDeviceStateIdle) {
+        if (interaction_state_ == kDeviceStateIdle &&
+            (state == kDeviceStateListening || state == kDeviceStateConnecting)) {
             ESP_LOGI(TAG, "User interaction detected, stop local playback");
             display->ClearChatMessages();
             Stop();

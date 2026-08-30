@@ -561,8 +561,8 @@ public:
         InitializeEchoUart();
         InitializeUnoTools();
         InitializeDebugTools();
-        // [TEMP 诊断] 打开 INFO 日志定位播放卡死(定位后恢复 ERROR, 避免 GPIO43 污染 Arduino 串口)
-        esp_log_level_set("*", ESP_LOG_INFO);
+        // 默认把日志压到 ERROR, 避免 GPIO43 日志污染 Arduino 串口(平时命令更稳定)
+        esp_log_level_set("*", ESP_LOG_ERROR);
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
