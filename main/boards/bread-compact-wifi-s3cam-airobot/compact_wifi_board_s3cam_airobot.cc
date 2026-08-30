@@ -353,7 +353,8 @@ private:
             });
         mcp.AddTool("self.music.list",
             "List songs available on the TF card (returns up to 30 names plus total count, "
-            "enough for the AI to answer questions like \"how many songs\")",
+            "enough for the AI to answer questions like \"how many songs\"). "
+            "To find a specific song by name/artist, use self.music.search instead.",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
                 auto songs = GetMusicPlayer()->ListSongs();
@@ -367,6 +368,47 @@ private:
                               std::to_string(kMaxShown) + " 首)";
                 } else {
                     result += "共 " + std::to_string(songs.size()) + " 首";
+                }
+                return result;
+            });
+        mcp.AddTool("self.music.search",
+            "Search songs on the TF card by keyword (substring match, case-insensitive). "
+            "Use when the user asks whether a specific song/artist exists, e.g. keyword=\"薛之谦\". "
+            "Returns up to 30 matching names plus the match count.",
+            PropertyList({Property("keyword", kPropertyTypeString, "", 0, 0)}),
+            [this](const PropertyList& props) -> ReturnValue {
+                std::string kw = props["keyword"].value<std::string>();
+                std::string lower_kw = kw;
+                std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
+                auto songs = GetMusicPlayer()->ListSongs();
+                std::string result;
+                size_t matched = 0;
+                const size_t kMaxShown = 30;
+                for (const auto& s : songs) {
+                    bool hit = kw.empty();
+                    if (!hit) {
+                        hit = s.find(kw) != std::string::npos;
+                        if (!hit) {
+                            std::string sl = s;
+                            std::transform(sl.begin(), sl.end(), sl.begin(), ::tolower);
+                            hit = sl.find(lower_kw) != std::string::npos;
+                        }
+                    }
+                    if (hit && matched < kMaxShown) {
+                        result += s + "\n";
+                    }
+                    if (hit) {
+                        matched++;
+                    }
+                }
+                if (matched == 0) {
+                    return std::string("未找到包含 \"") + kw + "\" 的歌曲";
+                }
+                if (matched > kMaxShown) {
+                    result += "...(共 " + std::to_string(matched) + " 首匹配, 仅显示前 " +
+                              std::to_string(kMaxShown) + " 首)";
+                } else {
+                    result += "共 " + std::to_string(matched) + " 首匹配";
                 }
                 return result;
             });

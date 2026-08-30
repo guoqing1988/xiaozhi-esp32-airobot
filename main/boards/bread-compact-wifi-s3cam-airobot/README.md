@@ -285,7 +285,8 @@ Select-String FATFS_API_ENCODING sdkconfig
 | 「暂停播放」 | `self.music.pause` | 暂停 |
 | 「继续播放」 | `self.music.resume` | 继续 |
 | 「停止播放」 | `self.music.stop` | 停止 |
-| 「有什么歌」 | `self.music.list` | 列出 TF 卡歌曲 |
+| 「有什么歌」 | `self.music.list` | 列出 TF 卡歌曲（上限 30 首 + 总数）|
+| 「有没有某某的歌」 | `self.music.search` | 按关键字搜索全部歌曲（子串/大小写不敏感，如「薛之谦」）|
 
 - **队列播放**：「播放《某歌》」→ 从该歌开始按**文件名字典序**播完列表后自动停止；「随机播放」→ **随机打乱顺序**播完列表后自动停止（播放中再喊随机不打断当前队列）。
 - **可被打断**：播放中被唤醒/说话会打断本地播放，恢复语音交互。
