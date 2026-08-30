@@ -318,11 +318,15 @@
 // A MCP Test: Control a lamp
 #define LAMP_GPIO GPIO_NUM_14
 
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 // SD/TF Card (板载 SDMMC 1-bit)
 #define SD_MMC_CMD_GPIO  GPIO_NUM_38
 #define SD_MMC_CLK_GPIO  GPIO_NUM_39
 #define SD_MMC_D0_GPIO   GPIO_NUM_40
 #define SD_MOUNT_POINT   "/sdcard"
+#else
+// 无 TF 卡模式: 不定义 SD 引脚(38-40 已释放给功放/背光), 也不挂载
+#endif
 #define MUSIC_DIR        "/sdcard/music"
 
 // Arduino 下位机 UART 串口控制 (UART_NUM_0 / GPIO43 TX, GPIO44 RX)
