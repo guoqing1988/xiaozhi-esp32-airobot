@@ -293,7 +293,7 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 
 > 无 TF 卡版保留：AI 对话、摄像头（拍照/翻转）、屏幕、按钮、唤醒词、Arduino 双向通信、IP 显示；仅跳过 SD 卡挂载、音乐播放、网页上传。
 >
-> **引脚自动切换（重要）**：无 TF 卡模式下功放恢复与**原始板 `bread-compact-wifi-s3cam` 完全一致**的接线：DOUT=`39`、BCLK=`40`、LRCK=`41`（TF 版为 `3/14/46`）。若你的功放仍按 `3/14/46` 接线（TF 版），无 TF 卡版会无声——此时把功放三根线改回 `39/40/41` 即可。
+> **引脚自动切换（重要）**：无 TF 卡模式下功放恢复与**原始板 `bread-compact-wifi-s3cam` 完全一致**的接线：DOUT=`39`、BCLK=`40`、LRCK=`41`（TF 版为 `3/14/46`），背光也恢复 `38`（TF 版为 NC）。若你的功放仍按 `3/14/46` 接线（TF 版），无 TF 卡版会无声——此时把功放三根线改回 `39/40/41` 即可。
 
 ## 功能：TF 卡本地歌曲播放（AI 控制）
 
