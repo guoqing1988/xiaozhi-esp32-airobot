@@ -5,12 +5,11 @@
     python scripts/merge_bin.py [--build-dir build] [--output-dir packages]
 
 输出:
-    <项目根>/packages/merged-binary.bin (默认)
+    <项目根>/packages/<板名>[-no-tfcard]-merged.bin (默认)
 
 之后:
-    - ESP32 Flash Download Tool: 芯片选 ESP32-S3, 加载 merged-binary.bin,
-      起始地址填 0x0, 直接 Download
-    - 或命令行: esptool.py write_flash 0x0 packages/merged-binary.bin
+    - ESP32 Flash Download Tool: 芯片选 ESP32-S3, 加载该 bin, 起始地址填 0x0, Download
+    - 或命令行: esptool.py write_flash 0x0 packages/<板名>-merged.bin
 """
 
 import argparse
@@ -20,6 +19,40 @@ import re
 import shutil
 import subprocess
 import sys
+
+
+def get_board_info(build_dir: str) -> tuple[str | None, bool]:
+    """从 build/config/sdkconfig.json 读取板名与 TF 卡开关, 用于命名输出文件。
+    返回 (board_name 小写|None, tf_enabled)。
+    """
+    sc_json = os.path.join(build_dir, "config", "sdkconfig.json")
+    if os.path.exists(sc_json):
+        with open(sc_json, encoding="utf-8") as f:
+            cfg = json.load(f)
+        board = None
+        for key, val in cfg.items():
+            k = key.removeprefix("CONFIG_")  # 兼容带/不带前缀的格式
+            if k.startswith("BOARD_TYPE_") and val is True:
+                board = k[len("BOARD_TYPE_"):].lower().replace("_", "-")
+                break
+        tf_enabled = cfg.get("CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD",
+                             cfg.get("XIAOZHI_AIROBOT_ENABLE_TF_CARD", True))
+        return board, tf_enabled
+
+    # 回退: 项目根 sdkconfig 文本
+    root_sdk = os.path.join(os.path.dirname(build_dir), "sdkconfig")
+    if os.path.exists(root_sdk):
+        board = None
+        tf_enabled = True
+        with open(root_sdk, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("CONFIG_BOARD_TYPE_") and line.endswith("=y"):
+                    board = line[len("CONFIG_BOARD_TYPE_"):-2].lower()
+                if line.startswith("CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD="):
+                    tf_enabled = line.endswith("=y")
+        return board, tf_enabled
+    return None, True
 
 
 def find_esptool(idf_path: str | None) -> list[str] | None:
@@ -123,7 +156,15 @@ def main() -> int:
         return 1
 
     # 4) 合并
-    output = os.path.join(output_dir, "merged-binary.bin")
+    board, tf_enabled = get_board_info(build_dir)
+    if board:
+        base_name = f"{board}-merged.bin"
+        if not tf_enabled:
+            base_name = f"{board}-no-tfcard-merged.bin"
+        print(f"Board: {board}, TF card: {'on' if tf_enabled else 'off'}")
+    else:
+        base_name = "merged-binary.bin"  # 读不到板名时回退通用名
+    output = os.path.join(output_dir, base_name)
     esptool_cmd = find_esptool(idf_path)
     if not esptool_cmd:
         print("ERROR: esptool not found. Please run this script inside the ESP-IDF environment.")
