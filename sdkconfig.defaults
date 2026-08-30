@@ -81,3 +81,8 @@ CONFIG_LV_BUILD_DEMOS=n
 # FATFS API 输出 UTF-8 编码文件名（FAT 卷上的中文文件名是 UTF-16 存储，
 # 默认 ANSI/OEM(CP437) 不含中文会乱码；UTF-8 对所有板子/构建方式都是安全默认）
 CONFIG_FATFS_API_ENCODING_UTF_8=y
+
+# 中断看门狗：默认 300ms 太短——使用中任务临界区偶发访问 PSRAM（摄像头/音频/HTTP 缓冲）
+# 会长时间持 spinlock，Arduino 串口 RX 中断等锁超时被误判为死锁而复位。
+# 官方文档建议：临界区/中断访问 PSRAM 更耗时，可按需延长；1000ms 仍能兜住真死锁。
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=1000
