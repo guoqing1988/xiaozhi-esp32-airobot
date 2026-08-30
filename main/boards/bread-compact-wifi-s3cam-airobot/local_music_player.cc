@@ -359,6 +359,8 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
 
     // MP3 一帧(44.1kHz 立体声 16bit) = 4608B；若输出不足会按 needed_size 自动扩容
     std::vector<uint8_t> pcm_buf(8192);
+    // 立体声降混的输出缓冲：函数级复用，避免每帧堆分配（resize 不释放容量）
+    std::vector<int16_t> mono;
     int sample_rate = 0;
     int channels = 1;
     // 精确节流基准：从本曲开始累计注入样本数，用 sleep_until 对准绝对时间点，
@@ -442,7 +444,7 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
                             break;
                         }
                     }
-                    std::vector<int16_t> mono(pcm.size() / 2);
+                    mono.resize(pcm.size() / 2);
                     esp_ae_ch_cvt_process(ch_cvt, static_cast<uint32_t>(pcm.size() / 2),
                                           pcm.data(), mono.data());
                     pcm.swap(mono);

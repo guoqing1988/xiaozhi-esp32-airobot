@@ -158,7 +158,7 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     }
 
     // 接收缓冲放堆上，减小 httpd 任务栈压力（FATFS 写 SD 本身也需要栈）
-    char* buf = static_cast<char*>(malloc(2048));
+    char* buf = static_cast<char*>(malloc(4096));
     if (buf == nullptr) {
         fclose(f);
         ESP_LOGE(TAG, "Upload: malloc failed");
@@ -167,7 +167,7 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     }
     int total = 0;
     int ret;
-    while ((ret = httpd_req_recv(req, buf, 2048)) > 0) {
+    while ((ret = httpd_req_recv(req, buf, 4096)) > 0) {
         if (fwrite(buf, 1, static_cast<size_t>(ret), f) != static_cast<size_t>(ret)) {
             free(buf);
             fclose(f);
