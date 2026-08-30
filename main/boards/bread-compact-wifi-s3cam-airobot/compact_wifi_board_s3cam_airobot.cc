@@ -352,13 +352,21 @@ private:
                 return GetMusicPlayer()->PlaySong(props["name"].value<std::string>());
             });
         mcp.AddTool("self.music.list",
-            "List song names available on the TF card",
+            "List songs available on the TF card (returns up to 30 names plus total count, "
+            "enough for the AI to answer questions like \"how many songs\")",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
                 auto songs = GetMusicPlayer()->ListSongs();
                 std::string result;
-                for (const auto& s : songs) {
-                    result += s + "\n";
+                const size_t kMaxShown = 30;  // 截断: 避免几百首歌名撑爆 AI 上下文
+                for (size_t i = 0; i < songs.size() && i < kMaxShown; ++i) {
+                    result += songs[i] + "\n";
+                }
+                if (songs.size() > kMaxShown) {
+                    result += "...(共 " + std::to_string(songs.size()) + " 首, 仅显示前 " +
+                              std::to_string(kMaxShown) + " 首)";
+                } else {
+                    result += "共 " + std::to_string(songs.size()) + " 首";
                 }
                 return result;
             });
