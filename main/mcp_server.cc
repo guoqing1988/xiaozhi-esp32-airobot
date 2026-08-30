@@ -101,6 +101,7 @@ void McpServer::AddCommonTools() {
     if (camera) {
         AddTool("self.camera.take_photo",
             "Always remember you have a camera. If the user asks you to see something, use this tool to take a photo and then explain it.\n"
+            "If the upload/explain fails, DO NOT retry - just tell the user there is a network issue and to try again later.\n"
             "Args:\n"
             "  `question`: The question that you want to ask about the photo.\n"
             "Return:\n"

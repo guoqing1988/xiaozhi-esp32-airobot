@@ -252,6 +252,7 @@ std::string Esp32Camera::Explain(const std::string &question) {
 
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(3);
+    http->SetTimeout(15000);  // 上传+解释总超时 15s(默认 30s 太长, 失败会卡住设备流程)
     std::string boundary = "----ESP32_CAMERA_BOUNDARY";
 
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
