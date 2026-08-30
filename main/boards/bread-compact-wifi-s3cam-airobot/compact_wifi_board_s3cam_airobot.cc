@@ -10,8 +10,10 @@
 #include "led/single_led.h"
 #include "esp32_camera.h"
 #include "settings.h"
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 #include "local_music_player.h"
 #include "http_upload_server.h"
+#endif
 
 #include <esp_log.h>
 #include <esp_netif.h>
@@ -82,8 +84,10 @@ private:
     Button boot_button_;
     LcdDisplay* display_;
     Esp32Camera* camera_;
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
     std::unique_ptr<LocalMusicPlayer> music_player_;
     bool sd_card_mounted_ = false;
+#endif
     esp_timer_handle_t ip_timer_ = nullptr;  // 待机状态底部显示 IP 的定时器
     // Arduino 下位机双向状态(RX 解析任务写, MCP 工具读)
     std::atomic<bool> uno_busy_{false};       // Arduino 正在执行动作
@@ -216,6 +220,7 @@ private:
                 EnterWifiConfigMode();
                 return;
             }
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
             // 播放音乐时按按钮：先停歌并本地回到待命（不等服务器 tts:stop 响应，
             // 避免状态卡在“说话中”）；再按一次按钮即进入聆听对话
             if (music_player_ != nullptr && music_player_->IsPlaying()) {
@@ -225,6 +230,7 @@ private:
                 }
                 return;
             }
+#endif
             app.ToggleChatState();
         });
     }
@@ -272,6 +278,7 @@ private:
     }
 #endif  // CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
     // 唤醒词检测到：立即打断本地音乐播放（配合 Application 的板级回调钩子）
     void OnWakeWordDetected(const std::string& wake_word) override {
         if (music_player_ != nullptr && music_player_->IsPlaying()) {
@@ -279,6 +286,7 @@ private:
             music_player_->Stop();
         }
     }
+#endif
 
     // 取 WiFi STA 的 IPv4 地址（无则返回空串）
     static std::string GetLocalIp() {
@@ -304,9 +312,11 @@ private:
         if (app.GetDeviceState() != kDeviceStateIdle) {
             return;
         }
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
         if (music_player_ != nullptr && music_player_->IsPlaying()) {
             return;
         }
+#endif
         std::string ip = GetLocalIp();
         if (ip.empty()) {
             return;
