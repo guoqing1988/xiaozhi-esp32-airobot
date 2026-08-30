@@ -361,13 +361,13 @@ private:
 
     // 发送 UART 指令并返回描述性结果(成功/失败), 避免 AI 看到 true/false 无法确认执行结果而重复调用
     static std::string SendUartMessage(const char* command_str) {
-        // 指令防抖：AI 无执行确认机制时可能反复调用相同工具(实测会重复调用几十次)，
-        // 相同指令 2 秒内只发送一次，避免 Arduino 串口堆积重复指令。
-        // 不同指令(动作切换)不受影响，照常发送。
+        // 指令防抖：AI 无执行确认机制时可能反复调用相同工具(实测会重复调用几十次,
+        // 间隔约 700-900ms)。相同指令 1 秒内只发送一次，避免 Arduino 串口堆积重复指令。
+        // 不同指令(动作切换/组合编排)不受影响，照常发送。
         static char s_last_cmd[32] = {};
         static int64_t s_last_us = 0;
         int64_t now = esp_timer_get_time();
-        if (strcmp(s_last_cmd, command_str) == 0 && (now - s_last_us) < 2000000) {
+        if (strcmp(s_last_cmd, command_str) == 0 && (now - s_last_us) < 1000000) {
             return std::string("指令已发送(防抖): ") + command_str;  // 防抖丢弃, 视为成功
         }
         snprintf(s_last_cmd, sizeof(s_last_cmd), "%s", command_str);
