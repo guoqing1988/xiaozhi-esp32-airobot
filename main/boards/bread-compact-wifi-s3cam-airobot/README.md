@@ -233,6 +233,32 @@ idf.py build flash
 > idf.py -p /dev/cu.usbserial-XXXX flash monitor
 > ```
 
+### 📦 打包合并固件（Flash 下载工具直接烧录）
+
+把 `build/` 产物合并成**单个 bin 文件**，方便用 **ESP32 Flash Download Tool**（乐鑫串口下载工具）一键烧录，无需命令行烧录。
+
+**运行**（无需进入 IDF 环境，脚本自动定位 esptool）：
+
+```powershell
+python scripts\merge_bin.py
+```
+
+**输出**（项目根目录 `packages/` 下，文件名自动带板名 + 变体 + 日期）：
+
+```
+packages/bread-compact-wifi-s3cam-airobot-no-tfcard-merged-20260830.bin
+```
+
+- 板名/变体自动读取 `build/config/sdkconfig.json`：TF 卡版 → `<板名>-merged-<日期>.bin`；无 TF 卡版 → `<板名>-no-tfcard-merged-<日期>.bin`（`.bin` 后缀前的日期为打包当天）。
+- 合并内容：bootloader + 分区表 + ota_data + 资源 + 应用（与 `idf.py flash` 写入的内容完全一致）。
+
+**Flash 下载工具烧录步骤**：
+1. 芯片选 **ESP32-S3**；
+2. Load `packages/` 里的 bin，起始地址填 **`0x0`**；
+3. 选好 COM 口 → **START**（可直接用 USB 烧录）。
+
+> **注意**：每次 `idf.py build` 重新编译后，都要**重新运行一次打包命令**（包不会自动更新）；可选参数：`--build-dir`（构建目录）、`--output-dir`（输出目录）。
+
 或使用构建脚本（自动配置板子/屏幕，推荐）：
 
 ```bash
