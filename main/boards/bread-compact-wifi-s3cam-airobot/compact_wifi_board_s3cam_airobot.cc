@@ -375,7 +375,7 @@ private:
             "Search songs on the TF card by keyword (substring match, case-insensitive). "
             "Use when the user asks whether a specific song/artist exists, e.g. keyword=\"薛之谦\". "
             "Returns up to 30 matching names plus the match count.",
-            PropertyList({Property("keyword", kPropertyTypeString, "", 0, 0)}),
+            PropertyList({Property("keyword", kPropertyTypeString)}),
             [this](const PropertyList& props) -> ReturnValue {
                 std::string kw = props["keyword"].value<std::string>();
                 std::string lower_kw = kw;
