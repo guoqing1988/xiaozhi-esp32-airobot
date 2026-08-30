@@ -42,6 +42,8 @@ arduino-cli compile --upload -p COM5 --fqbn arduino:avr:uno \
   main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
 ```
 
+> 想看**编译中间过程**（库解析/编译命令/链接细节）加 `-v`：`arduino-cli compile -v --fqbn ...`；一键脚本 `build_arduino.bat` 已内置 `-v`。
+
 **方式三：分开执行（仅编译 / 仅烧录）**
 
 ```bash

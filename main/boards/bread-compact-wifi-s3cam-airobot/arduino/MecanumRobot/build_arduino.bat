@@ -21,7 +21,7 @@ if not defined CLI (
 
 rem 编译 (RX 缓冲 256B, 防 AI 长指令序列丢指令; 该宏必须在编译时传入)
 echo [编译中] ...
-"%CLI%" compile --fqbn arduino:avr:uno --build-property "compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" "%~dp0MecanumRobot.ino"
+"%CLI%" compile -v --fqbn arduino:avr:uno --build-property "compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" "%~dp0MecanumRobot.ino"
 if errorlevel 1 (
     echo [错误] 编译失败
     exit /b 1
@@ -30,7 +30,7 @@ if errorlevel 1 (
 rem 可选烧录
 if not "%~1"=="" (
     echo [烧录中] 端口 %~1 ...
-    "%CLI%" upload -p %~1 --fqbn arduino:avr:uno "%~dp0MecanumRobot.ino"
+    "%CLI%" upload -v -p %~1 --fqbn arduino:avr:uno "%~dp0MecanumRobot.ino"
     if errorlevel 1 (
         echo [错误] 烧录失败
         exit /b 1
