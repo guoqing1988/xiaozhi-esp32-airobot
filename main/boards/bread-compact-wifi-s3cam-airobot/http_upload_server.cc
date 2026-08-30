@@ -141,7 +141,6 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     char path[320];
     snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
 
-    ESP_LOGE(TAG, "Upload: receiving '%s' -> %s (overwrite=%d)", name, path, overwrite ? 1 : 0);
     if (!overwrite) {
         FILE* exist = fopen(path, "rb");
         if (exist != nullptr) {
@@ -168,8 +167,6 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     }
     int total = 0;
     int ret;
-    int next_log = 256 * 1024;  // 每 256KB 打印一次进度
-    int64_t start_us = esp_timer_get_time();
     while ((ret = httpd_req_recv(req, buf, 2048)) > 0) {
         if (fwrite(buf, 1, static_cast<size_t>(ret), f) != static_cast<size_t>(ret)) {
             free(buf);
@@ -180,10 +177,6 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
             return ESP_OK;  // 响应已通过 send_err 发送，返回 OK 避免 httpd 直接关闭 socket
         }
         total += ret;
-        if (total >= next_log) {
-            ESP_LOGE(TAG, "Upload: %s %d KB", name, total / 1024);
-            next_log += 256 * 1024;
-        }
     }
     free(buf);
     fclose(f);
@@ -195,8 +188,6 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
         return ESP_OK;  // 响应已通过 send_err 发送，返回 OK 避免 httpd 直接关闭 socket
     }
 
-    int64_t ms = (esp_timer_get_time() - start_us) / 1000;
-    ESP_LOGE(TAG, "Upload: done '%s' %d bytes in %lld ms", name, total, static_cast<long long>(ms));
     httpd_resp_sendstr(req, "OK");
     if (s_on_uploaded) {
         s_on_uploaded();  // 通知上层刷新歌曲列表缓存

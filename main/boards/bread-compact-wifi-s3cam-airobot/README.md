@@ -293,7 +293,7 @@ Select-String FATFS_API_ENCODING sdkconfig
 ### 实现说明
 - 本地播放复用项目官方的 `esp_audio_codec` 组件 MP3 **简单解码器**（`esp_audio_simple_dec`，自带 parser：自动跳过 ID3v2 标签、搜索帧同步、处理跨块边界）+ `ESP-Audio-Effects` 声道转换器（`esp_ae_ch_cvt`，立体声降混为单声道，匹配小智全链路 mono 输出）+ `AudioService` 播放链路，**无自定义解析逻辑**。
 - LRC 歌词为简单的 `[mm:ss.xx]` 文本格式，用 C++ 标准库字符串解析（约 60 行，无第三方库可用）；编码要求 UTF-8。
-- **播放中可被打断**：播放线程每帧检查设备状态，唤醒词/按钮/进入聆听（状态离开 Idle）会立即停止播放并清空音频队列，让 AI 正常接管（不会“失联”）。
+- **播放中可被打断**：唤醒词（板级回调钩子直接停歌）、按钮（先停歌再本地回待命，不依赖服务器响应）、状态机检测（Idle→非Idle）三重机制，随时让 AI 接管（不会“失联”）。播放期间设备状态**钉在“说话中”**（Speaking），屏幕明确显示正在播放；暂停时不钉，自然播完自动回待命。
 - 播放器源码位于本板目录：`local_music_player.h` / `local_music_player.cc`（由 CMake `file(GLOB)` 自动编译）。
 - `AudioService` 仅新增一个 `PushLocalPcm()` 注入接口（最小、纯新增）。
 
@@ -306,6 +306,13 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - **同名 .lrc 自动转 UTF-8** 一并输出；
 - 幂等：已转换的文件自动跳过，可重复运行。
 - 转码后可拷贝到 TF 卡，或通过 WiFi 网页上传（`http://<设备IP>/`）。
+
+### WiFi 网页上传与 IP 显示
+- **IP 显示**：待机（待命）状态下，屏幕底部会显示本机 IP（如 `192.168.31.74`），照着输入浏览器即可打开上传页；其他状态（说话中/聆听中等）自动隐藏。
+- **上传页**（`http://<设备IP>/`）：多选文件（支持 .mp3 / .lrc）、实时进度条、**同名覆盖开关**（默认勾选=覆盖；取消勾选=同名跳过，页面提示“同名已存在，跳过”）。
+- 上传成功回调会自动刷新歌曲列表，AI 立刻能查到新歌（无需重启）。
+- 上传/播放源码位于本板目录：`http_upload_server.h` / `http_upload_server.cc`（由 CMake `file(GLOB)` 自动编译）。
+- 日志说明：上传成功路径不打日志（避免刷屏），仅错误（缺参数/写卡失败/同名跳过等）和启动（`Upload server started`）打印；板子日志级别为 ERROR，见串口日志需保留。
 
 ## Arduino 下位机（Mecanum 机器人）
 

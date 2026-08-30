@@ -13,6 +13,8 @@
 #include "http_upload_server.h"
 
 #include <esp_log.h>
+#include <esp_netif.h>
+#include <esp_timer.h>
 #include <driver/i2c_master.h>
 #include <driver/sdmmc_host.h>
 #include <sdmmc_cmd.h>
@@ -77,6 +79,7 @@ private:
     Esp32Camera* camera_;
     std::unique_ptr<LocalMusicPlayer> music_player_;
     bool sd_card_mounted_ = false;
+    esp_timer_handle_t ip_timer_ = nullptr;  // 待机状态底部显示 IP 的定时器
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -230,6 +233,57 @@ private:
         if (music_player_ != nullptr && music_player_->IsPlaying()) {
             ESP_LOGI(TAG, "Wake word '%s' detected, stop local music", wake_word.c_str());
             music_player_->Stop();
+        }
+    }
+
+    // 取 WiFi STA 的 IPv4 地址（无则返回空串）
+    static std::string GetLocalIp() {
+        esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (netif == nullptr) {
+            return "";
+        }
+        esp_netif_ip_info_t ip = {};
+        if (esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.ip.addr == 0) {
+            return "";
+        }
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d.%d.%d.%d",
+                 (int)((ip.ip.addr >> 0) & 0xff), (int)((ip.ip.addr >> 8) & 0xff),
+                 (int)((ip.ip.addr >> 16) & 0xff), (int)((ip.ip.addr >> 24) & 0xff));
+        return buf;
+    }
+
+    // 待机(Idle)且未播放时，在底部字幕条显示本机 IP（供访问上传页）；
+    // 播放/对话时字幕条被歌词和聊天消息占用，不干预。
+    void UpdateIpDisplay() {
+        auto& app = Application::GetInstance();
+        if (app.GetDeviceState() != kDeviceStateIdle) {
+            return;
+        }
+        if (music_player_ != nullptr && music_player_->IsPlaying()) {
+            return;
+        }
+        std::string ip = GetLocalIp();
+        if (ip.empty()) {
+            return;
+        }
+        auto* display = GetDisplay();
+        if (display != nullptr) {
+            display->SetChatMessage("system", ip.c_str());
+        }
+    }
+
+    static void OnIpDisplayTimer(void* arg) {
+        static_cast<CompactWifiBoardS3CamAirobot*>(arg)->UpdateIpDisplay();
+    }
+
+    void InitializeIpDisplay() {
+        esp_timer_create_args_t args = {};
+        args.callback = OnIpDisplayTimer;
+        args.arg = this;
+        args.name = "ip_display";
+        if (esp_timer_create(&args, &ip_timer_) == ESP_OK) {
+            esp_timer_start_periodic(ip_timer_, 1000000);  // 每秒刷新
         }
     }
 
@@ -414,6 +468,7 @@ public:
         InitializeCamera();
         InitializeSDCard();
         InitializeUploadServer();
+        InitializeIpDisplay();
         InitializeMusicTools();
         InitializeEchoUart();
         InitializeUnoTools();
