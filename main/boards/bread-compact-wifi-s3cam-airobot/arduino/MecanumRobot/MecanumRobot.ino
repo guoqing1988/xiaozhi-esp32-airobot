@@ -16,6 +16,10 @@
 //   @servo-{degree}        设置舵机1 角度(0-180)
 //   @speed-{value}         设置电机速度(70-255)
 //   @tj-yaotou / @tj-shandian / @tj-zhuanquan / @tj-sxzw / @tj-diaotou   特技
+//   @line-start / @line-stop   巡线模式(沿地面黑线自动行驶)开始/停止
+//
+// 【双向回执】(Arduino -> ESP32, 供 self.uno.get_status 查询)
+//   @busy {动作} / @done {动作}   耗时动作开始/完成(go-*, tj-*, line-follow)
 //
 // 【PS2 手柄键位】
 //   十字键: 移动      PINK/RED: 左右转      GREEN/BLUE(单击): 减速/加速
@@ -41,6 +45,20 @@ Emakefun_DCMotor *motors[4] = {            // 麦克纳姆轮电机 [前左,前�
 };
 Emakefun_Servo *servo1 = mMotorDriver.getServo(1);   // 舵机1 (头部)
 Emakefun_Servo *servo2 = mMotorDriver.getServo(2);   // 舵机2
+
+// ---------------- 巡线传感器(4路) ----------------
+// 接线: S4->D2, S3->D3, S2->D4, S1->D7 (S1..S4 从左到右)
+#define LINE_S1  7
+#define LINE_S2  4
+#define LINE_S3  3
+#define LINE_S4  2
+// 电平方向: 默认黑线=HIGH(反射型模块常见); 若反向(黑线=LOW)改为 false
+#define LINE_ACTIVE  true
+// 巡线参数
+#define LINE_BASE_SPEED  170   // 巡线基础速度(低于全局 speed 默认200, 更稳)
+#define LINE_KP          60    // 差速比例系数(越大转向越猛)
+#define LINE_LOST_MS     300   // 连续丢线超过此毫秒数 -> 判定巡线结束
+#define LINE_MAX_MS      120000 // 巡线总时长上限(2分钟, 防死循环)
 
 // ---------------- 全局状态 ----------------
 uint8_t motorSpeed[4] = {200, 200, 200, 200};   // 4 个电机速度
@@ -183,6 +201,93 @@ void updateSpeed(int delta) {
         v = 70;
     }
     setSpeed(v);
+}
+
+// ==================================================================
+// 巡线 (4路循迹传感器 + 比例差速控制)
+// ==================================================================
+
+// 巡线状态
+bool line_following_ = false;      // 巡线模式开关
+unsigned long line_start_ms_ = 0;  // 巡线开始时间
+unsigned long line_lost_since_ = 0; // 丢线起始时刻(0=未丢线)
+
+// 读取 4 路传感器并计算线位置(-2..+2, 负数偏左, 正数偏右)。
+// 返回 99 = 全灭(丢线/线断), 100 = 全亮(十字路口/粗线, 按直行处理)。
+// 若传感器方向反了(S1 在右), 把返回值取反即可。
+int readLinePosition() {
+    bool s1 = digitalRead(LINE_S1) == (LINE_ACTIVE ? HIGH : LOW);
+    bool s2 = digitalRead(LINE_S2) == (LINE_ACTIVE ? HIGH : LOW);
+    bool s3 = digitalRead(LINE_S3) == (LINE_ACTIVE ? HIGH : LOW);
+    bool s4 = digitalRead(LINE_S4) == (LINE_ACTIVE ? HIGH : LOW);
+    int on = s1 + s2 + s3 + s4;
+    if (on == 0) return 99;   // 全灭: 丢线
+    if (on == 4) return 100;  // 全亮: 路口/粗线, 按直行
+    // 加权平均: 权重 S1=-1.5, S2=-0.5, S3=+0.5, S4=+1.5
+    int sum = (s1 ? -3 : 0) + (s2 ? -1 : 0) + (s3 ? 1 : 0) + (s4 ? 3 : 0);
+    return sum / on;   // -2..+2
+}
+
+// 巡线一步(非阻塞): 根据线位置差速调整左右轮, 保持沿黑线前进。
+// 返回 true=仍在巡线; false=巡线结束(丢线超时/超时上限)。
+bool lineFollowOnce() {
+    int pos = readLinePosition();
+    unsigned long now = millis();
+
+    if (pos == 99) {  // 丢线
+        if (line_lost_since_ == 0) line_lost_since_ = now;
+        if (now - line_lost_since_ > LINE_LOST_MS) {
+            stopMove(0);            // 停车
+            return false;           // 巡线结束
+        }
+        // 丢线初期: 保持直行一小段, 期望重新压线
+        moveForward(0);
+        return true;
+    }
+    line_lost_since_ = 0;
+
+    if (now - line_start_ms_ > LINE_MAX_MS) {  // 超时保护
+        stopMove(0);
+        return false;
+    }
+
+    if (pos == 100) {  // 路口: 直行
+        moveForward(0);
+        return true;
+    }
+
+    // 比例差速: 左轮 = base - Kp*pos(偏左时 pos<0 -> 左轮加速右轮减速 -> 向右修正)
+    int left = LINE_BASE_SPEED - LINE_KP * pos;
+    int right = LINE_BASE_SPEED + LINE_KP * pos;
+    left = constrain(left, 60, 255);
+    right = constrain(right, 60, 255);
+    motorSpeed[0] = left;   // 前左
+    motorSpeed[2] = left;   // 后左
+    motorSpeed[1] = right;  // 前右
+    motorSpeed[3] = right;  // 后右
+    // 保持前进方向(不 delay)
+    motorRun(0, "F");
+    motorRun(1, "F");
+    motorRun(2, "B");
+    motorRun(3, "B");
+    return true;
+}
+
+// 进入/退出巡线模式(由 @line-start / @line-stop 触发)
+void setLineFollow(bool enable) {
+    if (enable == line_following_) return;
+    line_following_ = enable;
+    if (enable) {
+        line_start_ms_ = millis();
+        line_lost_since_ = 0;
+        setSpeed(LINE_BASE_SPEED);
+        Serial.setTimeout(20);             // 巡线中短超时, 避免 checkLineStopCommand 阻塞
+        Serial.println("@busy line-follow");   // 上报巡线开始
+    } else {
+        stopMove(0);
+        Serial.setTimeout(1000);           // 恢复默认超时
+        Serial.println("@done line-follow");   // 上报巡线结束
+    }
 }
 
 // ==================================================================
@@ -386,6 +491,14 @@ void executeCommand() {
         } else if (strncmp(p, "speed-", 6) == 0) {
             // 格式: @speed-{value}
             setSpeed(atoi(p + 6));
+
+        } else if (strcmp(p, "line-start") == 0) {
+            // 进入巡线模式(沿地面黑线自动行驶)
+            setLineFollow(true);
+
+        } else if (strcmp(p, "line-stop") == 0) {
+            // 退出巡线模式(急停)
+            setLineFollow(false);
         }
     }
 }
@@ -453,6 +566,10 @@ void setup() {
     servo1->writeServo(servo1Zero, 10);
     servo2->writeServo(servo2Angle, 10);
     pinMode(A0, OUTPUT);                // 蜂鸣器
+    pinMode(LINE_S1, INPUT);            // 巡线传感器 S1->D7
+    pinMode(LINE_S2, INPUT);            // 巡线传感器 S2->D4
+    pinMode(LINE_S3, INPUT);            // 巡线传感器 S3->D3
+    pinMode(LINE_S4, INPUT);            // 巡线传感器 S4->D2
 }
 
 // ==================================================================
@@ -461,8 +578,33 @@ void setup() {
 
 // 主循环: 依次处理上位机命令和手柄控制。
 void loop() {
-    if (started) {
+    if (!started) return;
+    if (line_following_) {
+        // 巡线模式: 专注巡线, 非阻塞检查 @line-stop 急停, 手柄保留作急停
+        if (!lineFollowOnce()) {
+            setLineFollow(false);   // 丢线超时/超时上限 -> 自动退出并回传 @done line-follow
+        }
+        checkLineStopCommand();
+        handleGamepad();
+    } else {
         executeCommand();    // 解析上位机命令
         handleGamepad();     // 解析手柄
+    }
+}
+
+// 巡线模式下非阻塞读取串口, 只响应 @line-stop(急停), 其他命令忽略。
+void checkLineStopCommand() {
+    while (Serial.available()) {
+        static char line[64];
+        size_t len = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
+        if (len == 0) continue;
+        line[len] = '\0';
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '@') continue;
+        p++;
+        if (strcmp(p, "line-stop") == 0) {
+            setLineFollow(false);
+        }
     }
 }

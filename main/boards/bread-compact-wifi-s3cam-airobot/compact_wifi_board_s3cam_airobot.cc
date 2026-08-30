@@ -521,6 +521,16 @@ private:
                 }
                 return std::string("idle");
             });
+
+        mcp_server.AddTool(
+            "self.uno.line_follow",
+            "巡线模式控制：让机器人沿地面黑线自动行驶。action: 1=开始巡线, 0=停止巡线。"
+            "调用一次即开始/停止，不要重复调用；巡线结束(丢线超时/超时上限)会自动停止。",
+            PropertyList({Property("action", kPropertyTypeInteger, 1)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int action = properties["action"].value<int>();
+                return SendUartMessage(action == 1 ? "line-start" : "line-stop");
+            });
     }
 
     // 调试工具: 临时切换系统日志级别(避免 GPIO43 日志污染 Arduino)

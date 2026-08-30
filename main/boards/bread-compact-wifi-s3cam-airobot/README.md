@@ -346,8 +346,18 @@ main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot/MecanumRobot.i
 | `@servo-{degree}` | 设置舵机1 角度(0-180) |
 | `@speed-{value}` | 设置电机速度(70-255) |
 | `@tj-yaotou` / `@tj-shandian` / `@tj-zhuanquan` / `@tj-sxzw` / `@tj-diaotou` | 特技动作 |
+| `@line-start` / `@line-stop` | 巡线模式（沿地面黑线自动行驶）开始/停止 |
 
-**双向回执（Arduino → ESP32）**：耗时动作（`go-*` / `tj-*`）开始执行时回传 `@busy`，执行完毕回传 `@done`。ESP32 的 UART0 RX 解析任务维护状态，AI 可通过 `self.uno.get_status` 查询（返回 `moving` / `idle (last: ...)`）。
+**双向回执（Arduino → ESP32）**：耗时动作（`go-*` / `tj-*` / 巡线）开始执行时回传 `@busy`，执行完毕回传 `@done`。ESP32 的 UART0 RX 解析任务维护状态，AI 可通过 `self.uno.get_status` 查询（返回 `moving` / `idle (last: ...)`）。
+
+### 巡线（4 路循迹传感器）
+- **接线**：传感器 `S1→D7, S2→D4, S3→D3, S4→D2`（`S1..S4` 从左到右），`GND→GND`，`5V→5V`（VCC）。
+- **原理**：4 路数字输出读线位置（加权 -1.5/-0.5/+0.5/+1.5）→ 比例差速（`LINE_KP`）控制左右轮保持沿黑线前进。
+- **AI 指令**：说「开始巡线 / 沿着线走」→ `self.uno.line_follow(1)`；「停止巡线」→ `(0)`。
+- **结束条件**：连续丢线超过 `LINE_LOST_MS`（默认 300ms，线断/到终点）或总时长超 `LINE_MAX_MS`（默认 2 分钟）→ 自动停车并回传 `@done line-follow`，AI 会汇报「巡线结束」。
+- **可调参数**（文件顶部宏）：`LINE_BASE_SPEED` 基础速度、`LINE_KP` 转向强度、`LINE_LOST_MS` 丢线判定、`LINE_MAX_MS` 时长上限。
+- **若黑线电平反向**（黑线=LOW）：把 `LINE_ACTIVE` 改为 `false`；**若传感器左右朝向装反**：把 `readLinePosition()` 返回值取反。
+- **巡线中**：`@line-stop` 可随时急停（非阻塞检测）；PS2 手柄仍可用作干预。
 
 ### PS2 手柄键位
 | 按键 | 功能 |
