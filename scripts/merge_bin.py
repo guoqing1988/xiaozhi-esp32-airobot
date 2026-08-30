@@ -5,7 +5,7 @@
     python scripts/merge_bin.py [--build-dir build] [--output-dir packages]
 
 输出:
-    <项目根>/packages/<板名>[-no-tfcard]-merged.bin (默认)
+    <项目根>/packages/<板名>[-no-tfcard]-merged-<YYYYMMDD>.bin (默认)
 
 之后:
     - ESP32 Flash Download Tool: 芯片选 ESP32-S3, 加载该 bin, 起始地址填 0x0, Download
@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 
 def get_board_info(build_dir: str) -> tuple[str | None, bool]:
@@ -157,13 +158,14 @@ def main() -> int:
 
     # 4) 合并
     board, tf_enabled = get_board_info(build_dir)
+    date_suffix = time.strftime("%Y%m%d")
     if board:
-        base_name = f"{board}-merged.bin"
+        base_name = f"{board}-merged-{date_suffix}.bin"
         if not tf_enabled:
-            base_name = f"{board}-no-tfcard-merged.bin"
+            base_name = f"{board}-no-tfcard-merged-{date_suffix}.bin"
         print(f"Board: {board}, TF card: {'on' if tf_enabled else 'off'}")
     else:
-        base_name = "merged-binary.bin"  # 读不到板名时回退通用名
+        base_name = f"merged-binary-{date_suffix}.bin"  # 读不到板名时回退通用名
     output = os.path.join(output_dir, base_name)
     esptool_cmd = find_esptool(idf_path)
     if not esptool_cmd:
