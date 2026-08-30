@@ -184,7 +184,8 @@ std::vector<std::string> LocalMusicPlayer::ListSongs() const {
 }
 
 std::string LocalMusicPlayer::PickNextSong() {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    // 注意: 调用方(PlayTask)必须已持有 state_mutex_ 才能调用本函数,
+    // 此处不再加锁 —— std::mutex 非递归, 重复加同一把锁会死锁
     if (queue_pos_ < play_queue_.size()) {
         return play_queue_[queue_pos_++];
     }
@@ -214,6 +215,7 @@ std::string LocalMusicPlayer::FindSong(const std::string& name) {
 bool LocalMusicPlayer::PlayRandom() {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        std::lock_guard<std::mutex> songs_lock(songs_mutex_);
         // 随机顺序: 洗牌全部歌曲作为播放队列, 播完队列自动停止
         play_queue_ = songs_;
         std::shuffle(play_queue_.begin(), play_queue_.end(),
@@ -242,6 +244,7 @@ bool LocalMusicPlayer::PlaySong(const std::string& name) {
     }
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        std::lock_guard<std::mutex> songs_lock(songs_mutex_);
         pending_song_ = found;
         // 顺序播放: 队列 = 全部歌曲(字典序), 从指定歌曲的下一首开始播, 播完队列停止
         play_queue_ = songs_;
