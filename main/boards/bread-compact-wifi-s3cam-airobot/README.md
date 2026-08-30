@@ -447,15 +447,20 @@ cd ~/Documents/Arduino/libraries
 git clone <Emakefun_MotorDriver仓库URL>
 git clone <NewTone仓库URL>
 git clone <PS2X_lib仓库URL>
+#    (Emakefun 库取仓库内 arduino_lib/ 目录, PS2X_lib 取仓库内 PS2X_lib/ 目录)
 
 # 2) 编译(Arduino UNO)  —— 打印编译进度、依赖库列表、Flash/RAM 占用
-arduino-cli compile --fqbn arduino:avr:uno main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
+arduino-cli compile --fqbn arduino:avr:uno \
+  --build-property "compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" \
+  main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
 #     查看详细日志(编译命令/警告): 加 -v
 #     保留日志: 末尾加 2>&1 | tee build.log
 
 # 3) 烧录(示例端口, 按实际修改)
 arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
 ```
+> **⚠️ RX 缓冲必须传宏**：`arduino:avr 1.8.8+` 的 HardwareSerial **没有** `setRxBufferSize` API，改用编译期宏 `SERIAL_RX_BUFFER_SIZE`（默认 64B≈4-5 条指令，AI 长指令序列会溢出丢指令）。**漏掉 `--build-property` 编译出的固件 RX 缓冲只有 64B**。
+> **Arduino IDE 用户**：在核心目录 `D:\Arduino15\packages\arduino\hardware\avr\1.8.8\` 下新建 `platform.local.txt`，内容一行 `compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256`，IDE 编译即自动带上。
 
 **方式二：Arduino IDE**
 1. 用 Arduino IDE 打开 `MecanumRobot.ino`。
@@ -469,7 +474,7 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 
 ### 指令执行模型与串口缓冲（重要）
 - **顺序执行**：Arduino 读一条执行一条（`runMotors` 内 `delay` 阻塞），先到先执行，**不会乱序**。
-- **RX 缓冲**：UNO 默认 HardwareSerial 接收缓冲仅 **64 字节（≈4-5 条指令）**。动作阻塞执行期间（如 `go-forward-15` 执行 1.5 秒）不读串口，后续指令积压在缓冲里，超出部分**溢出丢弃**（表现为“后面的指令跳过了”）。已改为 `Serial.setRxBufferSize(256)`（≈17 条），正常 AI 编排序列（3-10 条）不会丢；若实测超长序列仍丢，可再加大或让 ESP32 读 Arduino 回执（`Serial.println("F")` 等已存在）判断动作完成再发下一条。
+- **RX 缓冲**：UNO 默认 HardwareSerial 接收缓冲仅 **64 字节（≈4-5 条指令）**。动作阻塞执行期间（如 `go-forward-15` 执行 1.5 秒）不读串口，后续指令积压在缓冲里，超出部分**溢出丢弃**（表现为“后面的指令跳过了”）。已通过编译期宏 `SERIAL_RX_BUFFER_SIZE=256`（≈17 条）加大——**注意该宏须在编译时传入**（见上文 arduino-cli `--build-property` / IDE `platform.local.txt`），.ino 内无法设置（`arduino:avr 1.8.8+` 无 `setRxBufferSize` API）；正常 AI 编排序列（3-10 条）不会丢；若实测超长序列仍丢，可再加大或让 ESP32 读 Arduino 回执（`Serial.println("F")` 等已存在）判断动作完成再发下一条。
 
 ### 踩坑：AI 重复调用 uno 工具（已修复）
 **现象**：说一次“前进”，ESP32 串口发出几十次 `@go-forward-10`，机器人反复动。

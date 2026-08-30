@@ -26,6 +26,13 @@
 //   L1/R1/L2/R2: 斜移    SELECT/START: 舵机微调
 // ==================================================================
 
+// 串口 RX 缓冲说明(重要): UNO 默认 64B≈4-5 条指令, AI 长指令序列会溢出丢指令。
+// arduino:avr 1.8.8+ 的 HardwareSerial 用编译期宏 SERIAL_RX_BUFFER_SIZE 控制缓冲,
+// 没有 setRxBufferSize API。因此 .ino 里无法设置, 需在编译时传入宏(见 README):
+//   arduino-cli compile --fqbn arduino:avr:uno --build-property "compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" ...
+// Arduino IDE 用户: 在核心目录建 platform.local.txt 写入
+//   compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256
+
 #include <Emakefun_MotorDriver.h>
 #include <NewTone.h>
 #include <PS2X_lib.h>
@@ -544,8 +551,8 @@ void aiControl() {
 
 // 初始化串口、电机驱动、速度/舵机角度、PS2 手柄和蜂鸣器。
 void setup() {
-    Serial.setRxBufferSize(256);        // 加大 RX 缓冲(默认 64B≈4-5 条指令, 长序列会溢出丢指令)
     Serial.begin(9600);                 // 先以 9600 启动(米思齐遗留)
+    // 注: RX 缓冲由文件顶部宏 SERIAL_RX_BUFFER_SIZE=256 控制(arduino:avr 1.8.8+ 无 setRxBufferSize API)
 
     mMotorDriver.begin(50);             // 电机驱动板初始化, PWM 频率 50Hz
 
