@@ -25,15 +25,36 @@ Arduino 下位机固件，由上位机 ESP32（本板 `bread-compact-wifi-s3cam-
 
 ## 编译 & 烧录（arduino-cli）
 
-```bash
-# 编译（Arduino UNO）
-arduino-cli compile --fqbn arduino:avr:uno <本目录>/MecanumRobot
+**方式一：一键脚本（推荐，Windows）**
 
-# 烧录（端口按实际修改）
-arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno <本目录>/MecanumRobot
+sketch 目录下双击或命令行运行：
+
+```bat
+build_arduino.bat              :: 仅编译
+build_arduino.bat COM5         :: 编译 + 烧录到 COM5
+```
+
+**方式二：arduino-cli 一条命令（编译 + 烧录）**
+
+```bash
+# Windows 端口用 COMx, Linux/macOS 用 /dev/cu.usbmodemXXXX
+arduino-cli compile --upload -p COM5 --fqbn arduino:avr:uno \
+  main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
+```
+
+**方式三：分开执行（仅编译 / 仅烧录）**
+
+```bash
+# 仅编译（Arduino UNO）
+arduino-cli compile --fqbn arduino:avr:uno main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
+
+# 仅烧录（端口按实际修改）
+arduino-cli upload -p COM5 --fqbn arduino:avr:uno main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
 ```
 
 或用 Arduino IDE：打开 `MecanumRobot.ino` → 库管理器安装 3 个库 → 选 `Arduino UNO` 板和端口 → 编译烧录。
+
+> **RX 缓冲（无需额外参数）**：`arduino:avr 1.8.8+` 无 `setRxBufferSize` API，RX 缓冲由编译期宏 `SERIAL_RX_BUFFER_SIZE` 控制（默认 64B≈4-5 条指令，AI 长指令序列会溢出丢指令）。本机核心目录已建 `platform.local.txt`（`compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256`），上述命令自动生效。**换电脑/重装核心后**需重建该文件，或编译时加 `--build-property "compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256"`。
 
 ## 上位机串口指令（ESP32 下发，均以 `@` 开头）
 | 指令 | 效果 |
