@@ -193,6 +193,9 @@ std::string LocalMusicPlayer::PickNextSong() {
 }
 
 std::string LocalMusicPlayer::FindSong(const std::string& name) {
+    if (name.empty()) {
+        return "";  // 空名不匹配任何歌(否则 find("") 会命中第一首)
+    }
     std::lock_guard<std::mutex> lock(songs_mutex_);
     for (const auto& s : songs_) {
         if (s == name || s.find(name) != std::string::npos) {
@@ -236,11 +239,16 @@ bool LocalMusicPlayer::PlayRandom() {
     return true;
 }
 
-bool LocalMusicPlayer::PlaySong(const std::string& name) {
+std::string LocalMusicPlayer::PlaySong(const std::string& name) {
+    if (name.empty()) {
+        return "请提供歌曲名";
+    }
     std::string found = FindSong(name);
     if (found.empty()) {
         ESP_LOGW(TAG, "Song not found: %s", name.c_str());
-        return false;
+        // 返回描述性文本(而非 false), 让 AI 明确知道未找到并引导用户,
+        // 避免 AI 反复瞎猜歌名重试(实测: 模糊歌名"黄玲"vs"黄龄"会卡在重试)
+        return "未找到歌曲 \"" + name + "\", 请确认歌名或让用户提供准确名称";
     }
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -256,7 +264,7 @@ bool LocalMusicPlayer::PlaySong(const std::string& name) {
         }
     }
     if (playing_.load()) {
-        return true;  // 正在播放，PlayTask 下一轮会处理 pending_song_
+        return "正在播放, 已切到: " + found;  // 播放中换歌
     }
     playing_ = true;
     paused_ = false;
@@ -265,7 +273,7 @@ bool LocalMusicPlayer::PlaySong(const std::string& name) {
         play_thread_.join();
     }
     play_thread_ = CreatePlayThread(&LocalMusicPlayer::PlayTask, this);
-    return true;
+    return "已开始播放: " + found;
 }
 
 void LocalMusicPlayer::Pause() {

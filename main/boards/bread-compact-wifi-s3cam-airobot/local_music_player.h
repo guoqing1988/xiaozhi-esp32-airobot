@@ -24,7 +24,7 @@ public:
 
     // ---- MCP 工具回调（由 Board 注册到 McpServer）----
     bool PlayRandom();
-    bool PlaySong(const std::string& name);
+    std::string PlaySong(const std::string& name);  // 返回描述性结果(已开始播放/未找到)
     void Pause();
     void Resume();
     void Stop();
