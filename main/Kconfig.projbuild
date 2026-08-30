@@ -1127,3 +1127,12 @@ menu "TAIJIPAI_S3_CONFIG"
 endmenu
 
 endmenu
+
+menu "TF Card Features"
+config XIAOZHI_AIROBOT_ENABLE_TF_CARD
+    bool "Enable TF card features (local music / web upload) for bread-compact-wifi-s3cam-airobot"
+    default y
+    help
+        面包板 compact wifi s3cam airobot 板：TF 卡本地音乐播放与网页上传功能开关。
+        关闭后编译出不依赖 TF 卡的版本（原始接线，无音乐/上传功能）。
+endmenu

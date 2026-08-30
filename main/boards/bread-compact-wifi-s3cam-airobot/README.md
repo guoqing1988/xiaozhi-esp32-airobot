@@ -263,6 +263,36 @@ Select-String FATFS_API_ENCODING sdkconfig
 # 应看到 CONFIG_FATFS_API_ENCODING_UTF_8=y
 ```
 
+### 🔧 无 TF 卡模式（原始接线，砍掉音乐/上传功能）
+
+板子支持编译成**不依赖 TF 卡**的版本：接线完全不变，只是不挂载 SD 卡、不提供本地音乐播放与网页上传（`self.music.*` 工具、歌词、上传页均无）。适合没插卡或不需要本地音乐的场景。
+
+开关：`CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD`（默认 `y`，开启全部 TF 卡功能）。
+
+**方式一：`idf.py menuconfig`（适合直接 build 的用户，推荐）**
+
+```bash
+idf.py menuconfig
+```
+
+进入菜单：
+
+```
+TF Card Features
+  └─ [*] Enable TF card features (local music / web upload) for bread-compact-wifi-s3cam-airobot
+```
+
+- **取消勾选**（`[ ]`）→ 保存退出 → `idf.py build` = 无 TF 卡版；
+- **勾选**（`[*]`）→ 保存退出 → `idf.py build` = 完整版。
+
+**方式二：`scripts/build.py` 变体（给 CI/发布脚本用）**
+
+```bash
+python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot-no-tfcard
+```
+
+> 无 TF 卡版保留：AI 对话、摄像头（拍照/翻转）、屏幕、按钮、唤醒词、Arduino 双向通信、IP 显示；仅跳过 SD 卡挂载、音乐播放、网页上传。
+
 ## 功能：TF 卡本地歌曲播放（AI 控制）
 
 本板在面包板基础上新增「TF 卡本地歌曲播放」能力，让 AI 语音助手直接播放 TF 卡上的本地音乐（MP3），替代官方云端曲库中数量有限的歌曲。

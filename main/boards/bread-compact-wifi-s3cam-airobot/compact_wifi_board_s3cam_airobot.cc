@@ -637,10 +637,12 @@ public:
         InitializeButtons();
         InitializeCamera();
         ApplyCameraFlip();              // 应用 NVS 保存的摄像头翻转设置
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
         InitializeSDCard();
         InitializeUploadServer();
-        InitializeIpDisplay();
         InitializeMusicTools();
+#endif
+        InitializeIpDisplay();
         InitializeEchoUart();
         InitializeUnoTools();
         InitializeCameraTools();
