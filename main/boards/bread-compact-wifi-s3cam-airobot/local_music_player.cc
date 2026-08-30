@@ -402,20 +402,28 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
         raw.frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE;
 
         // 本块输入可能产出 0..N 帧 PCM，循环处理直到消费完或 eos flush 完毕
+        int stall = 0;  // 连续无进展计数(防御解码状态异常死循环)
         while (true) {
             esp_audio_simple_dec_out_t frame = {};
             frame.buffer = pcm_buf.data();
             frame.len = static_cast<uint32_t>(pcm_buf.size());
 
             auto ret = esp_audio_simple_dec_process(decoder, &raw, &frame);
-            if (ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH && frame.needed_size > pcm_buf.size()) {
-                pcm_buf.resize(frame.needed_size);
-                continue;  // 扩容后重试，raw 未消费数据保留
+            if (ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+                if (frame.needed_size > pcm_buf.size()) {
+                    pcm_buf.resize(frame.needed_size);
+                    continue;  // 扩容后重试，raw 未消费数据保留
+                }
+                // 缓冲已够大仍报 not_enough：解码状态异常，放弃本块避免死循环卡死
+                ESP_LOGW(TAG, "Decoder BUFF_NOT_ENOUGH size=%u need=%u, skip block",
+                         (unsigned)pcm_buf.size(), (unsigned)frame.needed_size);
+                break;
             }
             if (ret != ESP_AUDIO_ERR_OK) {
                 break;  // 解码错误：放弃本块输入（parser 已跳过 ID3/垃圾数据）
             }
             if (frame.decoded_size > 0) {
+                stall = 0;
                 if (sample_rate == 0) {
                     esp_audio_simple_dec_info_t info = {};
                     if (esp_audio_simple_dec_get_info(decoder, &info) == ESP_AUDIO_ERR_OK) {
@@ -481,6 +489,11 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
             if (raw.consumed > 0) {
                 raw.buffer += raw.consumed;
                 raw.len -= raw.consumed;
+                stall = 0;
+            } else if (frame.decoded_size == 0 && ++stall > 50) {
+                // 连续 50 次无任何进展(不消费输入、不产出数据)：状态机异常，放弃本块
+                ESP_LOGW(TAG, "Decoder stalled, skip block");
+                break;
             }
             if (raw.consumed == 0 && frame.decoded_size == 0) {
                 break;  // 无进展：eos flush 完毕或等待更多输入
