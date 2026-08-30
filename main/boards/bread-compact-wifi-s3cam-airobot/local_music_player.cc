@@ -390,7 +390,9 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
         // 播放期间保持“说话中”(Speaking)状态：屏幕明确显示设备在播放，
         // 唤醒打断走 xiaozhi 标准的 Speaking 分支(AbortSpeaking)。
         // 服务器 tts:stop 会把状态切回 Listening，这里每帧钉回 Speaking。
-        if (state != kDeviceStateSpeaking) {
+        // 但状态已到 Idle(会话结束/goodbye)时不再钉回, 避免状态卡在说话中;
+        // 此时歌曲继续播, 状态保持待命, 播完由 PlayTask 末尾逻辑处理。
+        if (state != kDeviceStateSpeaking && state != kDeviceStateIdle) {
             Application::GetInstance().SetDeviceState(kDeviceStateSpeaking);
         }
 
