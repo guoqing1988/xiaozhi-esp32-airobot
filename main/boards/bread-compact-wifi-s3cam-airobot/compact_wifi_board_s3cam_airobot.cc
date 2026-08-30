@@ -229,6 +229,7 @@ private:
         });
     }
 
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
     void InitializeSDCard() {
         ESP_LOGI(TAG, "Initializing SD card");
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
@@ -269,6 +270,7 @@ private:
         // 上传成功回调：刷新歌曲列表缓存，AI 立刻能查到新歌(无需重启)
         StartUploadServer([this]() { GetMusicPlayer()->ScanSongs(); });
     }
+#endif  // CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 
     // 唤醒词检测到：立即打断本地音乐播放（配合 Application 的板级回调钩子）
     void OnWakeWordDetected(const std::string& wake_word) override {
@@ -329,6 +331,7 @@ private:
         }
     }
 
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
     LocalMusicPlayer* GetMusicPlayer() {
         if (music_player_ == nullptr) {
             music_player_ = std::make_unique<LocalMusicPlayer>(Application::GetInstance().GetAudioService());
@@ -434,6 +437,7 @@ private:
                 return true;
             });
     }
+#endif  // CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 
     void InitializeEchoUart() {
         uart_config_t uart_config = {
