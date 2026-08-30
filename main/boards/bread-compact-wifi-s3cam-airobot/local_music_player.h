@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "audio_service.h"
+#include "device_state.h"
 
 // 本地 TF 卡音乐播放器。
 // 负责扫描 /sdcard/music 下的 MP3，并通过 AudioService 的本地播放接口
@@ -48,6 +49,10 @@ private:
     std::string pending_song_;                    // 指定要播的歌曲
     std::mutex state_mutex_;
     std::thread play_thread_;
+
+    // 打断检测：记录上次检查的设备状态，仅当“Idle -> 非 Idle”转换(唤醒词/按钮触发交互)
+    // 时打断本地播放。AI 命令启动播放时状态为 Speaking/Listening，保持播放不打断。
+    DeviceState interaction_state_ = kDeviceStateIdle;
 };
 
 #endif // LOCAL_MUSIC_PLAYER_H

@@ -125,7 +125,74 @@
 
 ## 编译配置命令
 
-**① 加载 ESP-IDF v6.0.2 环境：**
+### 在 Windows 11 上安装 ESP-IDF v6.0.2（备查）
+
+以下是在 **Windows 11 + cmd** 上安装 v6.0.2 的完整流程，与 v5.5 共存于 `D:\Espressif`，互不覆盖。
+
+> **前置**：安装 Python（`python` 与 `git` 在 PATH 中可用）。可复用官方 `idf-env` 已装好的 git（`D:\Espressif\tools\idf-git\...\cmd\git.exe`）。
+
+**① 拉取源码（用 gitee 乐鑫官方镜像，国内快）：**
+
+```cmd
+cd /d D:\Espressif\frameworks
+set PATH=D:\Espressif\tools\idf-git\2.44.0\cmd;%PATH%
+git clone --branch v6.0.2 https://gitee.com/EspressifSystems/esp-idf.git esp-idf-v6.0.2
+```
+
+**② 拉取子模块（gitee 无子模块镜像，改写为 GitHub 绝对地址后再拉，避免解析到 gitee 404）：**
+
+```cmd
+cd /d D:\Espressif\frameworks\esp-idf-v6.0.2
+:: 把相对 URL ../../xx/yy.git 统一改为 github 绝对地址
+python -c "import re,io; s=io.open('.gitmodules',encoding='utf-8').read(); io.open('.gitmodules','w',encoding='utf-8',newline='\n').write(re.sub(r'url = \.\./\.\./', 'url = https://github.com/', s))"
+git submodule sync
+git submodule update --init --recursive --depth 1
+```
+
+**③ 安装工具链（`all`，工具链二进制走乐鑫国内镜像 `dl.espressif.cn/github_assets`）：**
+
+```cmd
+set IDF_PATH=D:\Espressif\frameworks\esp-idf-v6.0.2
+set IDF_TOOLS_PATH=D:\Espressif
+set IDF_GITHUB_ASSETS=dl.espressif.cn/github_assets
+set IDF_PIP_WHEELS_URL=https://dl.espressif.com/pypi
+python %IDF_PATH%\tools\idf_tools.py install --targets=all
+```
+
+**④ 创建独立的 v6 Python 环境（必须显式指定路径，避免复用/污染 v5.5 的 `idf5.5_py3.11_env`）：**
+
+```cmd
+set IDF_PYTHON_ENV_PATH=D:\Espressif\python_env\idf6.0_py3.12_env
+python %IDF_PATH%\tools\idf_tools.py install-python-env --features=core
+```
+
+**⑤ 验证：**
+
+```cmd
+idf.py --version   :: 应显示 ESP-IDF v6.0.2(-dirty)
+```
+
+安装完即得到了：源码 `D:\Espressif\frameworks\esp-idf-v6.0.2`、共享工具链 `D:\Espressif\tools`（按版本子目录与 v5.5 共存）、隔离 Python 环境 `D:\Espressif\python_env\idf6.0_py3.12_env`。
+
+### 加载 ESP-IDF v6.0.2 环境
+
+> ⚠️ 本项目必须使用 **ESP-IDF v6.0.2**。v6 使用**独立的 Python 虚拟环境**（`idf6.0_py3.12_env`），与 v5.5（`idf5.5_py3.11_env`）**完全隔离**，两者共存于 `D:\Espressif`，互不影响。
+>
+> 关键：激活时必须设置 `IDF_PYTHON_ENV_PATH` 指向 v6 环境，否则 `export` 会误用 v5.5 环境（会污染/报依赖缺失）。
+
+**Windows（本机已装，推荐用快捷脚本）：**
+
+- **CMD**：`D:\Espressif\idf6.bat`（双击或命令行运行，脚本已内置正确环境变量）
+- **PowerShell**：`. .\idf6.ps1`（必须带前导点号点源）
+
+或者手动一条命令激活：
+
+```cmd
+set IDF_TOOLS_PATH=D:\Espressif && set IDF_PYTHON_ENV_PATH=D:\Espressif\python_env\idf6.0_py3.12_env && call D:\Espressif\frameworks\esp-idf-v6.0.2\export.bat
+idf.py --version      # 应显示 ESP-IDF v6.0.2-dirty（出现 "-dirty" 是仓库有改动标记，属正常）
+```
+
+**Linux / macOS（上游通用写法）：**
 
 ```bash
 source ~/esp/v6.0.2/esp-idf/export.sh
@@ -174,6 +241,28 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 
 > 区别：`idf.py build` **不读取** config.json 的 `sdkconfig_append`（如屏幕类型、console 配置），需通过 `menuconfig` 手动设置；`scripts/build.py` 会读取 config.json 并自动配置。
 
+### ⚠️ 踩坑记录：改 config.json 后 `idf.py build` 不生效
+
+> **教训**：只修改 `config.json` 的 `sdkconfig_append`，再用 `idf.py build` 编译，新配置**完全不会生效**——`idf.py build` / `idf.py menuconfig` 根本不读 config.json，它只被 `scripts/build.py` 读取。本次调试 TF 卡中文文件名乱码时就因此误以为改动无效，浪费了时间。
+
+改 Kconfig 配置有三条路径，按推荐度排序：
+
+1. **统一用 `scripts/build.py` 构建**（推荐）：配置只写在 `config.json` 的 `sdkconfig_append`，一处维护，脚本每次重新生成 sdkconfig 自动带上。
+2. **`idf.py menuconfig` 手动设置**：直观，但每次改动都要手动操作，易漏。
+3. **直接改 `sdkconfig` 文件**：当前构建立即生效，但 `sdkconfig` 是构建生成物（已被 .gitignore），kconfig 在 cmake 阶段可能回写/重建，改动可能被覆盖，不推荐作为长期维护方式。
+
+**本板实例**：TF 卡中文文件名乱码的根因是 FATFS API 编码为 ANSI/OEM(CP437，不含中文字符)，需改为 `CONFIG_FATFS_API_ENCODING_UTF_8=y`。该配置按标准做法写入两处**持久入口**：
+- **`sdkconfig.defaults`**（项目级）：`idf.py build` 重建 sdkconfig 时生效；
+- **`config.json` 的 `sdkconfig_append`**（本板）：`scripts/build.py` 构建时生效。
+
+> ⚠️ **不要直接改 `sdkconfig` 文件**——它是构建生成物（`.gitignore`），`reconfigure`/`build.py` 重建时会被覆盖丢失，不是配置入口。验证方法：
+
+```bash
+# Windows PowerShell
+Select-String FATFS_API_ENCODING sdkconfig
+# 应看到 CONFIG_FATFS_API_ENCODING_UTF_8=y
+```
+
 ## 功能：TF 卡本地歌曲播放（AI 控制）
 
 本板在面包板基础上新增「TF 卡本地歌曲播放」能力，让 AI 语音助手直接播放 TF 卡上的本地音乐（MP3），替代官方云端曲库中数量有限的歌曲。
@@ -181,6 +270,11 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 ### TF 卡准备
 - 把歌曲（**MP3** 格式）放入 TF 卡的 `music` 目录：`/sdcard/music/*.mp3`。
 - 播放器启动时会扫描该目录，自动列出歌名。
+
+### 歌词显示（LRC）
+- 同名歌词文件（`歌曲名.lrc`，与 .mp3 同目录）会被自动解析，播放时逐行显示在屏幕底部字幕条。
+- **歌词必须是 UTF-8 编码**：国内音乐软件下载的 .lrc 多为 GBK，设备端（ESP-IDF v6）没有 GBK→UTF-8 转换能力，直接用会乱码/不显示。
+- **用转码脚本处理即可**：本板目录下的 `scripts/mp3_convert_for_esp32s3.py`（见下文「转码脚本」）会把同名 .lrc 自动探测编码并转为 UTF-8 输出，把输出目录里的 .mp3 和 .lrc 一起拷到卡上即可。
 
 ### AI 语音指令（服务端通过 MCP 工具自动调用）
 
@@ -197,9 +291,21 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 - **可被打断**：播放中被唤醒/说话会打断本地播放，恢复语音交互。
 
 ### 实现说明
-- 本地播放复用项目官方的 `esp_audio_codec` 组件 MP3 解码器（`esp_mp3_dec`）+ `AudioService` 播放链路，**无自定义解析逻辑**。
+- 本地播放复用项目官方的 `esp_audio_codec` 组件 MP3 **简单解码器**（`esp_audio_simple_dec`，自带 parser：自动跳过 ID3v2 标签、搜索帧同步、处理跨块边界）+ `ESP-Audio-Effects` 声道转换器（`esp_ae_ch_cvt`，立体声降混为单声道，匹配小智全链路 mono 输出）+ `AudioService` 播放链路，**无自定义解析逻辑**。
+- LRC 歌词为简单的 `[mm:ss.xx]` 文本格式，用 C++ 标准库字符串解析（约 60 行，无第三方库可用）；编码要求 UTF-8。
+- **播放中可被打断**：播放线程每帧检查设备状态，唤醒词/按钮/进入聆听（状态离开 Idle）会立即停止播放并清空音频队列，让 AI 正常接管（不会“失联”）。
 - 播放器源码位于本板目录：`local_music_player.h` / `local_music_player.cc`（由 CMake `file(GLOB)` 自动编译）。
 - `AudioService` 仅新增一个 `PushLocalPcm()` 注入接口（最小、纯新增）。
+
+### 转码脚本（重要：原始 320kbps 歌会卡 + 唤醒失灵）
+本板目录下的 `scripts/mp3_convert_for_esp32s3.py` 批量转码（在项目根目录运行）：
+```powershell
+python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp32s3.py "E:/音乐/2026新下" "D:/music_s3"
+```
+- 输出 24000Hz 单声道 96kbps MP3（解码负载降约 4 倍，播放流畅、唤醒灵敏）；
+- **同名 .lrc 自动转 UTF-8** 一并输出；
+- 幂等：已转换的文件自动跳过，可重复运行。
+- 转码后可拷贝到 TF 卡，或通过 WiFi 网页上传（`http://<设备IP>/`）。
 
 ## Arduino 下位机（Mecanum 机器人）
 

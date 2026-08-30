@@ -77,6 +77,8 @@ void Application::Initialize() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
     };
     callbacks.on_wake_word_detected = [this](const std::string& wake_word) {
+        // 板级扩展点：打断板级独占资源（如本地音乐播放）
+        Board::GetInstance().OnWakeWordDetected(wake_word);
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
     callbacks.on_vad_change = [this](bool speaking) {

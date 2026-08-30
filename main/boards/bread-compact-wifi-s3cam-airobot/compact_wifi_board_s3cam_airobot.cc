@@ -10,6 +10,7 @@
 #include "led/single_led.h"
 #include "esp32_camera.h"
 #include "local_music_player.h"
+#include "http_upload_server.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -170,6 +171,15 @@ private:
                 EnterWifiConfigMode();
                 return;
             }
+            // 播放音乐时按按钮：先停歌并本地回到待命（不等服务器 tts:stop 响应，
+            // 避免状态卡在“说话中”）；再按一次按钮即进入聆听对话
+            if (music_player_ != nullptr && music_player_->IsPlaying()) {
+                music_player_->Stop();
+                if (app.GetDeviceState() == kDeviceStateSpeaking) {
+                    app.SetDeviceState(kDeviceStateIdle);
+                }
+                return;
+            }
             app.ToggleChatState();
         });
     }
@@ -203,6 +213,23 @@ private:
         } else {
             sd_card_mounted_ = false;
             ESP_LOGW(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
+        }
+    }
+
+    void InitializeUploadServer() {
+        if (!sd_card_mounted_) {
+            ESP_LOGW(TAG, "SD card not mounted, skip upload server");
+            return;
+        }
+        // 上传成功回调：刷新歌曲列表缓存，AI 立刻能查到新歌(无需重启)
+        StartUploadServer([this]() { GetMusicPlayer()->ScanSongs(); });
+    }
+
+    // 唤醒词检测到：立即打断本地音乐播放（配合 Application 的板级回调钩子）
+    void OnWakeWordDetected(const std::string& wake_word) override {
+        if (music_player_ != nullptr && music_player_->IsPlaying()) {
+            ESP_LOGI(TAG, "Wake word '%s' detected, stop local music", wake_word.c_str());
+            music_player_->Stop();
         }
     }
 
@@ -386,6 +413,7 @@ public:
         InitializeButtons();
         InitializeCamera();
         InitializeSDCard();
+        InitializeUploadServer();
         InitializeMusicTools();
         InitializeEchoUart();
         InitializeUnoTools();

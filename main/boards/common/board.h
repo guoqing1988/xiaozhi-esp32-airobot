@@ -82,6 +82,9 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
+
+    // 唤醒词检测到时的板级回调（默认空实现）。用于打断板级独占资源（如本地音乐播放）。
+    virtual void OnWakeWordDetected(const std::string& wake_word) { (void)wake_word; }
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \
