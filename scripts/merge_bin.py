@@ -22,6 +22,15 @@ import sys
 import time
 
 
+def setup_utf8_console():
+    """Windows 控制台默认 GBK, 强制 UTF-8 输出避免中文乱码。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def get_board_info(build_dir: str) -> tuple[str | None, bool]:
     """从 build/config/sdkconfig.json 读取板名与 TF 卡开关, 用于命名输出文件。
     返回 (board_name 小写|None, tf_enabled)。
@@ -99,11 +108,12 @@ def main() -> int:
     parser.add_argument("--output-dir", default=None,
                         help="output directory for merged-binary.bin (default: <project root>/packages)")
     args = parser.parse_args()
+    setup_utf8_console()
 
     build_dir = os.path.abspath(args.build_dir)
     if not os.path.isdir(build_dir):
-        print(f"ERROR: build directory not found: {build_dir}")
-        print("Please run 'idf.py build' first.")
+        print(f"错误: 找不到构建目录: {build_dir}")
+        print("请先运行 'idf.py build' 编译。")
         return 1
 
     # 项目根 = build 目录的上一级; 输出到 <项目根>/packages/
@@ -114,7 +124,7 @@ def main() -> int:
     # 1) 读取烧录参数(flash 模式/频率/大小 + 各 bin 偏移), 由 ESP-IDF 生成, 比硬编码可靠
     flash_args_path = os.path.join(build_dir, "flash_args")
     if not os.path.exists(flash_args_path):
-        print(f"ERROR: {flash_args_path} not found. Please run 'idf.py build' first.")
+        print(f"错误: {flash_args_path} 不存在。请先运行 'idf.py build' 编译。")
         return 1
     with open(flash_args_path, encoding="utf-8") as f:
         lines = [line.strip() for line in f if line.strip()]
@@ -148,12 +158,12 @@ def main() -> int:
     for offset, rel in entries:
         path = os.path.join(build_dir, rel)
         if not os.path.exists(path):
-            print(f"WARNING: missing {rel}, skipped")
+            print(f"警告: 缺少文件 {rel}, 已跳过")
             continue
         merged_entries.append((offset, path))
 
     if not merged_entries:
-        print("ERROR: no binary files to merge.")
+        print("错误: 没有可合并的固件文件。")
         return 1
 
     # 4) 合并
@@ -163,13 +173,13 @@ def main() -> int:
         base_name = f"{board}-merged-{date_suffix}.bin"
         if not tf_enabled:
             base_name = f"{board}-no-tfcard-merged-{date_suffix}.bin"
-        print(f"Board: {board}, TF card: {'on' if tf_enabled else 'off'}")
+        print(f"开发板: {board}, TF 卡功能: {'开启' if tf_enabled else '关闭'}")
     else:
         base_name = f"merged-binary-{date_suffix}.bin"  # 读不到板名时回退通用名
     output = os.path.join(output_dir, base_name)
     esptool_cmd = find_esptool(idf_path)
     if not esptool_cmd:
-        print("ERROR: esptool not found. Please run this script inside the ESP-IDF environment.")
+        print("错误: 未找到 esptool。请在 ESP-IDF 环境中运行本脚本。")
         return 1
     cmd = esptool_cmd + [
         "--chip", target,
@@ -182,21 +192,21 @@ def main() -> int:
     for offset, path in merged_entries:
         cmd += [offset, path]
 
-    print("Merging:", ", ".join(f"{off} {os.path.basename(p)}" for off, p in merged_entries))
-    print(f"Flash: {flash_mode} / {flash_freq} / {flash_size}, chip: {target}")
+    print("正在合并:", ", ".join(f"{off} {os.path.basename(p)}" for off, p in merged_entries))
+    print(f"Flash 参数: {flash_mode} / {flash_freq} / {flash_size}, 芯片: {target}")
     print(f"esptool: {' '.join(esptool_cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
     if result.returncode != 0:
-        print(f"ERROR: merge failed (rc={result.returncode})")
+        print(f"错误: 合并失败 (rc={result.returncode})")
         return result.returncode
 
     size_mb = os.path.getsize(output) / (1024 * 1024)
-    print(f"OK: {output} ({size_mb:.1f} MB)")
+    print(f"\n完成: {output} ({size_mb:.1f} MB)")
     print()
-    print("Flash Download Tool: chip=ESP32-S3, load this file, start address 0x0, Download")
-    print(f"CLI flash: esptool.py --chip {target} write_flash 0x0 {output}")
+    print("Flash 下载工具: 芯片选 ESP32-S3, 加载该文件, 起始地址填 0x0, 点击 Download")
+    print(f"命令行烧录: esptool.py --chip {target} write_flash 0x0 {output}")
     return 0
 
 
