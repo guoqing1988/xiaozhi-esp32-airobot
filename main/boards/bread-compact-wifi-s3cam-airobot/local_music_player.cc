@@ -367,8 +367,21 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
     // 避免逐帧 sleep_for 的累积漂移导致越播越慢。
     auto play_start = std::chrono::steady_clock::now();
     uint64_t injected_samples = 0;
+    // [TEMP 诊断] 播放进度日志(每 5 秒一条, 定位播放卡死问题后移除)
+    auto last_progress_log = std::chrono::steady_clock::now();
+    const char* song_name = strrchr(path.c_str(), '/');
+    song_name = song_name ? song_name + 1 : path.c_str();
 
     while (!stop_requested_.load() && playing_.load()) {
+        // [TEMP 诊断] 进度日志：线程活着则持续输出，卡住时最后一条指示卡点附近
+        auto now_p = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now_p - last_progress_log)
+                .count() >= 5000) {
+            last_progress_log = now_p;
+            ESP_LOGI(TAG, "[play] %s pos=%llu samples sr=%d paused=%d", song_name,
+                     (unsigned long long)injected_samples, sample_rate, (int)paused_.load());
+        }
+
         // 打断检测：仅当设备状态从 Idle 变为非 Idle（唤醒词/按钮触发交互）时打断；
         // 若播放由 AI 命令启动（状态为 Speaking/Listening），保持播放不被打断
         auto state = Application::GetInstance().GetDeviceState();
@@ -424,6 +437,12 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
             }
             if (frame.decoded_size > 0) {
                 stall = 0;
+                // 防御: 解码输出异常超大(状态异常)时放弃本块, 避免大分配/样本数爆炸
+                if (frame.decoded_size > pcm_buf.size() * 4) {
+                    ESP_LOGW(TAG, "Decoder decoded_size %u too large, skip block",
+                             (unsigned)frame.decoded_size);
+                    break;
+                }
                 if (sample_rate == 0) {
                     esp_audio_simple_dec_info_t info = {};
                     if (esp_audio_simple_dec_get_info(decoder, &info) == ESP_AUDIO_ERR_OK) {
@@ -480,6 +499,14 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
                 if (sr > 0) {
                     auto target = play_start +
                                   std::chrono::microseconds(injected_samples * 1000000 / sr);
+                    auto now = std::chrono::steady_clock::now();
+                    // 防御: 目标时间异常超前(样本数跳变)时重置基准, 避免 sleep_until 远睡假死
+                    if (target > now + std::chrono::seconds(2)) {
+                        ESP_LOGW(TAG, "Throttle target far ahead, reset base");
+                        play_start = now -
+                                     std::chrono::microseconds(injected_samples * 1000000 / sr);
+                        target = now;
+                    }
                     std::this_thread::sleep_until(target);
                 }
                 if (paused_.load() || stop_requested_.load() || !playing_.load()) {
