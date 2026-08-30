@@ -391,6 +391,19 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 - ESP32 默认日志已降到 **`ERROR`**，且命令带 **`@` 前缀**（Arduino 只认 `@` 开头的行），日志乱码会被忽略，命令更稳定。
 - Arduino 程序用**固定 `char` 缓冲**解析命令（不用 `String`），适合 UNO 的 2KB SRAM，抗内存碎片。
 
+### 指令执行模型与串口缓冲（重要）
+- **顺序执行**：Arduino 读一条执行一条（`runMotors` 内 `delay` 阻塞），先到先执行，**不会乱序**。
+- **RX 缓冲**：UNO 默认 HardwareSerial 接收缓冲仅 **64 字节（≈4-5 条指令）**。动作阻塞执行期间（如 `go-forward-15` 执行 1.5 秒）不读串口，后续指令积压在缓冲里，超出部分**溢出丢弃**（表现为“后面的指令跳过了”）。已改为 `Serial.setRxBufferSize(256)`（≈17 条），正常 AI 编排序列（3-10 条）不会丢；若实测超长序列仍丢，可再加大或让 ESP32 读 Arduino 回执（`Serial.println("F")` 等已存在）判断动作完成再发下一条。
+
+### 踩坑：AI 重复调用 uno 工具（已修复）
+**现象**：说一次“前进”，ESP32 串口发出几十次 `@go-forward-10`，机器人反复动。
+**根因**：服务端 AI 无执行确认机制，对 `uno` 工具反复生成相同调用（实测 30 次、间隔约 700-900ms、JSON-RPC id 递增）；设备端每次毫秒级正确回复，**设备端无 bug**——同一日志里 `music.*` 工具全部只调用一次（同样返回 `true` 却不重复），对照即可实锤。
+**修复**（ESP32 端三重机制，均在板级文件 `compact_wifi_board_s3cam_airobot.cc`）：
+1. **工具描述**明确“调用本工具一次即完成整个动作并自动停止，不要重复调用”——治本，实测 AI 不再重复（前进/后退/走 20 步/特技编排均只调用一次，组合动作正常）；
+2. `SendUartMessage` 返回**描述性文本**（`指令已发送: xxx` / `指令发送失败: xxx`）而非裸 `true/false`——AI 能确认执行结果；
+3. **指令防抖**：相同指令 1 秒内只发送一次（防抖命中返回“指令已发送(防抖): xxx”视为成功），AI 不听话也挡得住；不同指令（组合编排）不受影响。
+**排查方法备忘**：在 `McpServer::ReplyResult` 临时加一行日志打印 payload，可确认设备端每次调用都发出结果；比较重复调用 id 递增（服务器独立请求）还是相同（重发）；对比不同工具（uno 重复 vs music 正常）即可定位是设备端还是服务器端。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。
