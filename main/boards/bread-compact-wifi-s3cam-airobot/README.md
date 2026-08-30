@@ -440,7 +440,14 @@ main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot/MecanumRobot.i
 - `PS2X_lib`
 > 这三个库**不在 arduino-cli 官方库管理器**中，需从各自 GitHub 仓库手动 clone 到库目录（以实际仓库地址为准）。
 
-**方式一：命令行（arduino-cli，推荐）**
+**方式一：一键脚本（推荐）**
+```bat
+:: 在 sketch 目录双击或命令行运行（.ino 同目录）
+build_arduino.bat              :: 仅编译
+build_arduino.bat COM5         :: 编译 + 烧录到 COM5
+```
+
+**方式二：命令行（arduino-cli）**
 ```bash
 # 1) 把 3 个库 clone 到库目录(示例)
 cd ~/Documents/Arduino/libraries
@@ -451,7 +458,6 @@ git clone <PS2X_lib仓库URL>
 
 # 2) 编译(Arduino UNO)  —— 打印编译进度、依赖库列表、Flash/RAM 占用
 arduino-cli compile --fqbn arduino:avr:uno \
-  --build-property "compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" \
   main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
 #     查看详细日志(编译命令/警告): 加 -v
 #     保留日志: 末尾加 2>&1 | tee build.log
@@ -459,8 +465,8 @@ arduino-cli compile --fqbn arduino:avr:uno \
 # 3) 烧录(示例端口, 按实际修改)
 arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
 ```
-> **⚠️ RX 缓冲必须传宏**：`arduino:avr 1.8.8+` 的 HardwareSerial **没有** `setRxBufferSize` API，改用编译期宏 `SERIAL_RX_BUFFER_SIZE`（默认 64B≈4-5 条指令，AI 长指令序列会溢出丢指令）。**漏掉 `--build-property` 编译出的固件 RX 缓冲只有 64B**。
-> **Arduino IDE 用户**：在核心目录 `D:\Arduino15\packages\arduino\hardware\avr\1.8.8\` 下新建 `platform.local.txt`，内容一行 `compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256`，IDE 编译即自动带上。
+> **RX 缓冲（无需额外参数）**：`arduino:avr 1.8.8+` 的 HardwareSerial 没有 `setRxBufferSize` API，RX 缓冲由编译期宏 `SERIAL_RX_BUFFER_SIZE` 控制（默认 64B≈4-5 条指令，AI 长指令序列会溢出丢指令）。已在本机核心目录建好 `platform.local.txt`（内容 `compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256`），**IDE 和 CLI 编译都会自动带上**，命令无需再加长参数。
+> **换电脑/重装核心后**：在核心目录 `D:\Arduino15\packages\arduino\hardware\avr\1.8.8\` 重新建 `platform.local.txt`，或改用 `arduino-cli compile --build-property "compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" ...`。
 
 **方式二：Arduino IDE**
 1. 用 Arduino IDE 打开 `MecanumRobot.ino`。
