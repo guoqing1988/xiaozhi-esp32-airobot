@@ -314,6 +314,11 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 上传/播放源码位于本板目录：`http_upload_server.h` / `http_upload_server.cc`（由 CMake `file(GLOB)` 自动编译）。
 - 日志说明：上传成功路径不打日志（避免刷屏），仅错误（缺参数/写卡失败/同名跳过等）和启动（`Upload server started`）打印；板子日志级别为 ERROR，见串口日志需保留。
 
+### 摄像头画面翻转（AI 控制 + 本地持久化）
+- 说「画面翻转 / 镜像 / 上下翻转」→ `self.camera.set_flip`（mode: `0`=正常, `1`=左右镜像, `2`=上下翻转, `3`=旋转180）。
+- 设置写入 NVS（`camera/flip`），**断电重启自动恢复该设置**。
+- 实现：板级 `ApplyCameraFlip()` 开机应用 + `Esp32Camera::SetHMirror/SetVFlip`（官方 sensor 寄存器接口）。
+
 ## Arduino 下位机（Mecanum 机器人）
 
 本板可选配一个 **Arduino 下位机**（麦克纳姆轮机器人），由 ESP32 通过串口控制。

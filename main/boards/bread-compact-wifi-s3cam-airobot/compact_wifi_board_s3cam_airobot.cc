@@ -9,6 +9,7 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "esp32_camera.h"
+#include "settings.h"
 #include "local_music_player.h"
 #include "http_upload_server.h"
 
@@ -175,6 +176,37 @@ private:
         config.fb_location = CAMERA_FB_IN_PSRAM;
         config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
         camera_ = new Esp32Camera(config);
+    }
+
+    // 应用 NVS 保存的摄像头翻转设置(开机调用, 断电重启仍保持)
+    void ApplyCameraFlip() {
+        Settings settings("camera", false);
+        int32_t mode = settings.GetInt("flip", 0);
+        if (camera_ != nullptr) {
+            camera_->SetHMirror(mode & 1);
+            camera_->SetVFlip((mode & 2) != 0);
+        }
+    }
+
+    // 摄像头翻转控制工具(AI 可调, 设置本地持久化)
+    void InitializeCameraTools() {
+        auto& mcp = McpServer::GetInstance();
+        mcp.AddTool(
+            "self.camera.set_flip",
+            "设置摄像头画面翻转方向，设置后本地保存(断电重启仍生效)。mode: 0=正常, 1=左右镜像, 2=上下翻转, 3=旋转180(镜像+翻转)",
+            PropertyList({Property("mode", kPropertyTypeInteger, 0, 0, 3)}),
+            [this](const PropertyList& props) -> ReturnValue {
+                int mode = props["mode"].value<int>();
+                if (camera_ == nullptr) {
+                    return std::string("摄像头未初始化");
+                }
+                if (!camera_->SetHMirror(mode & 1) || !camera_->SetVFlip((mode & 2) != 0)) {
+                    return std::string("设置失败");
+                }
+                Settings settings("camera", true);
+                settings.SetInt("flip", mode);
+                return std::string("摄像头画面已设置为模式 ") + std::to_string(mode);
+            });
     }
 
     void InitializeButtons() {
@@ -554,12 +586,14 @@ public:
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeCamera();
+        ApplyCameraFlip();              // 应用 NVS 保存的摄像头翻转设置
         InitializeSDCard();
         InitializeUploadServer();
         InitializeIpDisplay();
         InitializeMusicTools();
         InitializeEchoUart();
         InitializeUnoTools();
+        InitializeCameraTools();
         InitializeDebugTools();
         // 默认把日志压到 ERROR, 避免 GPIO43 日志污染 Arduino 串口(平时命令更稳定)
         esp_log_level_set("*", ESP_LOG_ERROR);
