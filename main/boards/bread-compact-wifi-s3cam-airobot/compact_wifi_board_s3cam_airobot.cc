@@ -359,14 +359,27 @@ private:
         SendUartMessage("w2");
     }
 
-    static bool SendUartMessage(const char* command_str) {
+    // 发送 UART 指令并返回描述性结果(成功/失败), 避免 AI 看到 true/false 无法确认执行结果而重复调用
+    static std::string SendUartMessage(const char* command_str) {
+        // 指令防抖：AI 无执行确认机制时可能反复调用相同工具(实测会重复调用几十次)，
+        // 相同指令 2 秒内只发送一次，避免 Arduino 串口堆积重复指令。
+        // 不同指令(动作切换)不受影响，照常发送。
+        static char s_last_cmd[32] = {};
+        static int64_t s_last_us = 0;
+        int64_t now = esp_timer_get_time();
+        if (strcmp(s_last_cmd, command_str) == 0 && (now - s_last_us) < 2000000) {
+            return std::string("指令已发送(防抖): ") + command_str;  // 防抖丢弃, 视为成功
+        }
+        snprintf(s_last_cmd, sizeof(s_last_cmd), "%s", command_str);
+        s_last_us = now;
         // 统一加 '@' 前缀, 让 Arduino 只认带前缀的命令行(过滤日志乱码)
         int written = uart_write_bytes(ECHO_UART_PORT_NUM, "@", 1);
-        if (written < 0) return false;
+        if (written < 0) return std::string("指令发送失败: ") + command_str;
         written = uart_write_bytes(ECHO_UART_PORT_NUM, command_str, strlen(command_str));
-        if (written < 0) return false;
+        if (written < 0) return std::string("指令发送失败: ") + command_str;
         written = uart_write_bytes(ECHO_UART_PORT_NUM, "\n", 1);
-        return written >= 0;
+        if (written < 0) return std::string("指令发送失败: ") + command_str;
+        return std::string("指令已发送: ") + command_str;
     }
 
     void InitializeUnoTools() {
@@ -374,7 +387,7 @@ private:
 
         mcp_server.AddTool(
             "self.uno.action",
-            "麦克纳姆轮机器人控制。action: 0=停止,1=前进,2=后退,3=左转,4=右转,5=左移,6=右移,7=左上斜移,8=右上斜移,9=左下斜移,10=右下斜移; steps: 动作走多少步(1-100)",
+            "麦克纳姆轮机器人控制。调用本工具一次即完成整个动作并自动停止，不要重复调用。action: 0=停止,1=前进,2=后退,3=左转,4=右转,5=左移,6=右移,7=左上斜移,8=右上斜移,9=左下斜移,10=右下斜移; steps: 动作执行步数(1-100, 越大动作时间越长)",
             PropertyList({Property("action", kPropertyTypeInteger, 0),
                           Property("steps", kPropertyTypeInteger, 10, 5, 100)}),
             [this](const PropertyList& properties) -> ReturnValue {
@@ -402,7 +415,7 @@ private:
 
         mcp_server.AddTool(
             "self.uno.servo",
-            "头部舵机控制，180度舵机，回正角度为82，大于82向左转，小于82向右转。degree: 0-180",
+            "头部舵机控制，调用一次即转到指定角度。180度舵机，回正角度为82，大于82向左转，小于82向右转。degree: 0-180",
             PropertyList({Property("degree", kPropertyTypeInteger, 82, 0, 180)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 int degree = properties["degree"].value<int>();
@@ -413,7 +426,7 @@ private:
 
         mcp_server.AddTool(
             "self.uno.teji",
-            "执行特技，action: 1摇头 2闪电走位 3转圈 4蛇形走位 5调头 6开灯 7关灯",
+            "执行特技，调用一次即执行完毕，不要重复调用。action: 1摇头 2闪电走位 3转圈 4蛇形走位 5调头 6开灯 7关灯",
             PropertyList({Property("action", kPropertyTypeInteger, 1)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 int action = properties["action"].value<int>();
