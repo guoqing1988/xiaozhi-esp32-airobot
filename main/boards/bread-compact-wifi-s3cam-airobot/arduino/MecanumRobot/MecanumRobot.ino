@@ -286,6 +286,9 @@ void executeCommand() {
 
         if (strncmp(p, "go-", 3) == 0) {
             // 格式: @go-{action}-{steps}
+            char cmd_full[32];
+            strncpy(cmd_full, p, sizeof(cmd_full) - 1);   // 保存完整命令(供回执带动作名)
+            cmd_full[sizeof(cmd_full) - 1] = '\0';
             p += 3;
             char *dash = strchr(p, '-');     // action 与 steps 之间的 '-'
             if (!dash) {                     // 格式错误, 忽略
@@ -304,7 +307,7 @@ void executeCommand() {
                 t = steps * 10;
             }
 
-            Serial.println("@busy");         // 上报动作开始(双向状态)
+            Serial.print("@busy "); Serial.println(cmd_full);   // 上报动作开始(带动作名)
 
             if (strcmp(action, "forward") == 0) {
                 NewTone(A0, 2349, 50);
@@ -331,7 +334,7 @@ void executeCommand() {
                 moveRightBackward(t);
             }
 
-            Serial.println("@done");         // 上报动作完成(双向状态)
+            Serial.print("@done "); Serial.println(cmd_full);   // 上报动作完成(带动作名)
 
         } else if (strncmp(p, "servo-", 6) == 0) {
             // 格式: @servo-{degree}
@@ -339,7 +342,7 @@ void executeCommand() {
 
         } else if (strncmp(p, "tj-", 3) == 0) {
             // 特技动作
-            Serial.println("@busy");         // 上报动作开始
+            Serial.print("@busy "); Serial.println(p);   // 上报动作开始(带动作名, p 指向 tj-xxx)
             if (strcmp(p, "tj-yaotou") == 0) {
                 // 特技: 摇头
                 setServo1(180);
@@ -378,7 +381,7 @@ void executeCommand() {
                 // 特技: 调头
                 turnLeft(900);
             }
-            Serial.println("@done");         // 上报动作完成
+            Serial.print("@done "); Serial.println(p);   // 上报动作完成
 
         } else if (strncmp(p, "speed-", 6) == 0) {
             // 格式: @speed-{value}
