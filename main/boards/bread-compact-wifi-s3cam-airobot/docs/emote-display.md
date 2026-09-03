@@ -43,6 +43,44 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 python -m esptool --chip esp32s3 -p /dev/cu.usbserial-XXXX -b 460800 write_flash 0x0 build/merged-binary.bin
 ```
 
+### 标准流程：直接 `idf.py build`
+
+本板也支持不经过 `scripts/build.py`、直接用 `idf.py` 编译（资源打包是 CMake 的 custom command，`idf.py build` 会自动触发）。
+
+**前提：根目录的 `sdkconfig` 里必须已有本板的关键选项。** 最省事的做法是先用 `scripts/build.py` 跑一次（它会根据 config.json 生成完整正确的 sdkconfig），之后就可以一直用 `idf.py`：
+
+```sh
+# 首次：用标准脚本生成正确的 sdkconfig（并顺带产出固件）
+python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
+
+# 之后：日常快速编译，全部走 idf.py
+source ~/esp/v6.0.2/esp-idf/export.sh
+idf.py build        # 编译（自动打包 expression_assets.bin）
+idf.py flash        # 烧录全部分区（含 assets 0x800000）
+idf.py monitor      # 串口日志
+
+# 或者一步到位（指定端口）
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+```
+
+`sdkconfig` 中本板相关的**关键项**（用 `scripts/build.py` 生成后自动就位，可抽查确认）：
+
+```sh
+grep -E "^(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_S3CAM_AIROBOT|CONFIG_LCD_ST7789_240X320|CONFIG_USE_EMOTE_MESSAGE_STYLE|CONFIG_FLASH_EXPRESSION_ASSETS)=" sdkconfig
+# 期望：
+# CONFIG_FLASH_EXPRESSION_ASSETS=y
+# CONFIG_LCD_ST7789_240X320=y
+# CONFIG_USE_EMOTE_MESSAGE_STYLE=y
+# CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_S3CAM_AIROBOT=y
+```
+
+注意事项：
+
+- **改 `config.json` 的 sdkconfig_append 不会自动同步到现有 sdkconfig**。改完后要么重跑一次 `scripts/build.py`，要么手动把新选项写进 `sdkconfig`（或删掉 `sdkconfig` 重新生成）。
+- **换屏幕**：在 sdkconfig 里把 `CONFIG_LCD_ST7789_240X320=y` 改成目标屏选项（其他 LCD 选项自动失效），然后 `rm -f build/expression_assets.bin && idf.py build`（布局目录变了要重打包）。
+- **切分支/切板子后**：旧 sdkconfig 里残留着别的板的选项，建议 `rm sdkconfig build -rf` 后重跑 `scripts/build.py` 重新生成。
+- 编译日志中确认 `Building airobot emote assets (resolution 240_320)` 出现，说明表情资源已重新打包。
+
 ## 二、屏幕选择（多分辨率适配）
 
 屏幕型号由 Kconfig `choice`（互斥单选）决定，**本板已在 `config.json` 的 `sdkconfig_append` 里固定为 ST7789 240×320**，正常编译无需任何操作。
@@ -165,7 +203,7 @@ board 代码里是 `#if CONFIG_USE_EMOTE_MESSAGE_STYLE` 分支，关闭后自动
 `main/boards/` 下有被误识别为板配置的 `config.json`。⚠️ 表情布局目录（`emote_assets/*/`）里**绝不能放 `config.json`**——`scripts/build.py` 会递归扫描 `main/boards/**/config.json` 当板配置校验。布局目录里只放 `layout.json` + `emote.json`，字体/表情集合参数由 `main/CMakeLists.txt` 直调组件 `build.py` 显式传入。
 
 **Q2：改了 layout.json 但屏上没变化**
-资源包没重新打包。执行 `rm -f build/expression_assets.bin` 后重新编译。
+资源包没重新打包。执行 `rm -f build/expression_assets.bin` 后重新编译（`scripts/build.py` 或 `idf.py build` 均可）。
 
 **Q3：换了屏幕但表情位置不对**
 确认编译日志里的 `resolution XXX_XXX` 是否为新屏对应目录；该目录缺 `layout.json` 时会回退官方 320×240 横屏布局。
