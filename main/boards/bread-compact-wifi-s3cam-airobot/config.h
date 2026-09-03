@@ -329,6 +329,10 @@
 #endif
 #define MUSIC_DIR        "/sdcard/music"
 
+// AI 闹钟提醒(仅 TF 卡功能开启时有效, 闹钟持久化到 TF 卡)
+#define ALARM_FILE_PATH         "/sdcard/alarms.json"  // 闹钟持久化文件
+#define ALARM_CHECK_INTERVAL_MS 1000                    // 后台检查周期(毫秒)
+
 // Arduino 下位机 UART 串口控制 (UART_NUM_0 / GPIO43 TX, GPIO44 RX)
 #define UART_ECHO_TXD GPIO_NUM_43
 #define UART_ECHO_RXD GPIO_NUM_44
