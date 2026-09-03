@@ -249,7 +249,7 @@ static void StartHttpServer() {
         return;
     }
 
-    ESP_LOGE(TAG, "Upload server started: http://<device-ip>/ (upload MP3 to %s)", MUSIC_DIR);
+    ESP_LOGI(TAG, "Upload server started: http://<device-ip>/ (upload MP3 to %s)", MUSIC_DIR);
 }
 
 // WiFi STA 是否已拿到 IP（lwIP 栈就绪后才可创建 socket）
@@ -275,7 +275,7 @@ static void OnWifiReadyTimer(void* arg) {
         esp_timer_delete(s_wifi_timer);
         s_wifi_timer = nullptr;
     }
-    ESP_LOGE(TAG, "WiFi IP ready, starting upload server");
+    ESP_LOGI(TAG, "WiFi IP ready, starting upload server");
     StartHttpServer();
 }
 

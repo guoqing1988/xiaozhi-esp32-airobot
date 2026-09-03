@@ -380,7 +380,7 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - **上传页**（`http://<设备IP>/`）：多选文件（支持 .mp3 / .lrc）、实时进度条、**同名覆盖开关**（默认勾选=覆盖；取消勾选=同名跳过，页面提示“同名已存在，跳过”）。
 - 上传成功回调会自动刷新歌曲列表，AI 立刻能查到新歌（无需重启）。
 - 上传/播放源码位于本板目录：`http_upload_server.h` / `http_upload_server.cc`（由 CMake `file(GLOB)` 自动编译）。
-- 日志说明：上传成功路径不打日志（避免刷屏），仅错误（缺参数/写卡失败/同名跳过等）和启动（`Upload server started`）打印；板子日志级别为 ERROR，见串口日志需保留。
+- 日志说明：上传成功路径不打日志（避免刷屏），仅错误（缺参数/写卡失败/同名跳过等）以 ERROR 级打印；启动信息（`Upload server started`）为 INFO 级，板子默认日志级别 ERROR 下不显示，排障时调 INFO 可见。
 
 ## 摄像头画面翻转（AI 控制 + 本地持久化）
 - 说「画面翻转 / 镜像 / 上下翻转」→ `self.camera.set_flip`（mode: `0`=正常, `1`=左右镜像, `2`=上下翻转, `3`=旋转180）。
@@ -409,8 +409,12 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 
 ```bash
 idf.py menuconfig
-# Component config -> LVGL Library -> "Enable Montserrat 48" -> [Y] -> 保存退出
+# 路径: Component config -> LVGL configuration -> Font Usage -> Enable built-in fonts
+#       -> "Enable Montserrat 48" -> [Y] -> 保存退出
+# 找不到时: 在 menuconfig 界面按 "/" 搜索 "MONTSERRAT_48", 回车直接跳到该项
 ```
+
+> 该字体是 LVGL 自带的**内置 ASCII 字体**（足够显示 `HH:MM`），开关在 LVGL 组件的 Kconfig 菜单里（`LVGL configuration`），**不是**“小智设置”，菜单名也不是旧的“LVGL Library”。
 
 > 方式二的注意点：`sdkconfig` 被删或切芯片目标重建后，这个勾会丢，需重新勾选；方式一以后每次用 build.py 都会自动带上。
 >
@@ -435,7 +439,7 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 
 > 仅 TF 卡功能开启时生效（与本地音乐/上传页同开关 `CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD`）。
 
-本板支持用 **AI 语音**设置闹钟/定时提醒，也可在 **web 页面**（复用 `http://<设备IP>/` 上传页）查看/新增/删除闹钟，到点后**内置提示音 + 屏幕显示提醒内容**。
+本板支持用 **AI 语音**设置闹钟/定时提醒，也可在 **web 页面**（复用 `http://<设备IP>/` 上传页）查看/新增/删除闹钟，到点后**自动播放本地歌曲响铃 + 屏幕显示提醒内容**（卡上无歌时退回内置提示音）。
 
 ### 闹钟类型
 
@@ -464,10 +468,11 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 - 闹钟以 JSON 文件保存在 TF 卡：**`/sdcard/alarms.json`**（断电重启不丢）。
 - 每条数据：`{"id":1, "type":"relative", "trigger_sec":1800, "label":"喝水", "enabled":true}`；绝对闹钟额外含 `last_fired_day`（上次触发的天序号，避免当天重复）。
 
-### 到点播报
+### 到点响铃（音乐闹钟）
 
-- 到点触发时：**先打断正在播放的本地音乐** → **播放内置提示音**（OGG_POPUP）→ **屏幕字幕条显示提醒内容**（无 label 时显示「⏰ 闹钟提醒」）。
-- 第一版走零联网方案（提示音 + 屏幕显示），稳定可靠；后续可扩展为服务端 TTS 播报个性化语音。
+- 到点触发时：**先打断正在播放的本地音乐** → **自动随机播放本地歌曲作为铃声**（音乐闹钟，复用「随机播放」链路：声音明显且持续，唤醒词/按钮/说停均可立即打断；随机队列播完且无人打断时自动停回待命）→ **屏幕显示提醒内容**（无 label 时显示「⏰ 闹钟提醒」）。
+- **卡上无歌或播放启动失败**时退回单声内置提示音（OGG_POPUP），保证提醒不落空。
+- 走零联网方案（本地音乐 + 屏幕显示），稳定可靠；后续可扩展为服务端 TTS 播报个性化语音或指定铃声。
 
 ### 实现说明
 
@@ -477,7 +482,7 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 
 ### 真机验证要点
 
-1. 设一个 1 分钟的临时相对闹钟 → 到点听到提示音 + 屏幕显示提醒内容。
+1. 设一个 1 分钟的临时相对闹钟 → 到点自动响起本地歌曲（唤醒说一句话可打断）+ 屏幕显示提醒内容。
 2. 设置闹钟后断电重启 → `self.alarm.list` 仍能查到（`/sdcard/alarms.json` 存在且正确）。
 3. 网页打开 `http://<设备IP>/` → 可看到闹钟列表，新增/删除后设备端 `self.alarm.list` 同步。
 4. 绝对闹钟（设一个当天下一个未到时刻）→ 到点触发，且当天重复设置不重复响。
