@@ -390,37 +390,30 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 ## 待机大时钟（AI 控制 + 本地持久化）
 
 - 说「切换时钟模式 / 打开时钟 / 关闭时钟」→ `self.clock.set`（mode: `1`=开启, `0`=关闭, `-1`=切换）。
-- 开启后，**待机**状态下屏幕中央显示大号时间（`HH:MM`，LVGL Montserrat 48px 字体，`CONFIG_LV_FONT_MONTSERRAT_48=y`）；对话/聆听/播放时自动隐藏，不干扰字幕。
+- 开启后，**待机**状态下屏幕中央显示**七段数码管大时间**（`HH:MM`，76px DSEG 字体），上方一行 18px 小字日期（`YYYY-MM-DD`）；时钟显示时中央表情/聊天区自动隐藏，屏幕只留“日期+时间”，更像真实电子钟。对话/聆听/播放时自动隐藏时钟、恢复表情区，不干扰字幕。
 - 时间来自联网后同步的系统时钟（与绝对闹钟同源）；未同步前不显示。
 - 设置写入 NVS（`clock/mode`），**断电重启自动恢复**。
-- 实现：板级显示子类 `airobot_lcd_display.h`（`AirobotLcdDisplay : SpiLcdDisplay`，标准 `SetupUI()` 钩子叠加 LVGL 标签，不改核心 display 代码）+ 1 秒 `esp_timer` 刷新（仅在文本变化时更新标签，省 SPI 刷屏）。
+- 实现：板级显示子类 `airobot_lcd_display.h`（`AirobotLcdDisplay : SpiLcdDisplay`，标准 `SetupUI()` 钩子叠加 LVGL 标签，不改核心 display 代码）+ 1 秒 `esp_timer` 刷新（仅在文本/日期变化时更新标签，省 SPI 刷屏）。字体内嵌见下方「时钟字体说明」。
 
-### 构建注意（大字体开关）
+### 时钟字体说明（内嵌，无需任何 menuconfig 配置）
 
-大字体依赖 `CONFIG_LV_FONT_MONTSERRAT_48=y`，已写入 `config.json` 的 `sdkconfig_append`——但**直接 `idf.py build` 不读 config.json**（见下文踩坑记录）。平时直接用 `idf.py build` 的用户，二选一：
+时间/日期使用**板内嵌七段数码管字体**（`clock_dseg7.c`，仅含 `0-9` `:` `-` 字形，DSEG7 Classic 风格）：
 
-**方式一（推荐，一劳永逸）**：用一次构建脚本，它会重新生成 `sdkconfig`（自动带上字体开关），之后继续直接 `idf.py build` 也没问题（`sdkconfig` 是持久文件，直接 build 会接着用它）：
+- 76px 字显示 `HH:MM`（时间大字），18px 字显示 `YYYY-MM-DD`（日期小字，时间上方）。
+- 字形数据是 `const` 数组，放 **flash**（`.rodata`），LVGL 按需从 flash 读取位图，**运行时不占 RAM**；整体 flash 增加约 34KB，可忽略。
+- 因此**不再需要** `CONFIG_LV_FONT_MONTSERRAT_48`，之前为开大字号做的 `menuconfig`/`sdkconfig_append` 操作全部作废（config.json 里那行留着也无害，只是不再被使用）。
+- 字体为开源 DSEG7（SIL OFL，GitHub `keshikan/DSEG`）。仓库不存字体源文件，只存生成的位图 `clock_dseg7.c`；DSEG 原始字距过宽，嵌的是按 240px 屏宽收紧字距后的版本。
+
+若以后想调字号/样式，可重新生成：
 
 ```bash
-python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
+# 源字体(npm): npm i @fontsource/dseg7-classic, 解包取 files/dseg7-classic-latin-700-normal.woff
+# 时间大字 76px (0-9 与 ':')
+npx lv_font_conv --bpp 1 --size 76 --format lvgl   --font dseg7-classic-latin-700-normal.woff   --range 0x30-0x39,0x3A --lv-font-name clock_dseg7_76 -o /tmp/t76.c
+# 日期小字 18px (0-9 与 '-') 同法生成后拼进同一文件, 第二份的 static 符号
+# (glyph_bitmap/glyph_dsc/font_dsc/cmaps/cache/glyph_id_ofs_list_0) 要加 _18 后缀避免重名;
+# 最后把每字 adv_w 收紧为 box 宽+数像素 (单位 1/4px), 否则 DSEG 原始字距放不下屏宽。
 ```
-
-**方式二（纯 menuconfig）**：
-
-```bash
-idf.py menuconfig
-# 路径: Component config -> LVGL configuration -> Font Usage -> Enable built-in fonts
-#       -> "Enable Montserrat 48" -> [Y] -> 保存退出
-# 找不到时: 在 menuconfig 界面按 "/" 搜索 "MONTSERRAT_48", 回车直接跳到该项
-```
-
-> 该字体是 LVGL 自带的**内置 ASCII 字体**（足够显示 `HH:MM`），开关在 LVGL 组件的 Kconfig 菜单里（`LVGL configuration`），**不是**“小智设置”，菜单名也不是旧的“LVGL Library”。
-
-> 方式二的注意点：`sdkconfig` 被删或切芯片目标重建后，这个勾会丢，需重新勾选；方式一以后每次用 build.py 都会自动带上。
->
-> 验证是否生效：`Select-String "LV_FONT_MONTSERRAT_48" sdkconfig` 应看到 `CONFIG_LV_FONT_MONTSERRAT_48=y`。
->
-> 未开启的后果：不会编译失败（代码有 `#if` 保护），但时钟退回 14px 默认小字体。
 
 编译完成后烧录看日志（`scripts/build.py` 只管配置+编译，**不支持** flash/monitor 参数，烧录统一用 `idf.py`，端口按实际修改）：
 

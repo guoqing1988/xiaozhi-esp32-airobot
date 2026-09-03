@@ -390,13 +390,16 @@ private:
         bool show = clock_mode_ && Application::GetInstance().GetDeviceState() == kDeviceStateIdle
                     && now > 1700000000;  // 未同步到 2023 年之后视为无效时间
         if (!show) {
-            lcd->UpdateClock(false, nullptr);
+            lcd->UpdateClock(false, nullptr, nullptr);
             return;
         }
-        static char buf[8];  // 仅 esp_timer 单任务调用, 静态缓冲安全
+        // 仅 esp_timer 单任务调用, 静态缓冲安全
+        static char buf[8];    // HH:MM
+        static char dbuf[16];  // YYYY-MM-DD
         struct tm t = *localtime(&now);
         strftime(buf, sizeof(buf), "%H:%M", &t);
-        lcd->UpdateClock(true, buf);
+        strftime(dbuf, sizeof(dbuf), "%Y-%m-%d", &t);
+        lcd->UpdateClock(true, buf, dbuf);
     }
 
     static void OnClockTimer(void* arg) {
