@@ -387,6 +387,50 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 设置写入 NVS（`camera/flip`），**断电重启自动恢复该设置**。
 - 实现：板级 `ApplyCameraFlip()` 开机应用 + `Esp32Camera::SetHMirror/SetVFlip`（官方 sensor 寄存器接口）。
 
+## 待机大时钟（AI 控制 + 本地持久化）
+
+- 说「切换时钟模式 / 打开时钟 / 关闭时钟」→ `self.clock.set`（mode: `1`=开启, `0`=关闭, `-1`=切换）。
+- 开启后，**待机**状态下屏幕中央显示大号时间（`HH:MM`，LVGL Montserrat 48px 字体，`CONFIG_LV_FONT_MONTSERRAT_48=y`）；对话/聆听/播放时自动隐藏，不干扰字幕。
+- 时间来自联网后同步的系统时钟（与绝对闹钟同源）；未同步前不显示。
+- 设置写入 NVS（`clock/mode`），**断电重启自动恢复**。
+- 实现：板级显示子类 `airobot_lcd_display.h`（`AirobotLcdDisplay : SpiLcdDisplay`，标准 `SetupUI()` 钩子叠加 LVGL 标签，不改核心 display 代码）+ 1 秒 `esp_timer` 刷新（仅在文本变化时更新标签，省 SPI 刷屏）。
+
+### 构建注意（大字体开关）
+
+大字体依赖 `CONFIG_LV_FONT_MONTSERRAT_48=y`，已写入 `config.json` 的 `sdkconfig_append`——但**直接 `idf.py build` 不读 config.json**（见下文踩坑记录）。平时直接用 `idf.py build` 的用户，二选一：
+
+**方式一（推荐，一劳永逸）**：用一次构建脚本，它会重新生成 `sdkconfig`（自动带上字体开关），之后继续直接 `idf.py build` 也没问题（`sdkconfig` 是持久文件，直接 build 会接着用它）：
+
+```bash
+python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
+```
+
+**方式二（纯 menuconfig）**：
+
+```bash
+idf.py menuconfig
+# Component config -> LVGL Library -> "Enable Montserrat 48" -> [Y] -> 保存退出
+```
+
+> 方式二的注意点：`sdkconfig` 被删或切芯片目标重建后，这个勾会丢，需重新勾选；方式一以后每次用 build.py 都会自动带上。
+>
+> 验证是否生效：`Select-String "LV_FONT_MONTSERRAT_48" sdkconfig` 应看到 `CONFIG_LV_FONT_MONTSERRAT_48=y`。
+>
+> 未开启的后果：不会编译失败（代码有 `#if` 保护），但时钟退回 14px 默认小字体。
+
+编译完成后烧录看日志（`scripts/build.py` 只管配置+编译，**不支持** flash/monitor 参数，烧录统一用 `idf.py`，端口按实际修改）：
+
+```bash
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+```
+
+### 真机验证要点
+
+1. 说「打开时钟」→ 待机时屏幕中央出现大号时间，且每分钟正确走字。
+2. 说「切换时钟模式」→ 时钟消失；再说一次 → 恢复。
+3. 开启时钟后唤醒对话/播放音乐 → 时钟隐藏，结束后回到待机自动恢复显示。
+4. 开启时钟后断电重启 → 仍显示时钟（NVS 持久化生效）。
+
 ## AI 闹钟提醒（AI 语音 + 网页 + TF 卡持久化）
 
 > 仅 TF 卡功能开启时生效（与本地音乐/上传页同开关 `CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD`）。

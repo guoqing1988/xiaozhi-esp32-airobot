@@ -10,7 +10,8 @@
             },
             "sdkconfig_append": [
                 "CONFIG_LCD_ST7789_240X320=y",
-                "CONFIG_FATFS_API_ENCODING_UTF_8=y"
+                "CONFIG_FATFS_API_ENCODING_UTF_8=y",
+                "CONFIG_LV_FONT_MONTSERRAT_48=y"
             ]
         },
         {
@@ -22,7 +23,8 @@
             "sdkconfig_append": [
                 "CONFIG_LCD_ST7789_240X320=y",
                 "CONFIG_FATFS_API_ENCODING_UTF_8=y",
-                "CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD=n"
+                "CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD=n",
+                "CONFIG_LV_FONT_MONTSERRAT_48=y"
             ]
         }
     ]

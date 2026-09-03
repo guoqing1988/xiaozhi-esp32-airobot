@@ -1,6 +1,7 @@
 #include "wifi_board.h"
 #include "codecs/no_audio_codec.h"
 #include "display/lcd_display.h"
+#include "airobot_lcd_display.h"
 #include "system_reset.h"
 #include "application.h"
 #include "button.h"
@@ -28,6 +29,7 @@
 #include "driver/uart.h"
 #include <cstring>
 #include <cstdio>
+#include <time.h>
 #include <cstdlib>
 #include <memory>
 #include <atomic>
@@ -101,6 +103,10 @@ private:
     std::string uno_last_result_;             // 最近结果(busy/done)
     TaskHandle_t uno_status_task_ = nullptr;  // UART0 RX 解析任务
 
+    // ---- 待机大时钟（AI 可控: self.clock.set, NVS 持久化）----
+    bool clock_mode_ = false;                // 时钟显示开关
+    esp_timer_handle_t clock_timer_ = nullptr;
+
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
         buscfg.mosi_io_num = DISPLAY_MOSI_PIN;
@@ -154,8 +160,8 @@ private:
 #ifdef  LCD_TYPE_GC9A01_SERIAL
         panel_config.vendor_config = &gc9107_vendor_config;
 #endif
-        display_ = new SpiLcdDisplay(panel_io, panel,
-                                    DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        display_ = new AirobotLcdDisplay(panel_io, panel,
+                                         DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
     void InitializeCamera() {
@@ -343,6 +349,66 @@ private:
         args.name = "ip_display";
         if (esp_timer_create(&args, &ip_timer_) == ESP_OK) {
             esp_timer_start_periodic(ip_timer_, 1000000);  // 每秒刷新
+        }
+    }
+
+    // 应用 NVS 保存的时钟显示设置(开机调用, 断电重启仍保持)
+    void ApplyClockMode() {
+        Settings settings("clock", false);
+        clock_mode_ = settings.GetInt("mode", 0) == 1;
+    }
+
+    // 待机大时钟工具(AI 可调, 设置本地持久化)
+    void InitializeClockTools() {
+        auto& mcp = McpServer::GetInstance();
+        mcp.AddTool(
+            "self.clock.set",
+            "设置待机大时钟显示。mode: 1=开启(待机时屏幕中央显示大号时间), 0=关闭, -1=切换(用户说\"切换时钟模式\"时传-1, 无需知道当前状态)。设置本地保存, 断电重启仍生效",
+            PropertyList({Property("mode", kPropertyTypeInteger, 1, -1, 1)}),
+            [this](const PropertyList& props) -> ReturnValue {
+                int mode = props["mode"].value<int>();
+                if (mode == -1) {
+                    mode = clock_mode_ ? 0 : 1;  // 切换
+                }
+                clock_mode_ = (mode == 1);
+                Settings settings("clock", true);
+                settings.SetInt("mode", mode);
+                return clock_mode_ ? "时钟显示已开启" : "时钟显示已关闭";
+            });
+    }
+
+    // 每秒刷新：仅"时钟模式开启 + 待机 + 系统时间已同步(联网后NTP)"时显示大号时间
+    void UpdateClock() {
+        auto* display = GetDisplay();
+        if (display == nullptr) {
+            return;
+        }
+        auto* lcd = static_cast<AirobotLcdDisplay*>(display);
+        time_t now = time(nullptr);
+        bool show = clock_mode_ && Application::GetInstance().GetDeviceState() == kDeviceStateIdle
+                    && now > 1700000000;  // 未同步到 2023 年之后视为无效时间
+        if (!show) {
+            lcd->UpdateClock(false, nullptr);
+            return;
+        }
+        static char buf[8];  // 仅 esp_timer 单任务调用, 静态缓冲安全
+        struct tm t = *localtime(&now);
+        strftime(buf, sizeof(buf), "%H:%M", &t);
+        lcd->UpdateClock(true, buf);
+    }
+
+    static void OnClockTimer(void* arg) {
+        static_cast<CompactWifiBoardS3CamAirobot*>(arg)->UpdateClock();
+    }
+
+    void InitializeClock() {
+        ApplyClockMode();
+        esp_timer_create_args_t args = {};
+        args.callback = OnClockTimer;
+        args.arg = this;
+        args.name = "clock_display";
+        if (esp_timer_create(&args, &clock_timer_) == ESP_OK) {
+            esp_timer_start_periodic(clock_timer_, 1000000);  // 每秒刷新
         }
     }
 
@@ -742,6 +808,7 @@ public:
         InitializeButtons();
         InitializeCamera();
         ApplyCameraFlip();              // 应用 NVS 保存的摄像头翻转设置
+        InitializeClock();              // 应用 NVS 时钟设置 + 启动每秒刷新定时器
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
         InitializeSDCard();
         InitializeUploadServer();
@@ -752,6 +819,7 @@ public:
         InitializeEchoUart();
         InitializeUnoTools();
         InitializeCameraTools();
+        InitializeClockTools();
         InitializeDebugTools();
         // 默认把日志压到 ERROR, 避免 GPIO43 日志污染 Arduino 串口(平时命令更稳定)
         esp_log_level_set("*", ESP_LOG_ERROR);
