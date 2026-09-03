@@ -14,6 +14,8 @@
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 #include "local_music_player.h"
 #include "http_upload_server.h"
+#include "alarm_manager.h"
+#include "assets/lang_config.h"
 #endif
 
 #include <esp_log.h>
@@ -26,6 +28,7 @@
 #include "driver/uart.h"
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -87,6 +90,7 @@ private:
     Esp32Camera* camera_;
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
     std::unique_ptr<LocalMusicPlayer> music_player_;
+    std::unique_ptr<AlarmManager> alarm_manager_;
     bool sd_card_mounted_ = false;
 #endif
     esp_timer_handle_t ip_timer_ = nullptr;  // 待机状态底部显示 IP 的定时器
@@ -450,6 +454,89 @@ private:
     }
 #endif  // CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+    // AI 闹钟/定时提醒: 注册 self.alarm.* MCP 工具 + web 页 REST 回调 + 后台到点检查
+    void InitializeAlarmTools() {
+        alarm_manager_ = std::make_unique<AlarmManager>(Application::GetInstance().GetAudioService());
+        // 到点触发: 检查线程回调, 用 Schedule 切回主任务再播报(避免跨任务操作音频/显示)
+        alarm_manager_->SetTriggerCallback([this](const AlarmItem& a) {
+            Application::GetInstance().Schedule([this, a]() { AlarmSpeak(a); });
+        });
+        alarm_manager_->Start();
+
+        auto& mcp = McpServer::GetInstance();
+        mcp.AddTool("self.alarm.set",
+            "设置一个闹钟/定时提醒。用于'X 分钟后提醒我'或'每天 HH:MM 提醒'。\n"
+            "Args:\n"
+            "  `type`: 'relative' 表示从现在起 N 分钟后提醒(一次性); 'absolute' 表示每天 HH:MM 提醒。\n"
+            "  `value`: relative 用分钟数(如 '5'); absolute 用 'HH:MM'(如 '07:30')。\n"
+            "  `label`: 提醒内容(如 '喝水'), 可省略。\n"
+            "Return: 创建的闹钟编号及说明。",
+            PropertyList({
+                Property("type", kPropertyTypeString),
+                Property("value", kPropertyTypeString),
+                Property("label", kPropertyTypeString, std::string(""))
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                auto type = props["type"].value<std::string>();
+                auto value = props["value"].value<std::string>();
+                auto label = props["label"].value<std::string>();
+                AlarmType t = (type == "absolute") ? kAlarmTypeAbsolute : kAlarmTypeRelative;
+                int sec = 0;
+                if (t == kAlarmTypeRelative) {
+                    sec = atoi(value.c_str()) * 60;   // 分钟 -> 秒
+                } else {
+                    int hh = 0, mm = 0;
+                    sscanf(value.c_str(), "%d:%d", &hh, &mm);
+                    sec = hh * 3600 + mm * 60;        // HH:MM -> 当天秒数
+                }
+                int id = alarm_manager_->Add(t, sec, label);
+                if (t == kAlarmTypeRelative) {
+                    return std::string("已设置闹钟 #") + std::to_string(id) + ", 将于 " + value +
+                           " 分钟后提醒";
+                }
+                return std::string("已设置闹钟 #") + std::to_string(id) + ", 每天 " + value + " 提醒";
+            });
+        mcp.AddTool("self.alarm.list",
+            "列出所有闹钟。返回 JSON 数组, 每条含 id/type/trigger_sec/label/enabled。",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                return alarm_manager_->ListJson();
+            });
+        mcp.AddTool("self.alarm.remove",
+            "按编号删除一个闹钟。id: 闹钟编号(见 self.alarm.list)。",
+            PropertyList({ Property("id", kPropertyTypeInteger) }),
+            [this](const PropertyList& props) -> ReturnValue {
+                int id = props["id"].value<int>();
+                bool ok = alarm_manager_->Remove(id);
+                return ok ? std::string("已删除闹钟 #") + std::to_string(id)
+                          : std::string("未找到编号为 ") + std::to_string(id) + " 的闹钟";
+            });
+
+        // 让 web 页面(上传页)能读写闹钟
+        SetAlarmWebApi({
+            .get_alarms_json = [this]() { return alarm_manager_->ListJson(); },
+            .add_alarm       = [this](const std::string& type, int value_sec, const std::string& label) {
+                AlarmType t = (type == "absolute") ? kAlarmTypeAbsolute : kAlarmTypeRelative;
+                return alarm_manager_->Add(t, value_sec, label);
+            },
+            .remove_alarm    = [this](int id) { return alarm_manager_->Remove(id); },
+        });
+    }
+
+    // 到点播报: 打断本地音乐 -> 内置提示音 -> 屏幕显示提醒内容(第一版走零网络方案)
+    void AlarmSpeak(const AlarmItem& a) {
+        auto& app = Application::GetInstance();
+        if (music_player_ != nullptr && music_player_->IsPlaying()) {
+            music_player_->Stop();
+        }
+        app.PlaySound(Lang::Sounds::OGG_POPUP);
+        if (GetDisplay() != nullptr) {
+            GetDisplay()->ShowNotification(a.label.empty() ? "⏰ 闹钟提醒" : a.label.c_str());
+        }
+    }
+#endif  // CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+
     void InitializeEchoUart() {
         uart_config_t uart_config = {
             .baud_rate = ECHO_UART_BAUD_RATE,
@@ -659,6 +746,7 @@ public:
         InitializeSDCard();
         InitializeUploadServer();
         InitializeMusicTools();
+        InitializeAlarmTools();
 #endif
         InitializeIpDisplay();
         InitializeEchoUart();

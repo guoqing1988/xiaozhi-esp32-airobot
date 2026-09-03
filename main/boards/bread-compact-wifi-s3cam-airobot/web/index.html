@@ -1,0 +1,94 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>小智 AI 机器人</title></head><body>
+<h2>🎵 上传歌曲到 TF 卡</h2>
+<p>上传前建议先用电脑上的转码脚本处理（24000Hz 单声道低码率 MP3，歌词转 UTF-8）<br>
+转码: python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp32s3.py 源目录 输出目录</p>
+<input type="file" id="f" accept=".mp3,.lrc" multiple>
+<button onclick="up()">上传</button>
+<label><input type="checkbox" id="ov" checked> 同名文件覆盖</label>
+<div style="margin:10px 0;width:100%;background:#eee;border-radius:4px;height:22px;overflow:hidden">
+<div id="bar" style="width:0%;height:22px;background:#4caf50;text-align:center;color:#fff;line-height:22px;font-size:13px;transition:width .2s">0%</div></div>
+<div id="log"></div>
+<script>
+function up(){
+const files=document.getElementById('f').files;
+const log=document.getElementById('log');
+const bar=document.getElementById('bar');
+if(!files.length){log.innerHTML='<div>请先选择文件</div>';return;}
+let i=0;
+function next(){
+if(i>=files.length){log.innerHTML+='<div><b>全部完成</b></div>';bar.style.width='0%';bar.textContent='0%';return;}
+const f=files[i++];
+log.innerHTML+='<div>⏳ 上传 '+f.name+' ('+(f.size/1024/1024).toFixed(1)+'MB) ...</div>';
+const xhr=new XMLHttpRequest();
+xhr.open('POST','/upload?name='+encodeURIComponent(f.name)+'&overwrite='+(document.getElementById('ov').checked?1:0));
+xhr.upload.onprogress=function(e){
+if(e.lengthComputable){
+const p=Math.round(e.loaded/e.total*100);
+bar.style.width=p+'%';bar.textContent=p+'%';
+}
+};
+xhr.onload=function(){
+if(xhr.status>=200&&xhr.status<300){
+log.innerHTML+='<div>✅ 成功 '+f.name+'</div>';
+}else if(xhr.status===403){
+log.innerHTML+='<div>⚠️ 同名已存在，跳过 '+f.name+'</div>';
+}else{
+log.innerHTML+='<div>❌ 失败('+xhr.status+') '+f.name+' '+xhr.responseText+'</div>';
+}
+next();
+};
+xhr.onerror=function(){
+log.innerHTML+='<div>❌ 网络错误 '+f.name+'</div>';
+next();
+};
+xhr.send(f);
+}
+next();
+}
+</script>
+
+<h2>⏰ AI 闹钟提醒</h2>
+<div>
+<select id="atype"><option value="relative">N 分钟后</option><option value="absolute">每天 HH:MM</option></select>
+<input id="avalue" placeholder="分钟数 或 HH:MM" size="10">
+<input id="alabel" placeholder="提醒内容(可选)" size="12">
+<button onclick="addAlarm()">添加</button>
+</div>
+<table id="alarmtable" border="1" cellpadding="4" style="border-collapse:collapse;margin-top:8px">
+<thead><tr><th>ID</th><th>类型</th><th>触发</th><th>内容</th><th>状态</th><th>操作</th></tr></thead>
+<tbody></tbody></table>
+<div id="alarmlog"></div>
+<script>
+function fmtSec(s){var h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return ('0'+h).slice(-2)+':'+('0'+m).slice(-2);}
+function loadAlarms(){
+fetch('/alarm?action=list').then(r=>r.text()).then(t=>{
+const arr=JSON.parse(t);const tb=document.querySelector('#alarmtable tbody');tb.innerHTML='';
+arr.forEach(a=>{
+const isAbs=a.type==='absolute';
+const trigger=isAbs?('每天 '+fmtSec(a.trigger_sec)):(a.trigger_sec+' 秒(约'+(a.trigger_sec/60).toFixed(0)+'分钟)');
+const tr=document.createElement('tr');
+tr.innerHTML='<td>'+a.id+'</td><td>'+(isAbs?'每天':'相对')+'</td><td>'+trigger+'</td><td>'+(a.label||'')+'</td><td>'+(a.enabled?'启用':'停用')+'</td><td><button onclick="delAlarm('+a.id+')">删除</button></td>';
+tb.appendChild(tr);
+});
+}).catch(e=>{document.getElementById('alarmlog').innerHTML='<div>加载失败 '+e+'</div>';});
+}
+function addAlarm(){
+const type=document.getElementById('atype').value;
+const value=document.getElementById('avalue').value.trim();
+const label=document.getElementById('alabel').value.trim();
+if(!value){document.getElementById('alarmlog').innerHTML='<div>请填触发值</div>';return;}
+let sec;
+if(type==='relative'){sec=Math.round(parseFloat(value)*60);}
+else{const p=value.split(':');sec=(+p[0])*3600+(+p[1]||0)*60;}
+fetch('/alarm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',type:type,value:sec,label:label})})
+.then(()=>{loadAlarms();document.getElementById('alarmlog').innerHTML='<div>✅ 已添加</div>';})
+.catch(e=>{document.getElementById('alarmlog').innerHTML='<div>❌ '+e+'</div>';});
+}
+function delAlarm(id){
+fetch('/alarm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',id:id})})
+.then(()=>loadAlarms()).catch(e=>{document.getElementById('alarmlog').innerHTML='<div>❌ '+e+'</div>';});
+}
+loadAlarms();
+</script>
+</body></html>

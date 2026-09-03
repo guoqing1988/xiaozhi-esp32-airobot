@@ -4,6 +4,7 @@
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_timer.h>
+#include <cJSON.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -18,6 +19,10 @@
 static std::function<void()> s_on_uploaded;
 // 等待 WiFi 就绪的轮询定时器
 static esp_timer_handle_t s_wifi_timer = nullptr;
+// 闹钟管理回调(由板级 SetAlarmWebApi 注入)
+static AlarmWebApi s_alarm_api;
+
+void SetAlarmWebApi(const AlarmWebApi& api) { s_alarm_api = api; }
 
 // URL 解码（%XX -> 字符，+ -> 空格），用于文件名
 static void UrlDecode(char* out, size_t out_size, const char* in) {
@@ -48,60 +53,16 @@ static void SanitizeName(char* name) {
     }
 }
 
+// 嵌入的 web 页面(index.html, 由 main/CMakeLists.txt 的 EMBED_FILES 嵌入)
+extern const char index_html_start[] asm("_binary_index_html_start");
+extern const char index_html_end[] asm("_binary_index_html_end");
+
 static esp_err_t HandleIndex(httpd_req_t* req) {
-    const char html[] =
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-        "<title>歌曲上传</title></head><body>"
-        "<h2>🎵 上传歌曲到 TF 卡</h2>"
-        "<p>上传前建议先用电脑上的转码脚本处理（24000Hz 单声道低码率 MP3，歌词转 UTF-8）<br>"
-        "转码: python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp32s3.py 源目录 输出目录</p>"
-        "<input type=\"file\" id=\"f\" accept=\".mp3,.lrc\" multiple>"
-        "<button onclick=\"up()\">上传</button> "
-        "<label><input type=\"checkbox\" id=\"ov\" checked> 同名文件覆盖</label>"
-        "<div style=\"margin:10px 0;width:100%;background:#eee;border-radius:4px;height:22px;overflow:hidden\">"
-        "<div id=\"bar\" style=\"width:0%;height:22px;background:#4caf50;text-align:center;color:#fff;line-height:22px;font-size:13px;transition:width .2s\">0%</div></div>"
-        "<div id=\"log\"></div>"
-        "<script>"
-        "function up(){"
-        "const files=document.getElementById('f').files;"
-        "const log=document.getElementById('log');"
-        "const bar=document.getElementById('bar');"
-        "if(!files.length){log.innerHTML='<div>请先选择文件</div>';return;}"
-        "let i=0;"
-        "function next(){"
-        "if(i>=files.length){log.innerHTML+='<div><b>全部完成</b></div>';bar.style.width='0%';bar.textContent='0%';return;}"
-        "const f=files[i++];"
-        "log.innerHTML+='<div>⏳ 上传 '+f.name+' ('+(f.size/1024/1024).toFixed(1)+'MB) ...</div>';"
-        "const xhr=new XMLHttpRequest();"
-        "xhr.open('POST','/upload?name='+encodeURIComponent(f.name)+'&overwrite='+(document.getElementById('ov').checked?1:0));"
-        "xhr.upload.onprogress=function(e){"
-        "if(e.lengthComputable){"
-        "const p=Math.round(e.loaded/e.total*100);"
-        "bar.style.width=p+'%';bar.textContent=p+'%';"
-        "}"
-        "};"
-        "xhr.onload=function(){"
-        "if(xhr.status>=200&&xhr.status<300){"
-        "log.innerHTML+='<div>✅ 成功 '+f.name+'</div>';"
-        "}else if(xhr.status===403){"
-        "log.innerHTML+='<div>⚠️ 同名已存在，跳过 '+f.name+'</div>';"
-        "}else{"
-        "log.innerHTML+='<div>❌ 失败('+xhr.status+') '+f.name+' '+xhr.responseText+'</div>';"
-        "}"
-        "next();"
-        "};"
-        "xhr.onerror=function(){"
-        "log.innerHTML+='<div>❌ 网络错误 '+f.name+'</div>';"
-        "next();"
-        "};"
-        "xhr.send(f);"
-        "}"
-        "next();"
-        "}"
-        "</script></body></html>";
+    // 页面内容存于独立文件 main/boards/bread-compact-wifi-s3cam-airobot/web/index.html
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, index_html_start, static_cast<size_t>(index_html_end - index_html_start));
 }
+
 
 static esp_err_t HandleUpload(httpd_req_t* req) {
     // httpd_query_key_value 期望纯 query 字符串（不含路径和 '?'），需从 uri 中提取
@@ -195,6 +156,68 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// GET /alarm?action=list：返回闹钟 JSON 数组(供网页/外部读取)
+static esp_err_t HandleAlarmGet(httpd_req_t* req) {
+    const char* q = strchr(req->uri, '?');
+    char action[16] = {};
+    if (q != nullptr) {
+        q++;  // 跳过 '?'
+        httpd_query_key_value(q, "action", action, sizeof(action));
+    }
+    std::string body;
+    if (strcmp(action, "list") == 0 && s_alarm_api.get_alarms_json) {
+        body = s_alarm_api.get_alarms_json();
+    } else {
+        body = "{\"error\":\"unknown action\"}";
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, body.c_str());
+}
+
+// POST /alarm：JSON body 支持 add / remove。
+//   add:    {"action":"add","type":"relative|absolute","value":<秒>,"label":"..."}
+//   remove: {"action":"remove","id":<编号>}
+static esp_err_t HandleAlarmPost(httpd_req_t* req) {
+    char buf[1024];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_OK;  // 响应已通过 send_err 发送, 返回 OK 避免 httpd 直接关闭 socket
+    }
+    buf[len] = '\0';
+
+    cJSON* root = cJSON_Parse(buf);
+    if (root == nullptr) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_OK;
+    }
+    cJSON* c_action = cJSON_GetObjectItem(root, "action");
+    const char* action = (c_action && c_action->valuestring) ? c_action->valuestring : "";
+
+    std::string resp;
+    if (strcmp(action, "add") == 0 && s_alarm_api.add_alarm) {
+        cJSON* c_type = cJSON_GetObjectItem(root, "type");
+        const char* ty = (c_type && c_type->valuestring) ? c_type->valuestring : "relative";
+        cJSON* c_val = cJSON_GetObjectItem(root, "value");
+        int val = c_val ? c_val->valueint : 0;
+        cJSON* c_label = cJSON_GetObjectItem(root, "label");
+        const char* lb = (c_label && c_label->valuestring) ? c_label->valuestring : "";
+        int id = s_alarm_api.add_alarm(ty, val, lb);
+        resp = std::string("{\"id\":") + std::to_string(id) + "}";
+    } else if (strcmp(action, "remove") == 0 && s_alarm_api.remove_alarm) {
+        cJSON* c_id = cJSON_GetObjectItem(root, "id");
+        int id = c_id ? c_id->valueint : -1;
+        bool ok = s_alarm_api.remove_alarm(id);
+        resp = ok ? "{\"ok\":true}" : "{\"ok\":false}";
+    } else {
+        resp = "{\"error\":\"unknown action\"}";
+    }
+    cJSON_Delete(root);
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, resp.c_str());
+}
+
 static void StartHttpServer() {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
@@ -212,8 +235,16 @@ static void StartHttpServer() {
     httpd_uri_t upload_uri = {
         .uri = "/upload", .method = HTTP_POST, .handler = HandleUpload, .user_ctx = nullptr,
     };
+    httpd_uri_t alarm_get_uri = {
+        .uri = "/alarm", .method = HTTP_GET, .handler = HandleAlarmGet, .user_ctx = nullptr,
+    };
+    httpd_uri_t alarm_post_uri = {
+        .uri = "/alarm", .method = HTTP_POST, .handler = HandleAlarmPost, .user_ctx = nullptr,
+    };
     if (httpd_register_uri_handler(server, &index_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &upload_uri) != ESP_OK) {
+        httpd_register_uri_handler(server, &upload_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &alarm_get_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register uri handlers");
         return;
     }

@@ -886,6 +886,12 @@ file(GLOB BOARD_SOURCES
 )
 list(APPEND SOURCES ${BOARD_SOURCES})
 
+# 板级嵌入式资源: 该板自带 web 页面(如 bread-compact-wifi-s3cam-airobot 的上传/闹钟页)
+set(BOARD_EMBED_FILES "")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/web")
+    file(GLOB BOARD_EMBED_FILES "${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/web/*")
+endif()
+
 # Select one audio engine for each chip family
 if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4 OR CONFIG_IDF_TARGET_ESP32S31)
     list(APPEND SOURCES "audio/engines/afe_audio_engine.cc")
@@ -1066,7 +1072,7 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
     )
 endif()
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${BOARD_EMBED_FILES}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
