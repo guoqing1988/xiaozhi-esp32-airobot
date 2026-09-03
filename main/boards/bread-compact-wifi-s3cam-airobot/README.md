@@ -532,6 +532,8 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 
 ## Emote 表情显示（官方动画风格）
 
+> 📄 **详细使用文档：[`docs/emote-display.md`](docs/emote-display.md)**（编译烧录 / 换屏 / 布局调整 / 回退 LVGL / 常见问题）
+
 本板支持官方表情动画风格（`CONFIG_USE_EMOTE_MESSAGE_STYLE`，已在 `config.json` 默认开启）。开启后 UI 不走 LVGL，改用乐鑫 `esp_emote_expression` 引擎独立 30fps 渲染：官方 .eaf 动画表情（中性/开心/难过/生气/哭/困惑/惊讶/眨眼/倾听/睡觉/聆听）+ 对话文本（顶部滚动 toast）+ 时钟 + 状态图标 + 配网二维码，全部由 `expression_assets.bin`（烧写至 assets 分区 0x800000）提供。
 
 ### 布局按屏幕分辨率适配
