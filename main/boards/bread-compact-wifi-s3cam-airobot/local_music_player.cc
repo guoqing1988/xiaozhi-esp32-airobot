@@ -12,6 +12,7 @@
 #include <chrono>
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
 #include "esp_audio_dec_default.h"
@@ -27,15 +28,41 @@ namespace {
 // esp_mp3_dec(Helix) 解码需要约 20KB 栈(esp_audio_codec 文档要求)，不加大会栈溢出导致设备重启。
 constexpr size_t kPlayThreadStackBytes = 32 * 1024;
 
+// 诊断：打印堆内存状态，定位线程创建失败是“内部 RAM 总量不足”还是“碎片化”。
+// internal largest < 32KB 而 internal free 仍较大 → 碎片；internal free 已很小 → 总量不足。
+static void LogMemStats(const char* where) {
+    ESP_LOGE(TAG, "%s | internal: free=%u largest=%u min_ever=%u | total free=%u | psram free=%u",
+             where,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
 // 以显式大栈创建播放线程；创建后恢复默认 pthread 配置，避免影响后续其它线程。
 std::thread CreatePlayThread(void (LocalMusicPlayer::*task)(), LocalMusicPlayer* self) {
     esp_pthread_cfg_t saved = esp_pthread_get_default_config();
     esp_pthread_cfg_t cfg = saved;
     cfg.stack_size = kPlayThreadStackBytes;
+    // 关键修复：线程栈从 PSRAM 分配，而非默认的内部 RAM。
+    // ESP-IDF pthread 的任务栈默认只能放内部 RAM(MALLOC_CAP_INTERNAL)，而本板内部 RAM
+    // 稀缺(总量~282KB, PSRAM DMA 又保留 96KB)，对话/AFE/摄像头/opus 24KB 任务栈等常驻后
+    // 内部堆拿不出 ≥32KB 连续块 → xTaskCreate 失败 → pthread 返回 ENOMEM →
+    // std::thread 抛 system_error("Not enough space")，现象即“播放不了 + 这两条日志”。
+    // Helix MP3 解码为纯软件运算，无 ISR/DMA 上下文，可安全运行于 PSRAM 栈
+    // (CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y 已开启；esp_pthread 官方支持)。
+    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     cfg.thread_name = "music_play";
     cfg.prio = 2;  // 低于音频/AFE(8)、主循环(10)、httpd(6)，解码忙时不抢交互任务
     esp_pthread_set_cfg(&cfg);
-    std::thread t(task, self);
+    std::thread t;
+    try {
+        t = std::thread(task, self);
+    } catch (...) {
+        esp_pthread_set_cfg(&saved);  // 创建失败也要恢复配置, 避免残留影响调用任务后续建线程
+        throw;
+    }
     esp_pthread_set_cfg(&saved);
     return t;
 }
@@ -235,7 +262,15 @@ bool LocalMusicPlayer::PlayRandom() {
     if (play_thread_.joinable()) {
         play_thread_.join();
     }
-    play_thread_ = CreatePlayThread(&LocalMusicPlayer::PlayTask, this);
+    try {
+        play_thread_ = CreatePlayThread(&LocalMusicPlayer::PlayTask, this);
+    } catch (const std::exception& e) {
+        // 线程创建失败(内部 RAM 耗尽/碎片)时复位状态并打印堆诊断，避免裸异常冒泡
+        playing_ = false;
+        LogMemStats("PlayRandom create thread failed");
+        ESP_LOGE(TAG, "Failed to start play thread: %s", e.what());
+        return false;
+    }
     return true;
 }
 
@@ -272,7 +307,16 @@ std::string LocalMusicPlayer::PlaySong(const std::string& name) {
     if (play_thread_.joinable()) {
         play_thread_.join();
     }
-    play_thread_ = CreatePlayThread(&LocalMusicPlayer::PlayTask, this);
+    try {
+        play_thread_ = CreatePlayThread(&LocalMusicPlayer::PlayTask, this);
+    } catch (const std::exception& e) {
+        // 线程创建失败(多为内部 RAM 耗尽/碎片)：复位状态并给出可读错误, 而非让裸异常
+        // 变成 MCP 的 "Not enough space"；附带堆诊断日志便于定位是碎片还是总量不足
+        playing_ = false;
+        LogMemStats("PlaySong create thread failed");
+        ESP_LOGE(TAG, "Failed to start play thread: %s", e.what());
+        return "启动播放失败(内存不足), 请稍后重试或重启设备";
+    }
     return "已开始播放: " + found;
 }
 
