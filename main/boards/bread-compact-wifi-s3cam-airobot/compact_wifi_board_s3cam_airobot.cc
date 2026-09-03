@@ -93,6 +93,8 @@ private:
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
     std::unique_ptr<LocalMusicPlayer> music_player_;
     std::unique_ptr<AlarmManager> alarm_manager_;
+    esp_timer_handle_t alarm_chime_timer_ = nullptr;  // 无歌兜底: 几声提示音连播的定时器
+    std::atomic<int> alarm_chime_left_ = 0;           // 剩余要补播的提示音次数(跨任务, 用原子)
     bool sd_card_mounted_ = false;
 #endif
     esp_timer_handle_t ip_timer_ = nullptr;  // 待机状态底部显示 IP 的定时器
@@ -590,16 +592,64 @@ private:
         });
     }
 
-    // 到点播报: 打断本地音乐 -> 内置提示音 -> 屏幕显示提醒内容(第一版走零网络方案)
+    // 到点提醒: 打断本地音乐 -> 自动随机播放本地歌曲作为铃声(音乐闹钟)。
+    // 复用现有播放链路(随机播放/唤醒打断/歌词显示均走原始逻辑), 声音明显且持续,
+    // 用户唤醒词/按钮/说停即可打断响铃; 卡上无歌或启动失败时退回内置提示音。
     void AlarmSpeak(const AlarmItem& a) {
         auto& app = Application::GetInstance();
         if (music_player_ != nullptr && music_player_->IsPlaying()) {
-            music_player_->Stop();
+            music_player_->Stop();  // 闹钟优先: 先停掉用户正在听的歌
         }
-        app.PlaySound(Lang::Sounds::OGG_POPUP);
+        bool ringing = false;
+        auto* player = GetMusicPlayer();  // 懒创建(首次响铃时建对象 + 扫描 SD 卡)
+        if (player != nullptr && !player->ListSongs().empty()) {
+            ringing = player->PlayRandom();
+        }
+        if (!ringing) {
+            StartAlarmChime(3);  // 无歌/启动失败兜底: 立即一声 + 每 1s 补 3 声(共 4 声, 比单声容易听到)
+        }
         if (GetDisplay() != nullptr) {
             GetDisplay()->ShowNotification(a.label.empty() ? "⏰ 闹钟提醒" : a.label.c_str());
         }
+    }
+
+    // ---- 兜底长提示音: 无歌/播放失败时闹钟不能“一声就完”, 用周期定时器补几声 ----
+    // esp_timer 回调(esp_timer 任务上下文)里再 Schedule 回主任务播报,
+    // 与 PlaySound 常规调用保持同上下文, 不新增线程、不阻塞任何任务。
+    static void OnAlarmChimeTimer(void* arg) {
+        auto* self = static_cast<CompactWifiBoardS3CamAirobot*>(arg);
+        if (self->alarm_chime_left_.load() <= 0) {
+            self->StopAlarmChime();
+            return;
+        }
+        self->alarm_chime_left_.fetch_sub(1);
+        Application::GetInstance().Schedule([]() {
+            Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
+        });
+        if (self->alarm_chime_left_.load() <= 0) {
+            self->StopAlarmChime();
+        }
+    }
+
+    void StartAlarmChime(int extra_times) {
+        StopAlarmChime();
+        alarm_chime_left_ = extra_times;
+        esp_timer_create_args_t args = {};
+        args.callback = OnAlarmChimeTimer;
+        args.arg = this;
+        args.name = "alarm_chime";
+        if (esp_timer_create(&args, &alarm_chime_timer_) == ESP_OK) {
+            esp_timer_start_periodic(alarm_chime_timer_, 1000000);  // 每秒补一声
+        }
+    }
+
+    void StopAlarmChime() {
+        if (alarm_chime_timer_ != nullptr) {
+            esp_timer_stop(alarm_chime_timer_);
+            esp_timer_delete(alarm_chime_timer_);
+            alarm_chime_timer_ = nullptr;
+        }
+        alarm_chime_left_ = 0;
     }
 #endif  // CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 
