@@ -387,6 +387,57 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 设置写入 NVS（`camera/flip`），**断电重启自动恢复该设置**。
 - 实现：板级 `ApplyCameraFlip()` 开机应用 + `Esp32Camera::SetHMirror/SetVFlip`（官方 sensor 寄存器接口）。
 
+## AI 闹钟提醒（AI 语音 + 网页 + TF 卡持久化）
+
+> 仅 TF 卡功能开启时生效（与本地音乐/上传页同开关 `CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD`）。
+
+本板支持用 **AI 语音**设置闹钟/定时提醒，也可在 **web 页面**（复用 `http://<设备IP>/` 上传页）查看/新增/删除闹钟，到点后**内置提示音 + 屏幕显示提醒内容**。
+
+### 闹钟类型
+
+| 类型 | 触发方式 | 说明 |
+|------|----------|------|
+| `relative` | 从现在起 N 分钟后（一次性） | 如「30分钟后提醒我喝水」，重启后重新计时 |
+| `absolute` | 每天 HH:MM（每天重复） | 如「每天 7:00 叫我起床」；若设置时刻当天已过，则次日触发 |
+
+### AI 语音指令（服务端通过 MCP 工具自动调用）
+
+| 你对助手说的话 | 触发工具 | 效果 |
+|--------|---------|------|
+| 「30分钟后提醒我喝水」 | `self.alarm.set(type=relative, value=30, label=喝水)` | 创建一个 30 分钟后的相对闹钟，返回编号 |
+| 「每天 7:00 叫我」 | `self.alarm.set(type=absolute, value=07:00, label=起床)` | 创建每天 7:00 的闹钟 |
+| 「列出闹钟 / 有什么提醒」 | `self.alarm.list` | 返回所有闹钟 JSON 数组（id/type/trigger_sec/label/enabled） |
+| 「删除 3 号闹钟」 | `self.alarm.remove(id=3)` | 删除指定编号闹钟 |
+
+### web 页面管理
+
+- 待机状态屏幕底部显示 IP（如 `192.168.31.74`），浏览器打开 `http://<设备IP>/`。
+- 页面底部有「⏰ AI 闹钟提醒」区：下拉选类型（N 分钟后 / 每天 HH:MM），填触发值与提醒内容，点「添加」；表格列出所有闹钟，每行可「删除」。
+- 页面通过 `/alarm?action=list`（GET）与 `/alarm`（POST `add` / `remove`）读写闹钟，与 AI 语音共用同一份数据。
+
+### 持久化与数据结构
+
+- 闹钟以 JSON 文件保存在 TF 卡：**`/sdcard/alarms.json`**（断电重启不丢）。
+- 每条数据：`{"id":1, "type":"relative", "trigger_sec":1800, "label":"喝水", "enabled":true}`；绝对闹钟额外含 `last_fired_day`（上次触发的天序号，避免当天重复）。
+
+### 到点播报
+
+- 到点触发时：**先打断正在播放的本地音乐** → **播放内置提示音**（OGG_POPUP）→ **屏幕字幕条显示提醒内容**（无 label 时显示「⏰ 闹钟提醒」）。
+- 第一版走零联网方案（提示音 + 屏幕显示），稳定可靠；后续可扩展为服务端 TTS 播报个性化语音。
+
+### 实现说明
+
+- 全部逻辑在板级：`alarm_manager.h` / `alarm_manager.cc`（闹钟存储、到点判断、后台检查线程），由 CMake `file(GLOB)` 自动编译；`http_upload_server.*` 提供 `/alarm` REST 接口与嵌入页面。
+- 后台检查线程每 `ALARM_CHECK_INTERVAL_MS`（默认 1 秒）扫描一次，到点后通过 `Application::Schedule` 切回主任务再播报（避免跨任务操作音频/显示）。
+- 相对闹钟用 `esp_timer` 单调时钟计时（从创建时刻起算）；绝对闹钟依赖小智联网后同步的系统时钟（`time()`/`localtime()`）。
+
+### 真机验证要点
+
+1. 设一个 1 分钟的临时相对闹钟 → 到点听到提示音 + 屏幕显示提醒内容。
+2. 设置闹钟后断电重启 → `self.alarm.list` 仍能查到（`/sdcard/alarms.json` 存在且正确）。
+3. 网页打开 `http://<设备IP>/` → 可看到闹钟列表，新增/删除后设备端 `self.alarm.list` 同步。
+4. 绝对闹钟（设一个当天下一个未到时刻）→ 到点触发，且当天重复设置不重复响。
+
 ## Arduino 下位机（Mecanum 机器人）
 
 本板可选配一个 **Arduino 下位机**（麦克纳姆轮机器人），由 ESP32 通过串口控制。
