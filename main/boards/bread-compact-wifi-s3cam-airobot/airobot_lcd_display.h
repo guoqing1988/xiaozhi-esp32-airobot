@@ -5,6 +5,7 @@
 #define AIROBOT_LCD_DISPLAY_H
 
 #include "display/lcd_display.h"
+#include "lvgl_theme.h"
 
 #include <esp_lvgl_port.h>
 
@@ -28,7 +29,6 @@ public:
         // 未开启时退回默认 14px 字体，仍可编译运行）
         lv_obj_set_style_text_font(clock_label_, &lv_font_montserrat_48, 0);
 #endif
-        lv_obj_set_style_text_color(clock_label_, lv_color_white(), 0);
         lv_obj_align(clock_label_, LV_ALIGN_CENTER, 0, -20);  // 上移避开底部字幕条(IP/歌词)
         lv_obj_add_flag(clock_label_, LV_OBJ_FLAG_HIDDEN);    // 默认隐藏
     }
@@ -44,6 +44,13 @@ public:
         if (visible) {
             if (time_text != nullptr && time_text != clock_time_text_) {
                 clock_time_text_ = time_text;
+                // 文字颜色跟随当前主题(浅色底深字/深色底白字)，与其它 UI 文字一致，
+                // 避免固定白色在浅色背景下看不清；主题切换(SetTheme)不重建时钟 label，
+                // 故每次刷新文本时同步一次主题色。
+                auto* theme = static_cast<LvglTheme*>(current_theme_);
+                if (theme != nullptr) {
+                    lv_obj_set_style_text_color(clock_label_, theme->text_color(), 0);
+                }
                 lv_label_set_text(clock_label_, time_text);
             }
             lv_obj_remove_flag(clock_label_, LV_OBJ_FLAG_HIDDEN);
