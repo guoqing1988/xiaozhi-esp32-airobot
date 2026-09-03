@@ -1,6 +1,9 @@
 #include "wifi_board.h"
 #include "codecs/no_audio_codec.h"
 #include "display/lcd_display.h"
+#if CONFIG_USE_EMOTE_MESSAGE_STYLE
+#include "display/emote_display.h"
+#endif
 #include "system_reset.h"
 #include "application.h"
 #include "button.h"
@@ -83,7 +86,7 @@ class CompactWifiBoardS3CamAirobot : public WifiBoard {
 private:
  
     Button boot_button_;
-    LcdDisplay* display_;
+    Display* display_;
     Esp32Camera* camera_;
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
     std::unique_ptr<LocalMusicPlayer> music_player_;
@@ -150,8 +153,13 @@ private:
 #ifdef  LCD_TYPE_GC9A01_SERIAL
         panel_config.vendor_config = &gc9107_vendor_config;
 #endif
+#if CONFIG_USE_EMOTE_MESSAGE_STYLE
+        // 官方 Emote 表情风格: 独立 gfx 引擎全屏渲染, 不走 LVGL
+        display_ = new emote::EmoteDisplay(panel, panel_io, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+#else
         display_ = new SpiLcdDisplay(panel_io, panel,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+#endif
     }
 
     void InitializeCamera() {

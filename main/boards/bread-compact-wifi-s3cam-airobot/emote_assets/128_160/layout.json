@@ -1,0 +1,78 @@
+[
+  {
+    "type": "anim",
+    "name": "eye_anim",
+    "align": "GFX_ALIGN_CENTER",
+    "x": 0,
+    "y": -25,
+    "anim": {
+      "mirror": "auto"
+    }
+  },
+  {
+    "type": "anim",
+    "name": "emerg_dlg",
+    "align": "GFX_ALIGN_CENTER",
+    "x": 0,
+    "y": -25,
+    "anim": {
+      "mirror": "auto"
+    }
+  },
+  {
+    "type": "image",
+    "name": "status_icon",
+    "align": "GFX_ALIGN_TOP_MID",
+    "x": -50,
+    "y": 4
+  },
+  {
+    "type": "label",
+    "name": "clock_label",
+    "align": "GFX_ALIGN_TOP_MID",
+    "x": 35,
+    "y": 4,
+    "width": 70,
+    "height": 18,
+    "label": {
+      "color": 16777215,
+      "text_align": "GFX_TEXT_ALIGN_CENTER"
+    }
+  },
+  {
+    "type": "label",
+    "name": "toast_label",
+    "align": "GFX_ALIGN_BOTTOM_MID",
+    "x": 0,
+    "y": -10,
+    "width": 124,
+    "height": 26,
+    "label": {
+      "color": 16777215,
+      "text_align": "GFX_TEXT_ALIGN_CENTER",
+      "long_mode": {
+        "type": "GFX_LABEL_LONG_SCROLL",
+        "loop": true,
+        "speed": 10
+      }
+    }
+  },
+  {
+    "type": "anim",
+    "name": "listen_anim",
+    "align": "GFX_ALIGN_CENTER",
+    "x": 0,
+    "y": -25
+  },
+  {
+    "type": "timer",
+    "name": "clock_timer"
+  },
+  {
+    "type": "qrcode",
+    "name": "qrcode",
+    "align": "GFX_ALIGN_CENTER",
+    "x": 0,
+    "y": 0
+  }
+]

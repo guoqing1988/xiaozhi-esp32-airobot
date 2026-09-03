@@ -786,6 +786,37 @@ elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_S3CAM_AIROBOT)
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
     set(BUILTIN_ICON_FONT font_material_symbols_16_4)
     set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_64)
+    # Emote 风格: 按屏型选择画布布局(目录内 layout.json), 缺失时回退组件默认 320_240
+    set(AIROBOT_EMOTE_EXTERNAL "${CMAKE_CURRENT_SOURCE_DIR}/boards/bread-compact-wifi-s3cam-airobot/emote_assets")
+    if(CONFIG_LCD_ST7789_240X320 OR CONFIG_LCD_ST7789_240X320_NO_IPS
+       OR CONFIG_LCD_ILI9341_240X320 OR CONFIG_LCD_ILI9341_240X320_NO_IPS
+       OR CONFIG_LCD_NV3030B_240X320 OR CONFIG_LCD_CUSTOM)
+        set(AIROBOT_EMOTE_RESOLUTION "240_320")
+    elseif(CONFIG_LCD_ST7789_240X240 OR CONFIG_LCD_ST7789_240X240_7PIN OR CONFIG_LCD_GC9A01_240X240)
+        set(AIROBOT_EMOTE_RESOLUTION "240_240")
+    elseif(CONFIG_LCD_ST7796_320X480 OR CONFIG_LCD_ST7796_320X480_NO_IPS)
+        set(AIROBOT_EMOTE_RESOLUTION "320_480")
+    elseif(CONFIG_LCD_ST7789_240X135)
+        set(AIROBOT_EMOTE_RESOLUTION "240_135")
+    elseif(CONFIG_LCD_ST7735_128X160)
+        set(AIROBOT_EMOTE_RESOLUTION "128_160")
+    elseif(CONFIG_LCD_ST7735_128X128)
+        set(AIROBOT_EMOTE_RESOLUTION "128_128")
+    else()
+        set(AIROBOT_EMOTE_RESOLUTION "240_320")
+    endif()
+    if(NOT EXISTS "${AIROBOT_EMOTE_EXTERNAL}/${AIROBOT_EMOTE_RESOLUTION}/layout.json")
+        set(AIROBOT_EMOTE_RESOLUTION "320_240")
+    endif()
+    set(EMOTE_RESOLUTION "${AIROBOT_EMOTE_RESOLUTION}")
+    set(EMOTE_EXTERNAL_PATH "${AIROBOT_EMOTE_EXTERNAL}")
+    # 表情资源路径(来自 esp_emote_assets 组件, 供直调 build.py 使用)
+    find_component_by_pattern("esp_emote_assets" AIROBOT_EMOTE_ASSETS_COMPONENT AIROBOT_EMOTE_ASSETS_PATH)
+    if(AIROBOT_EMOTE_ASSETS_PATH)
+        set(AIROBOT_EMOTE_FONT "${AIROBOT_EMOTE_ASSETS_PATH}/font/font_puhui_common_20_4.bin")
+        set(AIROBOT_EMOTE_EMOJI_DIR "${AIROBOT_EMOTE_ASSETS_PATH}/emoji_large")
+        set(AIROBOT_EMOTE_WAKENET "${AIROBOT_EMOTE_ASSETS_PATH}/wakenet/srmodels.bin")
+    endif()
 elseif(CONFIG_BOARD_TYPE_JIUCHUAN)
     set(BOARD_DIR "jiuchuan-s3")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_20_4)
@@ -1356,7 +1387,36 @@ if ("${size}" AND "${offset}")
         set(ASSETS_PARTITION "assets")
         set(ASSETS_FILE "${CMAKE_BINARY_DIR}/${ASSETS_NAME}.bin")
 
-        if(EMOTE_EXTERNAL_PATH)
+        if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_S3CAM_AIROBOT)
+            # 板级表情布局: 直调 build.py 显式传入字体/表情集合/唤醒词,
+            # 布局目录(emote_assets/<分辨率>/)只含 layout.json + emote.json,
+            # 避开 scripts/build.py 对 boards/*/config.json 的递归板扫描。
+            set(AIROBOT_EMOTE_BUILD_OUT "${AIROBOT_EMOTE_ASSETS_PATH}/scripts/spiffs_assets/build/face/output/assets.bin")
+            add_custom_command(
+                OUTPUT ${ASSETS_FILE}
+                COMMAND python ${AIROBOT_EMOTE_ASSETS_PATH}/scripts/spiffs_assets/build.py
+                    --resolution ${AIROBOT_EMOTE_EXTERNAL}/${AIROBOT_EMOTE_RESOLUTION}
+                    --name_length ${CONFIG_MMAP_FILE_NAME_LENGTH}
+                    --text_font ${AIROBOT_EMOTE_FONT}
+                    --res_path ${AIROBOT_EMOTE_EMOJI_DIR}
+                    --wakenet_model ${AIROBOT_EMOTE_WAKENET}
+                COMMAND ${CMAKE_COMMAND} -E copy ${AIROBOT_EMOTE_BUILD_OUT} ${ASSETS_FILE}
+                DEPENDS ${AIROBOT_EMOTE_ASSETS_PATH}/scripts/spiffs_assets/build.py
+                COMMENT "Building airobot emote assets (resolution ${AIROBOT_EMOTE_RESOLUTION})"
+                VERBATIM)
+            add_custom_target(generated_speaker_assets ALL DEPENDS ${ASSETS_FILE})
+            add_dependencies(flash generated_speaker_assets)
+            # 校验资源包不超过 assets 分区
+            if(size)
+                add_custom_command(
+                    OUTPUT ${ASSETS_FILE}.validated
+                    COMMAND ${CMAKE_COMMAND} -E env python -c "import os,sys; s=os.path.getsize('${ASSETS_FILE}'); sys.exit(1 if s>${size} else 0)"
+                    DEPENDS ${ASSETS_FILE}
+                    COMMENT "Validating airobot emote assets fit assets partition (${size} bytes)"
+                    VERBATIM)
+                add_custom_target(validate_speaker_assets ALL DEPENDS ${ASSETS_FILE}.validated)
+            endif()
+        elseif(EMOTE_EXTERNAL_PATH)
             build_speaker_assets_bin("${ASSETS_PARTITION}" ${EMOTE_RESOLUTION} ${ASSETS_FILE} ${CONFIG_MMAP_FILE_NAME_LENGTH} "${EMOTE_EXTERNAL_PATH}")
         else()
             build_speaker_assets_bin("${ASSETS_PARTITION}" ${EMOTE_RESOLUTION} ${ASSETS_FILE} ${CONFIG_MMAP_FILE_NAME_LENGTH})

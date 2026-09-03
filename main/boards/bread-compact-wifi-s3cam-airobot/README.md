@@ -530,6 +530,39 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 3. **指令防抖**：相同指令 1 秒内只发送一次（防抖命中返回“指令已发送(防抖): xxx”视为成功），AI 不听话也挡得住；不同指令（组合编排）不受影响。
 **排查方法备忘**：在 `McpServer::ReplyResult` 临时加一行日志打印 payload，可确认设备端每次调用都发出结果；比较重复调用 id 递增（服务器独立请求）还是相同（重发）；对比不同工具（uno 重复 vs music 正常）即可定位是设备端还是服务器端。
 
+## Emote 表情显示（官方动画风格）
+
+本板支持官方表情动画风格（`CONFIG_USE_EMOTE_MESSAGE_STYLE`，已在 `config.json` 默认开启）。开启后 UI 不走 LVGL，改用乐鑫 `esp_emote_expression` 引擎独立 30fps 渲染：官方 .eaf 动画表情（中性/开心/难过/生气/哭/困惑/惊讶/眨眼/倾听/睡觉/聆听）+ 对话文本（顶部滚动 toast）+ 时钟 + 状态图标 + 配网二维码，全部由 `expression_assets.bin`（烧写至 assets 分区 0x800000）提供。
+
+### 布局按屏幕分辨率适配
+
+官方默认布局是 320×240 横屏。本板可选多种屏幕，布局目录 `emote_assets/` 下每种画布尺寸一份 `layout.json`（元素位置均为锚点+偏移，由 CMake 按 `CONFIG_LCD_*` 选择对应目录）：
+
+| 目录 | 画布 | 覆盖的屏 |
+|------|------|----------|
+| `240_320` | 240×320 | ST7789/ILI9341/NV3030B 240×320（默认） |
+| `240_240` | 240×240 | ST7789/GC9A01 240×240 |
+| `320_480` | 320×480 | ST7796 320×480 |
+| `240_135` | 240×135 | ST7789 240×135 |
+| `128_160` | 128×160 | ST7735 128×160 |
+| `128_128` | 128×128 | ST7735 128×128 |
+
+### 构建链路
+
+1. CMake 按 LCD 选项设置 `EMOTE_RESOLUTION` + `EMOTE_EXTERNAL_PATH`（指向 `emote_assets/`）；
+2. `CONFIG_FLASH_EXPRESSION_ASSETS`（emote 风格自动开启）触发本板专属的 `add_custom_command`：**直调组件 `scripts/spiffs_assets/build.py`**，显式传入字体（`font_puhui_common_20_4.bin`）、表情集合（`emoji_large/`）、唤醒词模型（`srmodels.bin`）与板级布局目录；
+3. 产物 `expression_assets.bin` 烧写 assets 分区（约 2.7MB，8MB 分区）。
+
+> ⚠️ 布局目录里**不能放 `config.json`**：`scripts/build.py` 的板扫描会递归收集 `main/boards/**/config.json`，误认板配置导致构建失败。字体/集合参数因此走 CMake 显式传入，不走 `build_all.py --external_path`。
+
+### 布局调整
+
+`layout.json` 元素名必须与引擎常量一致（`eye_anim`/`emerg_dlg`/`listen_anim`/`toast_label`/`clock_label`/`clock_timer`/`status_icon`/`charge_icon`/`battery_label`/`qrcode`）；`align` 为锚点，`x`/`y` 为相对锚点的偏移（像素）。改完直接重编译即可（custom command 依赖 build.py 文件，删 `build/expression_assets.bin` 可强制重新打包）。
+
+### 回退到 LVGL 风格
+
+menuconfig 或 sdkconfig 关闭 `CONFIG_USE_EMOTE_MESSAGE_STYLE`（同时会自动回到 `FLASH_DEFAULT_ASSETS`），board 代码回到 `SpiLcdDisplay`（LVGL）分支。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。
