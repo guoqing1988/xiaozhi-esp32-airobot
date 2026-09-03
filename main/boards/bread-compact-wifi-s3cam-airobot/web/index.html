@@ -1,15 +1,94 @@
 <!DOCTYPE html><html><head><meta charset="utf-8">
-<title>小智 AI 机器人</title></head><body>
-<h2>🎵 上传歌曲到 TF 卡</h2>
-<p>上传前建议先用电脑上的转码脚本处理（24000Hz 单声道低码率 MP3，歌词转 UTF-8）<br>
-转码: python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp32s3.py 源目录 输出目录</p>
-<input type="file" id="f" accept=".mp3,.lrc" multiple>
-<button onclick="up()">上传</button>
-<label><input type="checkbox" id="ov" checked> 同名文件覆盖</label>
-<div style="margin:10px 0;width:100%;background:#eee;border-radius:4px;height:22px;overflow:hidden">
-<div id="bar" style="width:0%;height:22px;background:#4caf50;text-align:center;color:#fff;line-height:22px;font-size:13px;transition:width .2s">0%</div></div>
-<div id="log"></div>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小智 AI 机器人</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#333;line-height:1.6;padding:16px}
+.wrap{max-width:640px;margin:0 auto}
+.app-title{font-size:20px;font-weight:700;margin:4px 0 14px;color:#1f2937}
+.app-title small{display:block;font-size:12px;font-weight:400;color:#9aa3b2;margin-top:2px}
+.tabs{display:flex;gap:6px;margin-bottom:14px}
+.tab{flex:1;padding:11px 0;text-align:center;font-size:15px;font-weight:500;color:#6b7280;background:#eef0f4;border:none;border-radius:10px;cursor:pointer;transition:all .18s}
+.tab.active{color:#2563eb;background:#fff;font-weight:600;box-shadow:0 2px 6px rgba(37,99,235,.12)}
+.panel{display:none;background:#fff;border-radius:12px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.panel.active{display:block}
+h3{font-size:16px;font-weight:600;margin-bottom:12px}
+.hint{font-size:12.5px;color:#8a93a3;background:#f8f9fb;border-radius:8px;padding:10px 12px;margin-bottom:14px}
+.hint code{color:#d97706}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+input,select{padding:9px 10px;border:1px solid #dbe1ea;border-radius:8px;font-size:14px;background:#fff;color:#333;outline:none}
+input:focus,select:focus{border-color:#2563eb}
+input[type=file]{flex:1 1 100%;padding:9px}
+.btn{background:#2563eb;color:#fff;border:none;border-radius:8px;padding:9px 16px;font-size:14px;font-weight:500;cursor:pointer}
+.btn:hover{background:#1d4ed8}
+.btn-danger{background:#e11d48;padding:5px 10px;font-size:13px}
+.btn-danger:hover{background:#be123c}
+.check{display:flex;align-items:center;gap:6px;font-size:14px;color:#4b5563}
+.check input{width:16px;height:16px}
+.progress{width:100%;background:#eef0f4;border-radius:6px;height:18px;overflow:hidden;margin:6px 0 10px}
+.progress>div{height:100%;background:linear-gradient(90deg,#3b82f6,#2563eb);text-align:center;color:#fff;line-height:18px;font-size:12px;transition:width .2s}
+#log{font-size:13px;color:#374151}
+#log div{padding:2px 0}
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:4px}
+th,td{padding:8px 6px;text-align:left;border-bottom:1px solid #eef0f4}
+th{color:#6b7280;font-weight:600;font-size:12.5px}
+td:last-child{text-align:right}
+#alarmlog{font-size:13px;color:#374151;margin-top:10px}
+</style></head><body>
+<div class="wrap">
+  <div class="app-title">小智 AI 机器人<small>设备管理 · 歌曲上传 & 闹钟提醒</small></div>
+
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('upload',this)">🎵 歌曲上传</button>
+    <button class="tab" onclick="showTab('alarm',this)">⏰ 闹钟提醒</button>
+  </div>
+
+  <!-- 歌曲上传 -->
+  <div class="panel active" id="panel-upload">
+    <h3>🎵 上传歌曲到 TF 卡</h3>
+    <div class="hint">建议先用转码脚本处理（24000Hz 单声道低码率 MP3，歌词转 UTF-8）：<br>
+      <code>python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp32s3.py 源目录 输出目录</code></div>
+    <div class="row">
+      <input type="file" id="f" accept=".mp3,.lrc" multiple>
+    </div>
+    <div class="row">
+      <button class="btn" onclick="up()">上传</button>
+      <label class="check"><input type="checkbox" id="ov" checked> 同名文件覆盖</label>
+    </div>
+    <div class="progress"><div id="bar">0%</div></div>
+    <div id="log"></div>
+  </div>
+
+  <!-- 闹钟提醒 -->
+  <div class="panel" id="panel-alarm">
+    <h3>⏰ AI 闹钟提醒</h3>
+    <div class="hint">创建后到点自动播报与屏幕提醒；也支持语音「30分钟后提醒我喝水」。</div>
+    <div class="row">
+      <select id="atype">
+        <option value="relative">N 分钟后（一次性）</option>
+        <option value="absolute">每天 HH:MM</option>
+      </select>
+      <input id="avalue" placeholder="分钟数 或 HH:MM" size="10">
+      <input id="alabel" placeholder="提醒内容(可选)">
+    </div>
+    <div class="row"><button class="btn" onclick="addAlarm()">添加闹钟</button></div>
+    <table>
+      <thead><tr><th>ID</th><th>类型</th><th>触发</th><th>内容</th><th>状态</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="alarmlog"></div>
+  </div>
+</div>
+
 <script>
+function showTab(id,btn){
+document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+btn.classList.add('active');
+document.getElementById('panel-'+id).classList.add('active');
+if(id==='alarm')loadAlarms();
+}
+// ===== 上传 =====
 function up(){
 const files=document.getElementById('f').files;
 const log=document.getElementById('log');
@@ -22,56 +101,43 @@ const f=files[i++];
 log.innerHTML+='<div>⏳ 上传 '+f.name+' ('+(f.size/1024/1024).toFixed(1)+'MB) ...</div>';
 const xhr=new XMLHttpRequest();
 xhr.open('POST','/upload?name='+encodeURIComponent(f.name)+'&overwrite='+(document.getElementById('ov').checked?1:0));
-xhr.upload.onprogress=function(e){
-if(e.lengthComputable){
-const p=Math.round(e.loaded/e.total*100);
-bar.style.width=p+'%';bar.textContent=p+'%';
-}
-};
+xhr.upload.onprogress=function(e){if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);bar.style.width=p+'%';bar.textContent=p+'%';}};
 xhr.onload=function(){
-if(xhr.status>=200&&xhr.status<300){
-log.innerHTML+='<div>✅ 成功 '+f.name+'</div>';
-}else if(xhr.status===403){
-log.innerHTML+='<div>⚠️ 同名已存在，跳过 '+f.name+'</div>';
-}else{
-log.innerHTML+='<div>❌ 失败('+xhr.status+') '+f.name+' '+xhr.responseText+'</div>';
-}
+if(xhr.status>=200&&xhr.status<300){log.innerHTML+='<div>✅ 成功 '+f.name+'</div>';}
+else if(xhr.status===403){log.innerHTML+='<div>⚠️ 同名已存在，跳过 '+f.name+'</div>';}
+else{log.innerHTML+='<div>❌ 失败('+xhr.status+') '+f.name+' '+xhr.responseText+'</div>';}
 next();
 };
-xhr.onerror=function(){
-log.innerHTML+='<div>❌ 网络错误 '+f.name+'</div>';
-next();
-};
+xhr.onerror=function(){log.innerHTML+='<div>❌ 网络错误 '+f.name+'</div>';next();};
 xhr.send(f);
 }
 next();
 }
-</script>
-
-<h2>⏰ AI 闹钟提醒</h2>
-<div>
-<select id="atype"><option value="relative">N 分钟后</option><option value="absolute">每天 HH:MM</option></select>
-<input id="avalue" placeholder="分钟数 或 HH:MM" size="10">
-<input id="alabel" placeholder="提醒内容(可选)" size="12">
-<button onclick="addAlarm()">添加</button>
-</div>
-<table id="alarmtable" border="1" cellpadding="4" style="border-collapse:collapse;margin-top:8px">
-<thead><tr><th>ID</th><th>类型</th><th>触发</th><th>内容</th><th>状态</th><th>操作</th></tr></thead>
-<tbody></tbody></table>
-<div id="alarmlog"></div>
-<script>
+// ===== 闹钟 =====
 function fmtSec(s){var h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return ('0'+h).slice(-2)+':'+('0'+m).slice(-2);}
 function loadAlarms(){
-fetch('/alarm?action=list').then(r=>r.text()).then(t=>{
-const arr=JSON.parse(t);const tb=document.querySelector('#alarmtable tbody');tb.innerHTML='';
+const tb=document.querySelector('#panel-alarm tbody');
+const log=document.getElementById('alarmlog');
+const empty='<tr><td colspan="6">暂无闹钟</td></tr>';
+const unavailable='<tr><td colspan="6">闹钟接口不可用，请确认已连接设备</td></tr>';
+fetch('/alarm?action=list')
+.then(r=>r.text())
+.then(t=>{
+let arr=null;
+try{arr=JSON.parse(t);}catch(e){arr=null;}
+tb.innerHTML='';
+if(!Array.isArray(arr)){tb.innerHTML=unavailable;log.innerHTML='';return;}
+if(arr.length===0){tb.innerHTML=empty;log.innerHTML='';return;}
+log.innerHTML='';
 arr.forEach(a=>{
 const isAbs=a.type==='absolute';
 const trigger=isAbs?('每天 '+fmtSec(a.trigger_sec)):(a.trigger_sec+' 秒(约'+(a.trigger_sec/60).toFixed(0)+'分钟)');
 const tr=document.createElement('tr');
-tr.innerHTML='<td>'+a.id+'</td><td>'+(isAbs?'每天':'相对')+'</td><td>'+trigger+'</td><td>'+(a.label||'')+'</td><td>'+(a.enabled?'启用':'停用')+'</td><td><button onclick="delAlarm('+a.id+')">删除</button></td>';
+tr.innerHTML='<td>'+a.id+'</td><td>'+(isAbs?'每天':'相对')+'</td><td>'+trigger+'</td><td>'+(a.label||'')+'</td><td>'+(a.enabled?'启用':'停用')+'</td><td><button class="btn btn-danger" onclick="delAlarm('+a.id+')">删除</button></td>';
 tb.appendChild(tr);
 });
-}).catch(e=>{document.getElementById('alarmlog').innerHTML='<div>加载失败 '+e+'</div>';});
+})
+.catch(()=>{tb.innerHTML=unavailable;log.innerHTML='';});
 }
 function addAlarm(){
 const type=document.getElementById('atype').value;
@@ -82,13 +148,15 @@ let sec;
 if(type==='relative'){sec=Math.round(parseFloat(value)*60);}
 else{const p=value.split(':');sec=(+p[0])*3600+(+p[1]||0)*60;}
 fetch('/alarm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',type:type,value:sec,label:label})})
+.then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
 .then(()=>{loadAlarms();document.getElementById('alarmlog').innerHTML='<div>✅ 已添加</div>';})
-.catch(e=>{document.getElementById('alarmlog').innerHTML='<div>❌ '+e+'</div>';});
+.catch(()=>{document.getElementById('alarmlog').innerHTML='<div>❌ 添加失败（接口不可用）</div>';});
 }
 function delAlarm(id){
 fetch('/alarm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',id:id})})
-.then(()=>loadAlarms()).catch(e=>{document.getElementById('alarmlog').innerHTML='<div>❌ '+e+'</div>';});
+.then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
+.then(()=>loadAlarms())
+.catch(()=>{document.getElementById('alarmlog').innerHTML='<div>❌ 删除失败（接口不可用）</div>';});
 }
-loadAlarms();
 </script>
 </body></html>
