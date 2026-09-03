@@ -12,78 +12,144 @@
 
 所有素材（表情动画、字体、唤醒词模型、布局）打包为 `expression_assets.bin`，烧写到 assets 分区（0x800000，约 2.7MB，分区 8MB 装得下）。
 
-## 一、编译烧录
+## 一、编译烧录（ESP-IDF 标准流程）
+
+全部用 ESP-IDF 自带工具链：`idf.py menuconfig` 选配置 → `idf.py build` 编译 → `idf.py flash` 烧录。表情资源打包是 CMake custom command，`idf.py build` 自动触发，不需要仓库私有脚本。
+
+**日常循环**（配置已就绪后，每天就这三条）：
+
+```sh
+source ~/esp/v6.0.2/esp-idf/export.sh
+idf.py build
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+```
+
+**首次配置**（新克隆的仓库没有 `sdkconfig`，直接 build 会编出别的板的固件）：
 
 ```sh
 cd /Users/liuguoqing/data/www/wwwroot/xiaozhi-esp32-airobot
 git fetch origin && git checkout feat/emote-display && git pull
-
-# 激活 ESP-IDF v6.0.2
 source ~/esp/v6.0.2/esp-idf/export.sh
-idf.py --version   # 确认 v6.0.2
 
-# 编译（自动打包表情资源 + 生成合并固件）
-python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
+idf.py menuconfig   # 依次选：ESP32-S3 → 本板板型 → LCD 屏型号 → Emote animation style，保存退出
+idf.py build
+idf.py flash
 ```
 
-编译日志出现以下两行即成功：
+menuconfig 四项的具体位置、换屏/改配置的分支流程、失败排查，全部见下方 **「标准流程：`idf.py build` 具体怎么走」** 一节（阶段 0～3）。
 
-```
-Building airobot emote assets (resolution 240_320)
-Project build complete
-```
+编译日志出现 `Project build complete` 即成功（资源有重打包时会先出现 `Building airobot emote assets (resolution 240_320)`）。
 
-烧录（二选一，端口号用 `ls /dev/cu.usbserial-*` 查）：
+烧录除 `idf.py flash` 外，也可烧合并固件一把流：
 
 ```sh
-# 方式 A
-idf.py -p /dev/cu.usbserial-XXXX flash monitor
-
-# 方式 B：合并固件一把烧
 python -m esptool --chip esp32s3 -p /dev/cu.usbserial-XXXX -b 460800 write_flash 0x0 build/merged-binary.bin
 ```
 
-### 标准流程：直接 `idf.py build`
+### 标准流程：`idf.py build` 具体怎么走
 
-本板也支持不经过 `scripts/build.py`、直接用 `idf.py` 编译（资源打包是 CMake 的 custom command，`idf.py build` 会自动触发）。
+全部走 ESP-IDF 标准链路：`idf.py menuconfig` 选配置 → `idf.py build` 编译 → `idf.py flash` 烧录。表情资源打包是 CMake custom command，`idf.py build` 会自动触发，无需额外步骤。
 
-**前提：根目录的 `sdkconfig` 里必须已有本板的关键选项。** 最省事的做法是先用 `scripts/build.py` 跑一次（它会根据 config.json 生成完整正确的 sdkconfig），之后就可以一直用 `idf.py`：
+仓库根目录自带 `sdkconfig.defaults` + `sdkconfig.defaults.esp32s3`（16MB flash、含 assets 分区的分区表等基础项），**ESP-IDF 每次配置时自动应用**，所以从零开始用 menuconfig 即可，不依赖任何仓库私有脚本。
+
+`scripts/build.py` 只是把「menuconfig 该选的几项」写进 config.json 的快捷方式，可不用；下文只在两处提它（阶段 1 的备选、阶段 3 的长期换屏）。
+
+#### 阶段 0：环境准备（一次性）
 
 ```sh
-# 首次：用标准脚本生成正确的 sdkconfig（并顺带产出固件）
-python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
+cd /Users/liuguoqing/data/www/wwwroot/xiaozhi-esp32-airobot
+git fetch origin
+git checkout feat/emote-display && git pull
 
-# 之后：日常快速编译，全部走 idf.py
+# 每次打开新终端都要 source 一次（激活 ESP-IDF v6.0.2）
 source ~/esp/v6.0.2/esp-idf/export.sh
-idf.py build        # 编译（自动打包 expression_assets.bin）
-idf.py flash        # 烧录全部分区（含 assets 0x800000）
-idf.py monitor      # 串口日志
-
-# 或者一步到位（指定端口）
-idf.py -p /dev/cu.usbserial-XXXX flash monitor
+idf.py --version   # 必须输出 v6.0.2，否则 IDF 环境不对
 ```
 
-`sdkconfig` 中本板相关的**关键项**（用 `scripts/build.py` 生成后自动就位，可抽查确认）：
+#### 阶段 1：首次 menuconfig 选配置（一次性，之后可跳过）
+
+没有 `sdkconfig` 时直接 `idf.py build` 会用默认配置编出**别的板的固件**。首次用 `idf.py menuconfig` 手工选（全程方向键 + 空格，Save 时选 `Save and Exit`）：
+
+```sh
+idf.py menuconfig
+```
+
+依次选 4 项：
+
+1. **`Select target chip`** → `ESP32-S3`（选完会提示 reset，确认；`sdkconfig.defaults.esp32s3` 自动生效）
+2. **`Xiaozhi Assistant Application` → `Board Type`** → 选 `Bread Compact Wi-Fi + LCD + Camera AI Robot (面包板)`（即 `BOARD_TYPE_BREAD_COMPACT_WIFI_S3CAM_AIROBOT`）
+   - ⚠️ 必须先选板子，emote 风格选项依赖本板才可见（Kconfig depends on）
+3. **`Xiaozhi Assistant Application` → `LCD Type`** → 选 `ST7789 240x320`（你的屏；其他屏见第二章对照表）
+4. **`Xiaozhi Assistant Application` → `Select display style`** → 选 `Emote animation style`
+   - 选它后 `Flash Assets` 自动切到 `Expression assets`（`FLASH_EXPRESSION_ASSETS`），无需手选
+
+退出保存后，`sdkconfig` 就生成了。抽查确认（输出 4 行 `=y` 即正常）：
 
 ```sh
 grep -E "^(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_S3CAM_AIROBOT|CONFIG_LCD_ST7789_240X320|CONFIG_USE_EMOTE_MESSAGE_STYLE|CONFIG_FLASH_EXPRESSION_ASSETS)=" sdkconfig
-# 期望：
-# CONFIG_FLASH_EXPRESSION_ASSETS=y
-# CONFIG_LCD_ST7789_240X320=y
-# CONFIG_USE_EMOTE_MESSAGE_STYLE=y
-# CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_S3CAM_AIROBOT=y
 ```
 
-注意事项：
+> 备选：不想进 menuconfig 的话，跑一次 `python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot` 也能生成同样的 sdkconfig（它读本板 config.json 自动写入上述 4 项并直接编译）。
 
-- **改 `config.json` 的 sdkconfig_append 不会自动同步到现有 sdkconfig**。改完后要么重跑一次 `scripts/build.py`，要么手动把新选项写进 `sdkconfig`（或删掉 `sdkconfig` 重新生成）。
-- **换屏幕**：在 sdkconfig 里把 `CONFIG_LCD_ST7789_240X320=y` 改成目标屏选项（其他 LCD 选项自动失效），然后 `rm -f build/expression_assets.bin && idf.py build`（布局目录变了要重打包）。
-- **切分支/切板子后**：旧 sdkconfig 里残留着别的板的选项，建议 `rm sdkconfig build -rf` 后重跑 `scripts/build.py` 重新生成。
-- 编译日志中确认 `Building airobot emote assets (resolution 240_320)` 出现，说明表情资源已重新打包。
+#### 阶段 2：日常编译循环（以后每天都走这段）
+
+```sh
+cd /Users/liuguoqing/data/www/wwwroot/xiaozhi-esp32-airobot
+source ~/esp/v6.0.2/esp-idf/export.sh
+
+idf.py build                                  # ① 编译（增量，快；表情资源如有变化会自动重打包）
+idf.py -p /dev/cu.usbserial-XXXX flash        # ② 烧录（自动烧 app + assets 0x800000 全部分区）
+
+# 或者烧录 + 看日志一步到位：
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+
+# 单独看日志（板子已上电时）：
+idf.py -p /dev/cu.usbserial-XXXX monitor      # Ctrl+] 退出
+```
+
+端口号用 `ls /dev/cu.usbserial-*` 查。只想烧固件文件不编译：`idf.py flash`；只想清掉重编：`idf.py fullclean && idf.py build`。
+
+#### 阶段 3：改了什么就走哪条
+
+| 你改的东西 | 要做的 |
+|------------|--------|
+| 只改 C/C++ 代码 | `idf.py build` → `idf.py flash`（阶段 2 即可） |
+| 改 `emote_assets/*/layout.json`（布局） | `rm -f build/expression_assets.bin && idf.py build && idf.py flash`（custom command 感知不到 layout 变化，必须手动删旧资源包） |
+| 想改其他配置项 | `idf.py menuconfig` 改完保存即可，下次 `idf.py build` 自动生效 |
+| 换屏幕型号 | 见下方「换屏」 |
+| 切分支 / 切别的板子再切回来 | `rm sdkconfig && rm -rf build` → 重跑阶段 1 的 menuconfig 四步（旧 sdkconfig 残留别的板选项，直接 build 会编错） |
+
+**换屏**（比如换 ST7789 240×240，menuconfig 法）：
+
+```sh
+# ① menuconfig 改屏：Xiaozhi Assistant Application → LCD Type → 选新屏，保存退出
+idf.py menuconfig
+
+# ② 删旧资源包（布局目录变了要重打包）
+rm -f build/expression_assets.bin
+
+# ③ 重编重烧，确认日志里是 resolution 240_240
+idf.py build && idf.py flash
+```
+
+不想进 menuconfig 也可以直接改 sdkconfig：
+
+```sh
+sed -i '' 's/^CONFIG_LCD_ST7789_240X320=y/# CONFIG_LCD_ST7789_240X320 is not set/' sdkconfig
+echo "CONFIG_LCD_ST7789_240X240=y" >> sdkconfig
+rm -f build/expression_assets.bin && idf.py build && idf.py flash
+```
+
+> 长期换屏建议同时改本板 `config.json`（两个变体的 `sdkconfig_append`），保证以后用 `scripts/build.py` 时不会打回原形。
+
+#### 判断成败的标志
+
+- 成功：日志末尾 `Project build complete`；若资源有重打包会先看到 `Building airobot emote assets (resolution 240_320)`。
+- 失败排查：`idf.py build` 报错看最后 50 行；怀疑配置不对先跑阶段 1 的 grep 抽查；怀疑资源问题看 `build/expression_assets.bin` 的修改时间是否比 layout.json 新。
 
 ## 二、屏幕选择（多分辨率适配）
 
-屏幕型号由 Kconfig `choice`（互斥单选）决定，**本板已在 `config.json` 的 `sdkconfig_append` 里固定为 ST7789 240×320**，正常编译无需任何操作。
+屏幕型号由 Kconfig `choice`（互斥单选）决定。本板 `config.json` 的 `sdkconfig_append` 预设为 ST7789 240×320（走 `scripts/build.py` 时自动生效）；纯 `idf.py menuconfig` 路径则按阶段 1 第 3 步手动选屏，之后无需再动。
 
 官方默认布局是 320×240 横屏，本板为竖屏且支持多种屏，所以 `emote_assets/` 下每种画布尺寸各有一份 `layout.json`，CMake 按 LCD 选项自动选择：
 
@@ -98,16 +164,15 @@ grep -E "^(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_S3CAM_AIROBOT|CONFIG_LCD_ST7789_
 
 ### 换屏步骤
 
-1. 编辑 `config.json`（两个变体都要改），把 `CONFIG_LCD_ST7789_240X320=y` 换成目标屏选项，如：
-   ```json
-   "CONFIG_LCD_ST7789_240X240=y",
-   ```
-2. 清理并重新编译：
-   ```sh
-   rm -rf build
-   python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
-   ```
-3. 确认日志中是 `Building airobot emote assets (resolution 240_240)`（新分辨率）。
+具体操作见上方「阶段 3：改了什么就走哪条」里的**换屏**（`idf.py menuconfig` 改 LCD Type → 删旧资源包 → `idf.py build && idf.py flash`）。确认日志中是 `Building airobot emote assets (resolution 240_240)`（新分辨率）。
+
+另外建议同步改本板 `config.json`（两个变体的 `sdkconfig_append`）里的屏选项，如：
+
+```json
+"CONFIG_LCD_ST7789_240X240=y",
+```
+
+这样以后用 `scripts/build.py` 重新生成 sdkconfig 时不会打回原形。
 
 > 若某分辨率目录下还没有 `layout.json`，CMake 会回退到组件自带的官方 `320_240` 布局（横屏布局，竖屏上位置会偏，仅作兜底）。
 
