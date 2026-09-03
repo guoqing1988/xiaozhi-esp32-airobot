@@ -34,6 +34,10 @@ static cJSON* AlarmItemToJson(const AlarmItem& a) {
 
 AlarmManager::AlarmManager(AudioService& audio_service) : audio_service_(audio_service) {}
 
+AlarmManager::~AlarmManager() {
+    Stop();
+}
+
 void AlarmManager::SetTriggerCallback(std::function<void(const AlarmItem&)> cb) {
     on_trigger_ = std::move(cb);
 }
