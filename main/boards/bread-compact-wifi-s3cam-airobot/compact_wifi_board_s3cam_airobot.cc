@@ -420,10 +420,10 @@ private:
             return;
         }
         // 仅 esp_timer 单任务调用, 静态缓冲安全
-        static char buf[9];    // HH:MM:SS
+        static char buf[6];    // HH:MM
         static char dbuf[16];  // YYYY-MM-DD
         struct tm t = *localtime(&now);
-        strftime(buf, sizeof(buf), "%H:%M:%S", &t);
+        strftime(buf, sizeof(buf), "%H:%M", &t);
         strftime(dbuf, sizeof(dbuf), "%Y-%m-%d", &t);
         lcd->UpdateClock(true, buf, dbuf);
     }

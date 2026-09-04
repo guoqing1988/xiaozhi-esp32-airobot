@@ -391,8 +391,9 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 
 - 说「切换时钟模式 / 打开时钟 / 关闭时钟」→ `self.clock.set`（mode: `1`=开启, `0`=关闭, `-1`=切换）。
 - 说「切换时钟颜色/主题」→ `self.clock.theme`（mode: `0`=黑底白字, `1`=白底黑字, `-1`=切换）；设置同样写入 NVS（`clock/theme`）。
-- 开启后，**待机**状态下屏幕显示**七段数码管大时钟**（`HH:MM:SS` 带秒），上方一行 18px 小字日期（`YYYY-MM-DD`）；时钟显示时状态栏/字幕条/表情区全部隐藏、屏幕底色换成时钟主题色，只留“日期+时间”，更像真实电子钟。对话/聆听/播放时自动隐藏时钟、恢复原 UI，不干扰字幕。
-- **字号自适应屏宽**：内嵌三档 DSEG 字号 40/56/76px，开机按屏宽自动选最大放得下的（170px 屏→40px 字，240px 屏→56px 字，320px+→76px 字，为以后换大屏预留）。
+- 开启后，**待机**状态下屏幕显示**七段数码管大时钟**（`HH:MM`，不带秒，数字更高），上方一行 18px 小字日期（`YYYY-MM-DD`）；时钟显示时状态栏/字幕条/表情区全部隐藏、屏幕底色换成时钟主题色，只留“日期+时间”，更像真实电子钟。对话/聆听/播放时自动隐藏时钟、恢复原 UI，不干扰字幕。
+- **字号按屏宽自动选档**：三档内嵌 DSEG 字体（40/56/76px），`SetupUI` 时按屏宽选最大放得下的（170px 屏用 40、240px 及以上用 76），无需逐屏硬编码。
+- **字体加粗+加高（只改字体数据，C++ 零改动）**：全部字形位图做了 1px 膨胀加粗（`scripts/thicken_clock_font.py`）；76px 档另做 1.2 倍纵向拉伸（行高 76→91px，数字约 55×94，明显变高，`scripts/stretch_clock_font_76.py`），冒号 advance 同步收窄 240→192。
 - 时间来自联网后同步的系统时钟（与绝对闹钟同源）；未同步前不显示。
 - 设置写入 NVS（`clock/mode` + `clock/theme`），**断电重启自动恢复**。
 - 实现：板级显示子类 `airobot_lcd_display.h`（`AirobotLcdDisplay : SpiLcdDisplay`，标准 `SetupUI()` 钩子叠加 LVGL 标签，不改核心 display 代码）+ 1 秒 `esp_timer` 刷新（仅在文本/日期变化时更新标签，省 SPI 刷屏）。字体内嵌见下方「时钟字体说明」。
@@ -401,7 +402,8 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 
 时间/日期使用**板内嵌七段数码管字体**（`clock_dseg7.c`，仅含 `0-9` `:` `-` 字形，DSEG7 Classic 风格）：
 
-- 时间大字三档 40/56/76px（`clock_dseg7_40/56/76`，`HH:MM:SS`），18px 字显示 `YYYY-MM-DD`（日期小字，时间上方）。
+- 时间大字用 `clock_dseg7_76`（76px 档，已加粗+1.2 倍纵向拉伸，`HH:MM`）；18px 字（`clock_dseg7_18`）显示 `YYYY-MM-DD`（日期小字，时间上方）。40/56px 两档（`clock_dseg7_40/56`）供窄屏（如 170px）使用，同样已加粗。
+- 所有字形已做 **1px 膨胀加粗**（8 邻域 OR，`scripts/thicken_clock_font.py` 生成，幂等；注意该文件位图是 LVGL 9 的 packed 格式——逐位紧密打包、`stride=0`，不是常规每行字节对齐的 1bpp，修改位图时必须按 packed 解析）。
 - 字形数据是 `const` 数组，放 **flash**（`.rodata`），LVGL 按需从 flash 读取位图，**运行时不占 RAM**；四套字体整体 flash 增加约 64KB（app 分区仍余 15%+）。
 - 因此**不再需要** `CONFIG_LV_FONT_MONTSERRAT_48`，之前为开大字号做的 `menuconfig`/`sdkconfig_append` 操作全部作废（config.json 里那行留着也无害，只是不再被使用）。
 - 字体为开源 DSEG7（SIL OFL，GitHub `keshikan/DSEG`）。仓库不存字体源文件，只存生成的位图 `clock_dseg7.c`；DSEG 原始字距过宽，嵌的是收紧字距后的版本。
@@ -427,7 +429,7 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 
 ### 真机验证要点
 
-1. 说「打开时钟」→ 待机时屏幕出现大号 `HH:MM:SS` 时间（秒正常跳动）+ 上方日期，状态栏/字幕条隐藏。
+1. 说「打开时钟」→ 待机时屏幕出现大号 `HH:MM` 时间（分钟正常跳动）+ 上方日期，状态栏/字幕条隐藏。
 2. 说「切换时钟颜色/主题」→ 黑底白字 ↔ 白底黑字立即切换。
 3. 说「切换时钟模式」→ 时钟消失、原 UI 恢复；再说一次 → 恢复。
 4. 开启时钟后唤醒对话/播放音乐 → 时钟隐藏，结束后回到待机自动恢复显示。

@@ -1,10 +1,11 @@
-// 板级显示扩展：待机大时钟 HH:MM:SS（AI 可经 self.clock.set / self.clock.theme 工具控制）
+// 板级显示扩展：待机大时钟 HH:MM（AI 可经 self.clock.set / self.clock.theme 工具控制）
 // 标准子类化模式（参考 boards/zhengchen/1.54tft-wifi/zhengchen_lcd_display.h），
 // 不改核心 display 代码，仅在本板目录扩展。
 //
 // 时钟字体：内嵌 DSEG7 七段数码管子集字体（0-9/冒号/减号，见本目录
-// clock_dseg7.c）。三档字号 40/56/76px，SetupUI 时按屏宽自动选最大放得下的
-// （170px 屏用 40、240px 屏用 56、320px 以上用 76），日期固定 18px 小字。
+// clock_dseg7.c，位图已做 1px 膨胀加粗，76px 档另做了 1.2 倍纵向拉伸）。
+// 三档字号 40/56/76px，SetupUI 时按屏宽自动选最大放得下的（170px 屏用 40、
+// 240px 及以上用 76），日期固定 18px 小字。
 // 数据是 const 数组放 flash(.rodata)，LVGL 按需从 flash 读取 bitmap，运行时不占 RAM。
 #ifndef AIROBOT_LCD_DISPLAY_H
 #define AIROBOT_LCD_DISPLAY_H
@@ -27,7 +28,7 @@ LV_FONT_DECLARE(clock_dseg7_18);  // 日期小字(YYYY-MM-DD)
 
 class AirobotLcdDisplay : public SpiLcdDisplay {
 protected:
-    lv_obj_t* clock_label_ = nullptr;      // 时间 HH:MM:SS(大字)
+    lv_obj_t* clock_label_ = nullptr;      // 时间 HH:MM(大字)
     lv_obj_t* date_label_ = nullptr;       // 日期 YYYY-MM-DD(小字, 时间上方)
     const lv_font_t* clock_font_ = nullptr;  // 按屏宽选中的时间字体
     std::string clock_time_text_;      // 最近一次显示的时间(避免重复刷新)
@@ -43,14 +44,14 @@ public:
         : SpiLcdDisplay(panel_io, panel, width, height, offset_x, offset_y, mirror_x, mirror_y, swap_xy),
           screen_width_(swap_xy ? height : width) {}  // 注意 XY 交换后屏宽取 height
 
-    // 按屏宽选最大放得下的 HH:MM:SS 字体：小屏字小、大屏字大
+    // 按屏宽选最大放得下的 HH:MM 字体：小屏字小、大屏字大（留 4px 边距）
     const lv_font_t* PickClockFont() const {
         static const lv_font_t* kCandidates[] = {&clock_dseg7_40, &clock_dseg7_56, &clock_dseg7_76};
         const lv_font_t* picked = kCandidates[0];
         for (auto* f : kCandidates) {
             lv_point_t sz = {};
             lv_text_get_size(&sz, "88:88", f, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-            if (sz.x <= screen_width_ - 8) {
+            if (sz.x <= screen_width_ - 4) {
                 picked = f;
             } else {
                 break;  // 字号升序, 放不下后面也放不下
