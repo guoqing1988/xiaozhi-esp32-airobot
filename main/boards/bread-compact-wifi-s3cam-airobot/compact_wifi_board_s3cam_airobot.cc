@@ -105,8 +105,9 @@ private:
     std::string uno_last_result_;             // 最近结果(busy/done)
     TaskHandle_t uno_status_task_ = nullptr;  // UART0 RX 解析任务
 
-    // ---- 待机大时钟（AI 可控: self.clock.set, NVS 持久化）----
+    // ---- 待机大时钟（AI 可控: self.clock.set / self.clock.theme, NVS 持久化）----
     bool clock_mode_ = false;                // 时钟显示开关
+    int clock_theme_ = 0;                    // 时钟背景: 0=黑底白字, 1=白底黑字
     esp_timer_handle_t clock_timer_ = nullptr;
 
     void InitializeSpi() {
@@ -330,6 +331,10 @@ private:
             return;
         }
 #endif
+        // 大时钟显示中: 底部字幕条已被隐藏, 不再发 IP(避免 SetChatMessage 把字幕条重新显示出来)
+        if (clock_mode_ && time(nullptr) > 1700000000) {
+            return;
+        }
         std::string ip = GetLocalIp();
         if (ip.empty()) {
             return;
@@ -358,6 +363,10 @@ private:
     void ApplyClockMode() {
         Settings settings("clock", false);
         clock_mode_ = settings.GetInt("mode", 0) == 1;
+        clock_theme_ = settings.GetInt("theme", 0) == 1 ? 1 : 0;
+        if (GetDisplay() != nullptr) {
+            static_cast<AirobotLcdDisplay*>(GetDisplay())->SetClockTheme(clock_theme_ == 0);
+        }
     }
 
     // 待机大时钟工具(AI 可调, 设置本地持久化)
@@ -377,6 +386,23 @@ private:
                 settings.SetInt("mode", mode);
                 return clock_mode_ ? "时钟显示已开启" : "时钟显示已关闭";
             });
+        mcp.AddTool(
+            "self.clock.theme",
+            "设置待机大时钟的背景颜色。mode: 0=黑色背景白色数字, 1=白色背景黑色数字, -1=切换(用户说\"切换时钟颜色/主题\"时传-1, 无需知道当前状态)。设置本地保存, 断电重启仍生效",
+            PropertyList({Property("mode", kPropertyTypeInteger, 1, -1, 1)}),
+            [this](const PropertyList& props) -> ReturnValue {
+                int mode = props["mode"].value<int>();
+                if (mode == -1) {
+                    mode = clock_theme_ ? 0 : 1;  // 切换
+                }
+                clock_theme_ = (mode == 1);
+                Settings settings("clock", true);
+                settings.SetInt("theme", clock_theme_);
+                if (GetDisplay() != nullptr) {
+                    static_cast<AirobotLcdDisplay*>(GetDisplay())->SetClockTheme(clock_theme_ == 0);
+                }
+                return clock_theme_ ? "时钟已切换为白底黑字" : "时钟已切换为黑底白字";
+            });
     }
 
     // 每秒刷新：仅"时钟模式开启 + 待机 + 系统时间已同步(联网后NTP)"时显示大号时间
@@ -394,10 +420,10 @@ private:
             return;
         }
         // 仅 esp_timer 单任务调用, 静态缓冲安全
-        static char buf[8];    // HH:MM
+        static char buf[9];    // HH:MM:SS
         static char dbuf[16];  // YYYY-MM-DD
         struct tm t = *localtime(&now);
-        strftime(buf, sizeof(buf), "%H:%M", &t);
+        strftime(buf, sizeof(buf), "%H:%M:%S", &t);
         strftime(dbuf, sizeof(dbuf), "%Y-%m-%d", &t);
         lcd->UpdateClock(true, buf, dbuf);
     }
