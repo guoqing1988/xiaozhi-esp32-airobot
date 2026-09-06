@@ -1,4 +1,5 @@
 #include "wifi_board.h"
+#include <wifi_manager.h>
 #include "codecs/no_audio_codec.h"
 #include "display/lcd_display.h"
 #include "airobot_lcd_display.h"
@@ -892,6 +893,35 @@ private:
             });
     }
 
+    // 网络状态查询工具（可扩展的网络信息入口，当前返回 IP，后续可加 SSID/信号/MAC 等）
+    void InitializeNetworkTools() {
+        auto& mcp = McpServer::GetInstance();
+        mcp.AddTool(
+            "self.network.get_status",
+            "查询当前网络状态。返回本机网络信息(JSON)：ip(局域网 IPv4)、connected(是否已连接WiFi)、ssid(连接的WiFi名)、"
+            "signal(信号强弱: strong/medium/weak)、rssi(信号原始值dBm)。未连接时 ip/ssid 为空。"
+            "用于回答\"当前 IP 是多少\"、\"连的哪个WiFi\"、\"网速/信号好不好\"，或引导用户访问本机 Web(如 http://<ip>)。"
+            "后续可在此工具继续扩展字段(channel/mac 等)",
+            PropertyList(),
+            [this](const PropertyList& props) -> ReturnValue {
+                auto& wifi = WifiManager::GetInstance();
+                auto root = cJSON_CreateObject();
+                std::string ip = wifi.GetIpAddress();
+                cJSON_AddStringToObject(root, "ip", ip.empty() ? "" : ip.c_str());
+                cJSON_AddBoolToObject(root, "connected", wifi.IsConnected());
+                cJSON_AddStringToObject(root, "ssid", wifi.GetSsid().c_str());
+                int rssi = wifi.GetRssi();
+                cJSON_AddNumberToObject(root, "rssi", rssi);
+                const char* signal = rssi >= -60 ? "strong" : (rssi >= -70 ? "medium" : "weak");
+                cJSON_AddStringToObject(root, "signal", signal);
+                auto str = cJSON_PrintUnformatted(root);
+                std::string result(str);
+                cJSON_free(str);
+                cJSON_Delete(root);
+                return result;
+            });
+    }
+
     // 调试工具: 临时切换系统日志级别(避免 GPIO43 日志污染 Arduino)
     void InitializeDebugTools() {
         auto& mcp_server = McpServer::GetInstance();
@@ -926,6 +956,7 @@ public:
         InitializeUnoTools();
         InitializeCameraTools();
         InitializeClockTools();
+        InitializeNetworkTools();
         InitializeDebugTools();
         // 默认把日志压到 ERROR, 避免 GPIO43 日志污染 Arduino 串口(平时命令更稳定)
         esp_log_level_set("*", ESP_LOG_ERROR);
