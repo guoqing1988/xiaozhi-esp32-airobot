@@ -399,6 +399,12 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 设置写入 NVS（`clock/mode` + `clock/theme`），**断电重启自动恢复**。
 - 实现：板级显示子类 `airobot_lcd_display.h`（`AirobotLcdDisplay : SpiLcdDisplay`，标准 `SetupUI()` 钩子叠加 LVGL 标签，不改核心 display 代码）+ 1 秒 `esp_timer` 刷新（仅在文本/日期变化时更新标签，省 SPI 刷屏）。字体内嵌见下方「时钟字体说明」。
 
+## 网络状态（AI 可读本机 IP/SSID/信号）
+
+- 说「当前 IP 是多少 / 连的哪个 WiFi / 信号好不好」→ `self.network.get_status`，返回 JSON：`ip`(局域网 IPv4)、`connected`(是否已连接)、`ssid`(WiFi 名)、`rssi`(信号原始值 dBm)、`signal`(strong/medium/weak，按 rssi>= -60/ -70 划分)。未连接时 `ip`/`ssid` 为空。
+- 用途：AI 引导用户访问本机 Web（如 `http://<ip>/`）、排查网络、判断设备是否在线。
+- 工具为板级可扩展入口（后续可加 `channel`/`mac` 等字段）。
+
 ### 时钟字体说明（内嵌，无需任何 menuconfig 配置）
 
 时间/日期使用**板内嵌 Bebas Neue 等宽高瘦数字字体**（`clock_bebas_130/60/48.c` 时间大字，`clock_bebas_date.c` 日期小字，仅含 `0-9` `:` `-` 字形，Bebas Neue 风格）：
