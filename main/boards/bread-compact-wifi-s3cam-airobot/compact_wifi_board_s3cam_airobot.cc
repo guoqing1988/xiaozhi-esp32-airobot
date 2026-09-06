@@ -105,9 +105,9 @@ private:
     std::string uno_last_result_;             // 最近结果(busy/done)
     TaskHandle_t uno_status_task_ = nullptr;  // UART0 RX 解析任务
 
-    // ---- 待机大时钟（AI 可控: self.clock.set / self.clock.theme, NVS 持久化）----
+    // ---- 待机全屏大时钟（AI 可控: self.clock.set(开关+主题合一) / self.clock.current, NVS 持久化）----
     bool clock_mode_ = false;                // 时钟显示开关
-    int clock_theme_ = 0;                    // 时钟背景: 0=黑底白字, 1=白底黑字
+    int clock_theme_ = 0;                    // 时钟主题索引: 0=黑底白字, 1=白底黑字(仅两套经典高对比)
     esp_timer_handle_t clock_timer_ = nullptr;
 
     void InitializeSpi() {
@@ -359,13 +359,22 @@ private:
         }
     }
 
+    // 时钟主题名称(与 airobot_lcd_display.h 的 kClockThemes 顺序一致; 已精简为 2 套)
+    static const char* ClockThemeName(int id) {
+        switch (id) {
+            case 1: return "白底黑字";
+            case 0:
+            default: return "黑底白字";
+        }
+    }
+
     // 应用 NVS 保存的时钟显示设置(开机调用, 断电重启仍保持)
     void ApplyClockMode() {
         Settings settings("clock", false);
         clock_mode_ = settings.GetInt("mode", 0) == 1;
-        clock_theme_ = settings.GetInt("theme", 0) == 1 ? 1 : 0;
+        clock_theme_ = settings.GetInt("theme", 0);  // 0..1, 旧版只存 0/1, 兼容
         if (GetDisplay() != nullptr) {
-            static_cast<AirobotLcdDisplay*>(GetDisplay())->SetClockTheme(clock_theme_ == 0);
+            static_cast<AirobotLcdDisplay*>(GetDisplay())->SetClockTheme(clock_theme_);
         }
     }
 
@@ -374,34 +383,52 @@ private:
         auto& mcp = McpServer::GetInstance();
         mcp.AddTool(
             "self.clock.set",
-            "设置待机大时钟显示。mode: 1=开启(待机时屏幕中央显示大号时间), 0=关闭, -1=切换(用户说\"切换时钟模式\"时传-1, 无需知道当前状态)。设置本地保存, 断电重启仍生效",
-            PropertyList({Property("mode", kPropertyTypeInteger, 1, -1, 1)}),
+            "设置待机全屏大时钟。mode: 1=开启(待机时整个屏幕显示大号时间+日期), 0=关闭, -1=切换开关(用户说\"打开/关闭/切换时钟模式\"时用); theme: 0=黑底白字, 1=白底黑字, -1=切换下一个主题(用户说\"切换时钟颜色/主题\"时用)。mode 与 theme 可只传其一, 未传的参数保持当前值不变; 两者都传则同时生效。设置本地保存(NVS), 断电重启仍生效",
+            PropertyList({Property("mode", kPropertyTypeInteger, -2),
+                          Property("theme", kPropertyTypeInteger, -2)}),
             [this](const PropertyList& props) -> ReturnValue {
+                // 哨兵 -2 = 未指定, 保持当前值; 仅处理 AI 显式传入的参数
                 int mode = props["mode"].value<int>();
-                if (mode == -1) {
-                    mode = clock_mode_ ? 0 : 1;  // 切换
-                }
-                clock_mode_ = (mode == 1);
+                int theme = props["theme"].value<int>();
                 Settings settings("clock", true);
-                settings.SetInt("mode", mode);
-                return clock_mode_ ? "时钟显示已开启" : "时钟显示已关闭";
+                std::string result;
+
+                if (mode != -2) {
+                    if (mode == -1) mode = clock_mode_ ? 0 : 1;      // 切换开关
+                    if (mode != 0 && mode != 1) mode = clock_mode_ ? 1 : 0;  // 非法→保持
+                    clock_mode_ = (mode == 1);
+                    settings.SetInt("mode", mode);
+                    result = clock_mode_ ? "时钟显示已开启" : "时钟显示已关闭";
+                }
+
+                if (theme != -2) {
+                    const int kCount = 2;  // 主题仅保留黑底白字/白底黑字(见 kClockThemes)
+                    if (theme == -1) theme = (clock_theme_ + 1) % kCount;  // 切下一个
+                    if (theme < -1 || theme >= kCount) theme = clock_theme_;  // 非法→保持
+                    clock_theme_ = theme;
+                    settings.SetInt("theme", theme);
+                    if (GetDisplay() != nullptr) {
+                        static_cast<AirobotLcdDisplay*>(GetDisplay())->SetClockTheme(theme);
+                    }
+                    if (!result.empty()) result += "; ";
+                    result += "主题:" + std::string(ClockThemeName(theme));
+                }
+
+                if (result.empty()) {
+                    return "时钟设置未改变(未指定 mode/theme)。当前: " +
+                           std::string(clock_mode_ ? "已开启" : "已关闭") +
+                           ", 主题 " + ClockThemeName(clock_theme_);
+                }
+                return result;
             });
         mcp.AddTool(
-            "self.clock.theme",
-            "设置待机大时钟的背景颜色。mode: 0=黑色背景白色数字, 1=白色背景黑色数字, -1=切换(用户说\"切换时钟颜色/主题\"时传-1, 无需知道当前状态)。设置本地保存, 断电重启仍生效",
-            PropertyList({Property("mode", kPropertyTypeInteger, 1, -1, 1)}),
+            "self.clock.current",
+            "查询当前待机大时钟的状态。返回: 时钟是否开启(open/off) 以及当前主题名称(黑底白字/白底黑字)。用户问\"现在是什么时钟主题\"或\"时钟开没开\"时调用此工具",
+            PropertyList(),
             [this](const PropertyList& props) -> ReturnValue {
-                int mode = props["mode"].value<int>();
-                if (mode == -1) {
-                    mode = clock_theme_ ? 0 : 1;  // 切换
-                }
-                clock_theme_ = (mode == 1);
-                Settings settings("clock", true);
-                settings.SetInt("theme", clock_theme_);
-                if (GetDisplay() != nullptr) {
-                    static_cast<AirobotLcdDisplay*>(GetDisplay())->SetClockTheme(clock_theme_ == 0);
-                }
-                return clock_theme_ ? "时钟已切换为白底黑字" : "时钟已切换为黑底白字";
+                std::string r = clock_mode_ ? "时钟已开启，当前主题：" : "时钟未开启，当前主题：";
+                r += ClockThemeName(clock_theme_);
+                return r;
             });
     }
 

@@ -886,6 +886,13 @@ file(GLOB BOARD_SOURCES
 )
 list(APPEND SOURCES ${BOARD_SOURCES})
 
+# 让 CMake 监控板目录下的源文件增删：板目录内有 .c/.cc 新增/删除/改名时，
+# CMake 会自动重新 configure 并重跑上面的 file(GLOB)，从而更新 SOURCES 列表，
+# 无需手动清 build。ESP-IDF 组件脚本模式不支持 file(GLOB CONFIGURE_DEPENDS)，
+# 但 set_property(CMAKE_CONFIGURE_DEPENDS) 是目录属性，在此模式下合法（项目其它处亦用它）。
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}")
+
 # 板级嵌入式资源: 该板自带 web 页面(如 bread-compact-wifi-s3cam-airobot 的上传/闹钟页)
 set(BOARD_EMBED_FILES "")
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/web")

@@ -387,39 +387,89 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 设置写入 NVS（`camera/flip`），**断电重启自动恢复该设置**。
 - 实现：板级 `ApplyCameraFlip()` 开机应用 + `Esp32Camera::SetHMirror/SetVFlip`（官方 sensor 寄存器接口）。
 
-## 待机大时钟（AI 控制 + 本地持久化）
+## 待机全屏大时钟（AI 控制 + 多主题 + 本地持久化）
 
-- 说「切换时钟模式 / 打开时钟 / 关闭时钟」→ `self.clock.set`（mode: `1`=开启, `0`=关闭, `-1`=切换）。
-- 说「切换时钟颜色/主题」→ `self.clock.theme`（mode: `0`=黑底白字, `1`=白底黑字, `-1`=切换）；设置同样写入 NVS（`clock/theme`）。
-- 开启后，**待机**状态下屏幕显示**七段数码管大时钟**（`HH:MM`，不带秒，数字更高），上方一行 18px 小字日期（`YYYY-MM-DD`）；时钟显示时状态栏/字幕条/表情区全部隐藏、屏幕底色换成时钟主题色，只留“日期+时间”，更像真实电子钟。对话/聆听/播放时自动隐藏时钟、恢复原 UI，不干扰字幕。
-- **字号按屏宽自动选档**：三档内嵌 DSEG 字体（40/56/76px），`SetupUI` 时按屏宽选最大放得下的（170px 屏用 40、240px 及以上用 76），无需逐屏硬编码。
-- **字体加粗+加高（只改字体数据，C++ 零改动）**：全部字形位图做了 1px 膨胀加粗（`scripts/thicken_clock_font.py`）；76px 档另做 1.2 倍纵向拉伸（行高 76→91px，数字约 55×94，明显变高，`scripts/stretch_clock_font_76.py`），冒号 advance 同步收窄 240→192。
+- 说「切换时钟模式 / 打开时钟 / 关闭时钟」→ `self.clock.set`（`mode`: `1`=开启, `0`=关闭, `-1`=切换开关）。
+- 说「切换时钟颜色/主题」→ **同一工具 `self.clock.set`**（`theme`: `0`=黑底白字, `1`=白底黑字, `-1`=切下一个）。`mode` 与 `theme` 可只传其一，未传的参数保持当前不变；两者都传则同时生效。设置写入 NVS（`clock/theme`）+ `clock/mode`）。
+- 说「现在是什么时钟主题/时钟开没开」→ `self.clock.current`，返回当前主题名称与是否开启（AI 可读回状态）。
+- 开启后，**待机**状态下**整个屏幕**显示**粗壮高瘦数字大时钟**（`HH:MM`，24 小时制，不带秒），上方一行小字日期（`YYYY-MM-DD`）；时钟显示时状态栏/字幕条/表情区全部隐藏、屏幕底色换成时钟主题色，只留“日期+时间”，像真实电子钟。对话/聆听/播放时自动隐藏时钟、恢复原 UI，不干扰字幕。
+- **主题（2 套高对比）**：经典黑底白字 / 白底黑字，切换立即生效并入 NVS，断电重启保留。（仅保留两种高对比经典模式，其余 Catppuccin 系均为纯颜色变化、无实际意义，已移除。）
+- **多屏自适应（字号按屏幕自动选档）**：三档内嵌 Bebas Neue 字体（48/60/130px，**数字等宽**），`SetupUI` 时按编译期屏幕宽度 `DISPLAY_WIDTH` 从最大往下选能放下 `HH:MM` 的档——覆盖 240×240 / 240×320（→130px，两侧仅余 4px、几乎占满全屏、字高约 93px 高瘦占满）/ 128×160 横屏（→48px）。因数字等宽，任何时间 HH:MM 宽度恒定，不会因窄数字增大两侧留白，"始终占满两边"。
 - 时间来自联网后同步的系统时钟（与绝对闹钟同源）；未同步前不显示。
 - 设置写入 NVS（`clock/mode` + `clock/theme`），**断电重启自动恢复**。
 - 实现：板级显示子类 `airobot_lcd_display.h`（`AirobotLcdDisplay : SpiLcdDisplay`，标准 `SetupUI()` 钩子叠加 LVGL 标签，不改核心 display 代码）+ 1 秒 `esp_timer` 刷新（仅在文本/日期变化时更新标签，省 SPI 刷屏）。字体内嵌见下方「时钟字体说明」。
 
 ### 时钟字体说明（内嵌，无需任何 menuconfig 配置）
 
-时间/日期使用**板内嵌七段数码管字体**（`clock_dseg7.c`，仅含 `0-9` `:` `-` 字形，DSEG7 Classic 风格）：
+时间/日期使用**板内嵌 Bebas Neue 等宽高瘦数字字体**（`clock_bebas_130/60/48.c` 时间大字，`clock_bebas_date.c` 日期小字，仅含 `0-9` `:` `-` 字形，Bebas Neue 风格）：
 
-- 时间大字用 `clock_dseg7_76`（76px 档，已加粗+1.2 倍纵向拉伸，`HH:MM`）；18px 字（`clock_dseg7_18`）显示 `YYYY-MM-DD`（日期小字，时间上方）。40/56px 两档（`clock_dseg7_40/56`）供窄屏（如 170px）使用，同样已加粗。
-- 所有字形已做 **1px 膨胀加粗**（8 邻域 OR，`scripts/thicken_clock_font.py` 生成，幂等；注意该文件位图是 LVGL 9 的 packed 格式——逐位紧密打包、`stride=0`，不是常规每行字节对齐的 1bpp，修改位图时必须按 packed 解析）。
-- 字形数据是 `const` 数组，放 **flash**（`.rodata`），LVGL 按需从 flash 读取位图，**运行时不占 RAM**；四套字体整体 flash 增加约 64KB（app 分区仍余 15%+）。
-- 因此**不再需要** `CONFIG_LV_FONT_MONTSERRAT_48`，之前为开大字号做的 `menuconfig`/`sdkconfig_append` 操作全部作废（config.json 里那行留着也无害，只是不再被使用）。
-- 字体为开源 DSEG7（SIL OFL，GitHub `keshikan/DSEG`）。仓库不存字体源文件，只存生成的位图 `clock_dseg7.c`；DSEG 原始字距过宽，嵌的是收紧字距后的版本。
+- 字体为开源 **Bebas Neue**（Google Fonts，SIL OFL）。高瘦(condensed)标题型无衬线字体，且**数字严格等宽**（0-9 与冒号每字符 adw 相同）——保证任何时间 HH:MM 宽度恒定，不会因窄数字(如 '1')让时间变窄、两侧留白忽大忽小，实现"始终占满两边"。高瘦字形让同屏宽能上更大字号、字更高，"长方形"视觉更显高大。
+- 全部按 `lv_font_conv --bpp 2` 生成（**bpp2 抗锯齿**），未做任何手工加粗/拉伸/收紧字距（**不再有** `scripts/thicken_clock_font.py` / `stretch_clock_font_76.py`）。
+- 字形数据是 `const` 数组，放 **flash**（`.rodata`），LVGL 按需从 flash 读取位图，**运行时不占 RAM**。
+- **档位宏门控**（`clock_fonts_config.h`）：按屏幕 `DISPLAY_WIDTH` 编译期只启用本屏用到的档，其余档位 `.c` 内容为 `#if 0` 空、**不占 flash**。
+- 仓库不存字体源文件，只存生成的位图 `clock_bebas_*.c`。
 
-若以后想调字号/样式，可重新生成：
+> ⚠️ **横/竖屏是编译期决定**（`config.h` 的 `DISPLAY_SWAP_XY`）。想横屏：把对应分支的 `DISPLAY_WIDTH`/`DISPLAY_HEIGHT` 一并改成横的值（如 128×160 屏横屏 → `WIDTH=160, HEIGHT=128, SWAP_XY=true`），**不是**只改 `SWAP_XY`。重编后生效。
+
+若以后想**换字体 / 调字号 / 换样式**，只需重新生成**同名**字体文件即可——**不改任何显示逻辑**（`PickClockFont()` 运行时实测 `88:88` 宽度自适应选档）、**不改 CMakeLists**、**不用清 build**。
+
+### ▶ 关键原则：文件名固定，只改内容
+
+所有字体**文件名已经固定**（`clock_bebas_130/60/48.c` 时间 + `clock_bebas_date.c` 日期），代表「大屏主档 / 中档 / 小屏兜底 / 日期」四个**角色**，**不随字号或字体变**。换字体/改字号时，只把**新内容写进同名的 `.c`**（文件名不变 → `file(GLOB)` 列表不变 → CMake 不重扫 → 永不删 build、永不改逻辑）。
+
+> ⚠️ **千万不要给字体文件改新名字**（如新建 `clock_xxx_140.c`）。一旦文件名变了，GLOB 列表就变，需要清 build 才能让 CMake 重新扫描。
+
+### ▶ 换字体完整流程（约 5 步）
+
+**1. 准备源字体**（开源、SIL OFL，任选粗壮/等宽数字字体）：
+```bash
+npm i @fontsource/<字体名>        # 例: @fontsource/anton / archivo-black / bebas-neue
+# 源字体文件: node_modules/@fontsource/<字体名>/files/<字体名>-latin-400-normal.woff
+```
+
+**2. 确定各档该用多大字号**（不同字体宽高比不同，不能沿用旧字号！）：
+换字体后用旧字号很可能放不下 240 宽（或偏小）。用 `lv_font_conv` 生成一个临时档，实测 `88:88` 宽度，选出**刚好放得下 240 宽**（avail = `DISPLAY_WIDTH - 4`）的最大字号：
+```bash
+# 先用某字号试生成, 读时钟文件里数字/冒号的 adv_w 算宽度
+npx lv_font_conv --size 130 --font 新字体.woff --range 0x30-0x39,0x3A --lv-font-name probe -o /tmp/probe.c
+# 宽度 ≈ (4*数字adv + 冒号adv)/16, 目标 ≤ 236px(240-4)。偏大→降字号, 偏小→升字号。
+# 宽高比更宽的字体会需要更小字号; 更窄的(高瘦)可用更大字号。
+```
+
+**3. 正式生成**（写进**同名**文件，覆盖 Bebas）：
+```bash
+# 时间大字: 大屏/中屏/小屏三档, 用上一步定好的字号填入 size
+npx lv_font_conv --bpp 2 --size <新字号> --format lvgl --no-compress \
+  --font 新字体.woff --range 0x30-0x39,0x3A --lv-font-name clock_bebas_130 -o clock_bebas_130.c
+# 日期小字: 0-9 与 '-' 一个档
+npx lv_font_conv --bpp 2 --size <日期字号> --format lvgl --no-compress \
+  --font 新字体.woff --range 0x30-0x39,0x2D --lv-font-name clock_bebas_date -o clock_bebas_date.c
+```
+
+**4. 编译烧录**（**不用清 build**）：
+```bash
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+```
+
+**5. 看效果**：若大屏主档没被选中（显示偏小），说明新字体特定字号放不进 240 宽，`PickClockFont` 自动落到了小档——回第 2 步调大或调小主档字号。
+
+### ▶ 现有 Bebas Neue 的生成命令（参考）
 
 ```bash
-# 源字体(npm): npm i @fontsource/dseg7-classic, 解包取 files/dseg7-classic-latin-700-normal.woff
-# 时间大字 40/56/76px (0-9 与 ':'), 同法生成三份:
-npx lv_font_conv --bpp 1 --size 56 --format lvgl   --font dseg7-classic-latin-700-normal.woff   --range 0x30-0x39,0x3A --lv-font-name clock_dseg7_56 -o /tmp/t56.c
-# 日期小字 18px (0-9 与 '-') 同法生成后拼进同一文件; 非首份的 static 符号
-# (glyph_bitmap/glyph_dsc/font_dsc/cmaps/cache/glyph_id_ofs_list_0) 加 _56/_76/_18 后缀避免重名,
-# 但结构体字段名(.glyph_bitmap= 等)不能加后缀。
-# 最后把每字 adv_w 收紧为 ink 宽 (ofs_x+box_w) 附近 (单位 1/16px, 即 LVGL 9 约定), 冒号单独收窄居中;
-# 步进小于 ink 宽会导致数字互相重叠(已踩过坑, 含把细字形的 '1' 误判成冒号的坑)。
+# 源字体(npm): npm i @fontsource/bebas-neue, 解包取 files/bebas-neue-latin-400-normal.woff
+# 时间大字 130/60/48px (0-9 与 ':'); 这里是当前定稿的三档字号:
+npx lv_font_conv --bpp 2 --size 130 --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
+  --range 0x30-0x39,0x3A --lv-font-name clock_bebas_130 -o clock_bebas_130.c
+npx lv_font_conv --bpp 2 --size 60  --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
+  --range 0x30-0x39,0x3A --lv-font-name clock_bebas_60  -o clock_bebas_60.c
+npx lv_font_conv --bpp 2 --size 48  --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
+  --range 0x30-0x39,0x3A --lv-font-name clock_bebas_48  -o clock_bebas_48.c
+# 日期小字 18px (0-9 与 '-'):
+npx lv_font_conv --bpp 2 --size 18 --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
+  --range 0x30-0x39,0x2D --lv-font-name clock_bebas_date -o clock_bebas_date.c
 ```
+
+> ℹ️ `lv_font_conv` 直接生成即 LVGL9 兼容格式，无需手工改 `adv_w`。若改 bpp/字号后 flash 吃紧，可把 **bpp 降到 1**（粗体下仍清晰）或**减少档位**（整机只一块屏时只需 1-2 档）。
 
 编译完成后烧录看日志（`scripts/build.py` 只管配置+编译，**不支持** flash/monitor 参数，烧录统一用 `idf.py`，端口按实际修改）：
 
@@ -430,7 +480,7 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 ### 真机验证要点
 
 1. 说「打开时钟」→ 待机时屏幕出现大号 `HH:MM` 时间（分钟正常跳动）+ 上方日期，状态栏/字幕条隐藏。
-2. 说「切换时钟颜色/主题」→ 黑底白字 ↔ 白底黑字立即切换。
+2. 说「切换时钟颜色/主题」→ 黑底白字 ↔ 白底黑字 两个经典主题循环切换，立即生效。
 3. 说「切换时钟模式」→ 时钟消失、原 UI 恢复；再说一次 → 恢复。
 4. 开启时钟后唤醒对话/播放音乐 → 时钟隐藏，结束后回到待机自动恢复显示。
 5. 开启时钟 + 切换主题后断电重启 → 均保持（NVS 持久化生效）。
