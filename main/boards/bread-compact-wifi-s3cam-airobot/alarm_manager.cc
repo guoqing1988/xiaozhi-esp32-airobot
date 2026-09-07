@@ -25,6 +25,7 @@ static cJSON* AlarmItemToJson(const AlarmItem& a) {
     cJSON_AddStringToObject(o, "type", a.type == kAlarmTypeAbsolute ? "absolute" : "relative");
     cJSON_AddNumberToObject(o, "trigger_sec", a.trigger_sec);
     cJSON_AddStringToObject(o, "label", a.label.c_str());
+    cJSON_AddStringToObject(o, "song", a.song.c_str());
     cJSON_AddBoolToObject(o, "enabled", a.enabled);
     if (a.type == kAlarmTypeAbsolute) {
         cJSON_AddNumberToObject(o, "last_fired_day", a.last_fired_day);
@@ -118,11 +119,13 @@ int AlarmManager::NextId() {
     return ++last_id_;
 }
 
-int AlarmManager::Add(AlarmType type, int trigger_sec, const std::string& label) {
+int AlarmManager::Add(AlarmType type, int trigger_sec, const std::string& label,
+                       const std::string& song) {
     AlarmItem a;
     a.type = type;
     a.trigger_sec = trigger_sec;
     a.label = label;
+    a.song = song;
     a.enabled = true;
     if (a.type == kAlarmTypeRelative) {
         a.base_ms = NowMs();  // 相对: 记录创建时刻
@@ -229,6 +232,7 @@ void AlarmManager::Load() {
         cJSON* ty = cJSON_GetObjectItem(item, "type");
         cJSON* tr = cJSON_GetObjectItem(item, "trigger_sec");
         cJSON* lb = cJSON_GetObjectItem(item, "label");
+        cJSON* sg = cJSON_GetObjectItem(item, "song");
         cJSON* en = cJSON_GetObjectItem(item, "enabled");
         cJSON* lf = cJSON_GetObjectItem(item, "last_fired_day");
         if (id) {
@@ -242,6 +246,9 @@ void AlarmManager::Load() {
         }
         if (lb && lb->valuestring) {
             a.label = lb->valuestring;
+        }
+        if (sg && sg->valuestring) {
+            a.song = sg->valuestring;  // 旧数据无此字段时保持空(随机)
         }
         if (en) {
             a.enabled = cJSON_IsTrue(en);

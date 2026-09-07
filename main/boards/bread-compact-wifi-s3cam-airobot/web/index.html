@@ -98,10 +98,11 @@ td:last-child{text-align:right}
       </select>
       <input id="avalue" placeholder="分钟数 或 HH:MM" size="10">
       <input id="alabel" placeholder="提醒内容(可选)">
+      <select id="asong" title="选择铃声"><option value="">🎲 随机选歌</option></select>
     </div>
     <div class="row"><button class="btn" onclick="addAlarm()">添加闹钟</button></div>
     <table>
-      <thead><tr><th>ID</th><th>类型</th><th>触发</th><th>内容</th><th>状态</th><th></th></tr></thead>
+      <thead><tr><th>ID</th><th>类型</th><th>触发</th><th>内容</th><th>铃声</th><th>状态</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
     <div id="alarmlog"></div>
@@ -211,11 +212,31 @@ loadSongs();
 }
 // ===== 闹钟 =====
 function fmtSec(s){var h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return ('0'+h).slice(-2)+':'+('0'+m).slice(-2);}
+// 填充"选择铃声"下拉：每次切入闹钟 tab 都刷新，保证能选到刚上传的歌
+function loadSongOptions(){
+const sel=document.getElementById('asong');
+sel.innerHTML='<option value="">🎲 随机选歌</option>';
+fetch('/music')
+.then(r=>r.text())
+.then(t=>{
+let arr=null;
+try{arr=JSON.parse(t);}catch(e){arr=null;}
+if(!Array.isArray(arr))return;
+arr.forEach(function(s){
+const o=document.createElement('option');
+o.value=s.name;
+o.textContent=s.name;
+sel.appendChild(o);
+});
+})
+.catch(()=>{});
+}
 function loadAlarms(){
+loadSongOptions();
 const tb=document.querySelector('#panel-alarm tbody');
 const log=document.getElementById('alarmlog');
-const empty='<tr><td colspan="6">暂无闹钟</td></tr>';
-const unavailable='<tr><td colspan="6">闹钟接口不可用，请确认已连接设备</td></tr>';
+const empty='<tr><td colspan="7">暂无闹钟</td></tr>';
+const unavailable='<tr><td colspan="7">闹钟接口不可用，请确认已连接设备</td></tr>';
 fetch('/alarm?action=list')
 .then(r=>r.text())
 .then(t=>{
@@ -229,7 +250,7 @@ arr.forEach(a=>{
 const isAbs=a.type==='absolute';
 const trigger=isAbs?('每天 '+fmtSec(a.trigger_sec)):(a.trigger_sec+' 秒(约'+(a.trigger_sec/60).toFixed(0)+'分钟)');
 const tr=document.createElement('tr');
-tr.innerHTML='<td>'+a.id+'</td><td>'+(isAbs?'每天':'相对')+'</td><td>'+trigger+'</td><td>'+(a.label||'')+'</td><td>'+(a.enabled?'启用':'停用')+'</td><td><button class="btn btn-danger" onclick="delAlarm('+a.id+')">删除</button></td>';
+tr.innerHTML='<td>'+a.id+'</td><td>'+(isAbs?'每天':'相对')+'</td><td>'+trigger+'</td><td>'+(a.label||'')+'</td><td>'+(a.song||'🎲 随机')+'</td><td>'+(a.enabled?'启用':'停用')+'</td><td><button class="btn btn-danger" onclick="delAlarm('+a.id+')">删除</button></td>';
 tb.appendChild(tr);
 });
 })
@@ -239,11 +260,12 @@ function addAlarm(){
 const type=document.getElementById('atype').value;
 const value=document.getElementById('avalue').value.trim();
 const label=document.getElementById('alabel').value.trim();
+const song=document.getElementById('asong').value;
 if(!value){document.getElementById('alarmlog').innerHTML='<div>请填触发值</div>';return;}
 let sec;
 if(type==='relative'){sec=Math.round(parseFloat(value)*60);}
 else{const p=value.split(':');sec=(+p[0])*3600+(+p[1]||0)*60;}
-fetch('/alarm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',type:type,value:sec,label:label})})
+fetch('/alarm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',type:type,value:sec,label:label,song:song})})
 .then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
 .then(()=>{loadAlarms();document.getElementById('alarmlog').innerHTML='<div>✅ 已添加</div>';})
 .catch(()=>{document.getElementById('alarmlog').innerHTML='<div>❌ 添加失败（接口不可用）</div>';});

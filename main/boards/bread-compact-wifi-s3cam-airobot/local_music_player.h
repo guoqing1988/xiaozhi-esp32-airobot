@@ -30,6 +30,9 @@ public:
     void Stop();
 
     std::vector<std::string> ListSongs() const;
+    // 把用户说的(可能不准确的)歌名解析成本地准确文件名(含扩展名); 找不到返回空。
+    // 用于闹钟指定铃声等场景: 把语音输入的模糊名持久化为准确名, 保证响铃一定播中。
+    std::string ResolveSong(const std::string& name);
     bool IsPlaying() const { return playing_.load(); }
 
 private:

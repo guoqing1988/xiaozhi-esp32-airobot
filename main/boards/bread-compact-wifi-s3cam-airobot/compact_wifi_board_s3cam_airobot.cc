@@ -599,16 +599,19 @@ private:
             "  `type`: 'relative' 表示从现在起 N 分钟后提醒(一次性); 'absolute' 表示每天 HH:MM 提醒。\n"
             "  `value`: relative 用分钟数(如 '5'); absolute 用 'HH:MM'(如 '07:30')。\n"
             "  `label`: 提醒内容(如 '喝水'), 可省略。\n"
+            "  `song`: 指定铃声歌曲名(如 '晴天.mp3'), 可省略; 省略时到点随机播放。\n"
             "Return: 创建的闹钟编号及说明。",
             PropertyList({
                 Property("type", kPropertyTypeString),
                 Property("value", kPropertyTypeString),
-                Property("label", kPropertyTypeString, std::string(""))
+                Property("label", kPropertyTypeString, std::string("")),
+                Property("song", kPropertyTypeString, std::string(""))
             }),
             [this](const PropertyList& props) -> ReturnValue {
                 auto type = props["type"].value<std::string>();
                 auto value = props["value"].value<std::string>();
                 auto label = props["label"].value<std::string>();
+                auto song = props["song"].value<std::string>();
                 AlarmType t = (type == "absolute") ? kAlarmTypeAbsolute : kAlarmTypeRelative;
                 int sec = 0;
                 if (t == kAlarmTypeRelative) {
@@ -618,12 +621,25 @@ private:
                     sscanf(value.c_str(), "%d:%d", &hh, &mm);
                     sec = hh * 3600 + mm * 60;        // HH:MM -> 当天秒数
                 }
-                int id = alarm_manager_->Add(t, sec, label);
+                // 用户语音说的歌名往往不准(如"晴天"vs"晴天.mp3"), 此处解析成本地准确文件名
+                // 再持久化, 保证到点响铃能准确播中; 指定了歌但本地无匹配 -> 回退随机。
+                std::string resolved;
+                if (!song.empty() && GetMusicPlayer() != nullptr) {
+                    resolved = GetMusicPlayer()->ResolveSong(song);
+                }
+                int id = alarm_manager_->Add(t, sec, label, resolved);
+                std::string ring;
+                if (resolved.empty()) {
+                    ring = song.empty() ? "随机选歌" : ("随机选歌(未找到 \"" + song + "\")");
+                } else {
+                    ring = "铃声: " + resolved;
+                }
                 if (t == kAlarmTypeRelative) {
                     return std::string("已设置闹钟 #") + std::to_string(id) + ", 将于 " + value +
-                           " 分钟后提醒";
+                           " 分钟后提醒 (" + ring + ")";
                 }
-                return std::string("已设置闹钟 #") + std::to_string(id) + ", 每天 " + value + " 提醒";
+                return std::string("已设置闹钟 #") + std::to_string(id) + ", 每天 " + value +
+                       " 提醒 (" + ring + ")";
             });
         mcp.AddTool("self.alarm.list",
             "列出所有闹钟。返回 JSON 数组, 每条含 id/type/trigger_sec/label/enabled。",
@@ -644,26 +660,35 @@ private:
         // 让 web 页面(上传页)能读写闹钟
         SetAlarmWebApi({
             .get_alarms_json = [this]() { return alarm_manager_->ListJson(); },
-            .add_alarm       = [this](const std::string& type, int value_sec, const std::string& label) {
+            .add_alarm       = [this](const std::string& type, int value_sec, const std::string& label,
+                                       const std::string& song) {
                 AlarmType t = (type == "absolute") ? kAlarmTypeAbsolute : kAlarmTypeRelative;
-                return alarm_manager_->Add(t, value_sec, label);
+                return alarm_manager_->Add(t, value_sec, label, song);
             },
             .remove_alarm    = [this](int id) { return alarm_manager_->Remove(id); },
         });
     }
 
-    // 到点提醒: 打断本地音乐 -> 自动随机播放本地歌曲作为铃声(音乐闹钟)。
-    // 复用现有播放链路(随机播放/唤醒打断/歌词显示均走原始逻辑), 声音明显且持续,
-    // 用户唤醒词/按钮/说停即可打断响铃; 卡上无歌或启动失败时退回内置提示音。
+    // 到点提醒: 打断本地音乐 -> 播放铃声(音乐闹钟)。
+    // 指定了 a.song 则优先播该歌；未指定或指定歌曲未找到则回退随机播放；仍失败或无歌退回内置提示音。
+    // 复用现有播放链路(播放/唤醒打断/歌词显示均走原始逻辑), 声音明显且持续,
+    // 用户唤醒词/按钮/说停即可打断响铃。
     void AlarmSpeak(const AlarmItem& a) {
-        auto& app = Application::GetInstance();
         if (music_player_ != nullptr && music_player_->IsPlaying()) {
             music_player_->Stop();  // 闹钟优先: 先停掉用户正在听的歌
         }
         bool ringing = false;
         auto* player = GetMusicPlayer();  // 懒创建(首次响铃时建对象 + 扫描 SD 卡)
         if (player != nullptr && !player->ListSongs().empty()) {
-            ringing = player->PlayRandom();
+            if (!a.song.empty()) {
+                // 指定铃声: PlaySong 成功返回以"已开始播放"/"正在播放"开头；未找到则回退随机
+                std::string r = player->PlaySong(a.song);
+                ringing = (r.find("已开始播放") != std::string::npos ||
+                           r.find("正在播放") != std::string::npos);
+            }
+            if (!ringing) {
+                ringing = player->PlayRandom();
+            }
         }
         if (!ringing) {
             StartAlarmChime(3);  // 无歌/启动失败兜底: 立即一声 + 每 1s 补 3 声(共 4 声, 比单声容易听到)

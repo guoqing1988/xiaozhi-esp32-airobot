@@ -210,6 +210,12 @@ std::vector<std::string> LocalMusicPlayer::ListSongs() const {
     return songs_;
 }
 
+std::string LocalMusicPlayer::ResolveSong(const std::string& name) {
+    // 复用 FindSong 的匹配(精确/子串/忽略大小写), 返回本地准确文件名(含扩展名);
+    // 找不到返回空。用于把语音输入的模糊歌名解析为准确名后持久化。
+    return FindSong(name);
+}
+
 std::string LocalMusicPlayer::PickNextSong() {
     // 注意: 调用方(PlayTask)必须已持有 state_mutex_ 才能调用本函数,
     // 此处不再加锁 —— std::mutex 非递归, 重复加同一把锁会死锁

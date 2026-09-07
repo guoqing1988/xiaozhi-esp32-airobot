@@ -309,7 +309,9 @@ static esp_err_t HandleAlarmPost(httpd_req_t* req) {
         int val = c_val ? c_val->valueint : 0;
         cJSON* c_label = cJSON_GetObjectItem(root, "label");
         const char* lb = (c_label && c_label->valuestring) ? c_label->valuestring : "";
-        int id = s_alarm_api.add_alarm(ty, val, lb);
+        cJSON* c_song = cJSON_GetObjectItem(root, "song");
+        const char* sg = (c_song && c_song->valuestring) ? c_song->valuestring : "";
+        int id = s_alarm_api.add_alarm(ty, val, lb, sg);
         resp = std::string("{\"id\":") + std::to_string(id) + "}";
     } else if (strcmp(action, "remove") == 0 && s_alarm_api.remove_alarm) {
         cJSON* c_id = cJSON_GetObjectItem(root, "id");

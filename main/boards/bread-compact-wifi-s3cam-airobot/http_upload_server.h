@@ -9,11 +9,12 @@ void StartUploadServer(std::function<void()> on_uploaded = nullptr);
 
 // 闹钟管理回调：由板级注入，供 web 页面读写闹钟。
 // get_alarms_json: 返回闹钟 JSON 数组字符串（供列表渲染）。
-// add_alarm: 添加闹钟(type, value_sec, label)，返回新闹钟 id。
+// add_alarm: 添加闹钟(type, value_sec, label, song)，song 为指定铃声歌曲名(空=随机)，返回新闹钟 id。
 // remove_alarm: 按 id 删除闹钟，返回是否成功。
 struct AlarmWebApi {
     std::function<std::string()> get_alarms_json;
-    std::function<int(const std::string& type, int value_sec, const std::string& label)> add_alarm;
+    std::function<int(const std::string& type, int value_sec, const std::string& label,
+                      const std::string& song)> add_alarm;
     std::function<bool(int id)> remove_alarm;
 };
 

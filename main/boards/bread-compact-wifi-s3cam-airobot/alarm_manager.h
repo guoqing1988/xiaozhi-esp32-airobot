@@ -20,6 +20,7 @@ struct AlarmItem {
     // relative: 从创建起经过的秒数; absolute: 一天内的秒数(0~86399)
     int         trigger_sec = 0;
     std::string label;        // 提醒内容(如"喝水")
+    std::string song;         // 指定铃声歌曲名(空=随机选歌); 落盘
     bool        enabled = true;
     // relative: 创建时的单调毫秒(esp_timer, 用于相对计时, 内存态, 不落盘)
     uint64_t base_ms = 0;
@@ -37,8 +38,8 @@ public:
     // 停止后台检查线程(析构时自动调用)
     void Stop();
 
-    // 增加闹钟(写入文件), 返回新 id
-    int Add(AlarmType type, int trigger_sec, const std::string& label);
+    // 增加闹钟(写入文件), 返回新 id。song 为指定铃声歌曲名(空=随机)。
+    int Add(AlarmType type, int trigger_sec, const std::string& label, const std::string& song = "");
     // 清除所有闹钟(供 web "清空" 用)
     void ClearAll();
     // 按 id 删除
