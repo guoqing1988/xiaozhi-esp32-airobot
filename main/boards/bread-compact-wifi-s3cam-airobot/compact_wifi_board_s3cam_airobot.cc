@@ -811,18 +811,21 @@ private:
     }
 
     // 发送 UART 指令并返回描述性结果(成功/失败), 避免 AI 看到 true/false 无法确认执行结果而重复调用
-    static std::string SendUartMessage(const char* command_str) {
+    // debounce=true 时对相同指令 1 秒防抖(挡 AI 重复调用); web 遥感驾驶走 false(心跳可重复)。
+    static std::string SendUartMessage(const char* command_str, bool debounce = true) {
         // 指令防抖：AI 无执行确认机制时可能反复调用相同工具(实测会重复调用几十次,
         // 间隔约 700-900ms)。相同指令 1 秒内只发送一次，避免 Arduino 串口堆积重复指令。
         // 不同指令(动作切换/组合编排)不受影响，照常发送。
         static char s_last_cmd[32] = {};
         static int64_t s_last_us = 0;
         int64_t now = esp_timer_get_time();
-        if (strcmp(s_last_cmd, command_str) == 0 && (now - s_last_us) < 1000000) {
+        if (debounce && strcmp(s_last_cmd, command_str) == 0 && (now - s_last_us) < 1000000) {
             return std::string("指令已发送(防抖): ") + command_str;  // 防抖丢弃, 视为成功
         }
-        snprintf(s_last_cmd, sizeof(s_last_cmd), "%s", command_str);
-        s_last_us = now;
+        if (debounce) {
+            snprintf(s_last_cmd, sizeof(s_last_cmd), "%s", command_str);
+            s_last_us = now;
+        }
         // 统一加 '@' 前缀, 让 Arduino 只认带前缀的命令行(过滤日志乱码)
         int written = uart_write_bytes(ECHO_UART_PORT_NUM, "@", 1);
         if (written < 0) return std::string("指令发送失败: ") + command_str;
@@ -831,6 +834,64 @@ private:
         written = uart_write_bytes(ECHO_UART_PORT_NUM, "\n", 1);
         if (written < 0) return std::string("指令发送失败: ") + command_str;
         return std::string("指令已发送: ") + command_str;
+    }
+
+    // 设置头部舵机回正角度: 存 NVS + 下发给下位机, 返回说明文本(web /uno 调用)。
+    std::string SetServoHome(int value) {
+        if (value < 0) value = 0;
+        if (value > 180) value = 180;
+        Settings settings("servo", true);
+        settings.SetInt("home", value);
+        std::string cmd = "servo-home-set " + std::to_string(value);
+        return SendUartMessage(cmd.c_str(), false);
+    }
+
+    // 读取已保存的头部回正角度(默认 82), 返回 JSON(web /uno 调用)。
+    std::string GetServoHome() {
+        Settings settings("servo", false);
+        int v = settings.GetInt("home", 82);
+        if (v < 0) v = 0;
+        if (v > 180) v = 180;
+        return std::string("{\"value\":") + std::to_string(v) + "}";
+    }
+
+    // 开机应用: 把 NVS 保存的回正角度下发给下位机(断电重启仍保持用户设置)。
+    void ApplyServoHome() {
+        Settings settings("servo", false);
+        int v = settings.GetInt("home", 82);
+        if (v < 0) v = 0;
+        if (v > 180) v = 180;
+        std::string cmd = "servo-home-set " + std::to_string(v);
+        SendUartMessage(cmd.c_str(), false);
+        ESP_LOGI(TAG, "Servo home applied: %d", v);
+    }
+
+    // 汇总下位机状态为 JSON(mode/action/speed/servo), 供 self.uno.get_status 与 web /uno 接口复用。
+    std::string UnoStatusJson() {
+        std::string mode, action;
+        {
+            std::lock_guard<std::mutex> lock(uno_status_mutex_);
+            action = uno_last_action_;
+        }
+        if (uno_busy_) {
+            mode = (action == "line-follow") ? "line_follow" : "moving";
+        } else {
+            mode = "idle";
+        }
+        int speed = uno_speed_.load();
+        int servo = uno_servo_.load();
+        auto root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "mode", mode.c_str());
+        cJSON_AddStringToObject(root, "action", action.c_str());
+        if (speed >= 0) cJSON_AddNumberToObject(root, "speed", speed);
+        else cJSON_AddNullToObject(root, "speed");
+        if (servo >= 0) cJSON_AddNumberToObject(root, "servo", servo);
+        else cJSON_AddNullToObject(root, "servo");
+        auto str = cJSON_PrintUnformatted(root);
+        std::string result(str);
+        cJSON_free(str);
+        cJSON_Delete(root);
+        return result;
     }
 
     void InitializeUnoTools() {
@@ -926,30 +987,7 @@ private:
             "发送控制指令后动作会自动完成并停止, 无需查询状态确认。",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
-                std::string mode, action;
-                {
-                    std::lock_guard<std::mutex> lock(uno_status_mutex_);
-                    action = uno_last_action_;
-                }
-                if (uno_busy_) {
-                    mode = (action == "line-follow") ? "line_follow" : "moving";
-                } else {
-                    mode = "idle";
-                }
-                int speed = uno_speed_.load();
-                int servo = uno_servo_.load();
-                auto root = cJSON_CreateObject();
-                cJSON_AddStringToObject(root, "mode", mode.c_str());
-                cJSON_AddStringToObject(root, "action", action.c_str());
-                if (speed >= 0) cJSON_AddNumberToObject(root, "speed", speed);
-                else cJSON_AddNullToObject(root, "speed");
-                if (servo >= 0) cJSON_AddNumberToObject(root, "servo", servo);
-                else cJSON_AddNullToObject(root, "servo");
-                auto str = cJSON_PrintUnformatted(root);
-                std::string result(str);
-                cJSON_free(str);
-                cJSON_Delete(root);
-                return result;
+                return UnoStatusJson();
             });
 
         mcp_server.AddTool(
@@ -961,6 +999,18 @@ private:
                 int action = properties["action"].value<int>();
                 return SendUartMessage(action == 1 ? "line-start" : "line-stop");
             });
+
+        // 让 web 摇杆页面能连续控制下位机(/uno REST 接口)
+        SetUnoWebApi({
+            .send_drive = [this](const std::string& cmd) {
+                // web 遥感为高频心跳, 绕过 1 秒防抖(防抖只用于点动)
+                return SendUartMessage(cmd.c_str(), false);
+            },
+            .get_status = [this]() { return UnoStatusJson(); },
+            .set_servo_home = [this](int value) { return SetServoHome(value); },
+            .get_servo_home = [this]() { return GetServoHome(); },
+        });
+        ApplyServoHome();   // 开机把 NVS 保存的回正角度下发给下位机
     }
 
     // 网络状态查询工具（可扩展的网络信息入口，当前返回 IP，后续可加 SSID/信号/MAC 等）

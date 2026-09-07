@@ -2,8 +2,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>小智 AI 机器人</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#333;line-height:1.6;padding:16px}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#333;line-height:1.6;padding:16px;-webkit-touch-callout:none;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none;touch-action:manipulation}
+/* 输入/选择控件恢复可编辑，避免被全局 user-select:none 禁用 */
+input,select,textarea{-webkit-user-select:text;user-select:text}
+button{-webkit-user-select:none;user-select:none}
 .wrap{max-width:640px;margin:0 auto}
 .app-title{font-size:20px;font-weight:700;margin:4px 0 14px;color:#1f2937}
 .app-title small{display:block;font-size:12px;font-weight:400;color:#9aa3b2;margin-top:2px}
@@ -42,13 +45,22 @@ td:last-child{text-align:right}
 .modal-head h3{margin:0}
 .modal-close{background:none;border:none;font-size:24px;line-height:1;color:#9aa3b2;cursor:pointer;padding:0 4px}
 .modal-close:hover{color:#333}
+/* 机器人控制遥杆 */
+.joy-wrap{display:flex;flex-direction:column;align-items:center;gap:10px;padding:10px 0}
+.joystick{width:190px;height:190px;border-radius:50%;background:radial-gradient(circle at 50% 50%,#f8fafc,#eef0f4);position:relative;touch-action:none;user-select:none;border:2px solid #dbe1ea;box-shadow:inset 0 2px 8px rgba(0,0,0,.06)}
+.joystick .dir-label{position:absolute;font-size:11px;color:#9aa3b2;transform:translate(-50%,-50%)}
+.joystick-knob{width:64px;height:64px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#7eb8ff,#2563eb);position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);box-shadow:0 3px 12px rgba(37,99,235,.35);pointer-events:none}
+#joyLabel{font-size:14px;font-weight:600;color:#2563eb;min-height:20px}
+#joySpeed{font-size:12px;color:#6b7280}
+#unoStatus{font-size:12.5px;color:#374151;background:#f8f9fb;border-radius:8px;padding:8px 10px;margin:8px 0;text-align:center}
 </style></head><body>
 <div class="wrap">
-  <div class="app-title">小智 AI 机器人<small>设备管理 · 歌曲管理 & 闹钟提醒</small></div>
+  <div class="app-title">小智 AI 机器人<small>设备管理 · 歌曲 & 闹钟 & 机器人控制</small></div>
 
   <div class="tabs">
     <button class="tab active" onclick="showTab('upload',this)">🎵 歌曲管理</button>
     <button class="tab" onclick="showTab('alarm',this)">⏰ 闹钟提醒</button>
+    <button class="tab" onclick="showTab('uno',this)">🎮 机器人控制</button>
   </div>
 
   <!-- 歌曲管理 -->
@@ -107,6 +119,40 @@ td:last-child{text-align:right}
     </table>
     <div id="alarmlog"></div>
   </div>
+
+  <!-- 机器人控制 -->
+  <div class="panel" id="panel-uno">
+    <h3>🎮 机器人控制</h3>
+    <div class="hint">拖动摇杆控制麦克纳姆轮机器人：推方向决定运动方向，推得越远速度越快；松手回中即停止。</div>
+    <div id="unoStatus">状态加载中…</div>
+    <div class="joy-wrap">
+      <div class="joystick" id="joyBase">
+        <span class="dir-label" style="left:50%;top:10px">前进</span>
+        <span class="dir-label" style="left:50%;bottom:10px">后退</span>
+        <span class="dir-label" style="left:14px;top:50%">左转</span>
+        <span class="dir-label" style="right:14px;top:50%">右转</span>
+        <div class="joystick-knob" id="joyKnob"></div>
+      </div>
+      <div id="joyLabel">松手回中</div>
+      <div id="joySpeed">速度 0</div>
+    </div>
+    <div class="row" style="align-items:center;margin-top:6px;flex-wrap:nowrap">
+      <span style="font-size:13px;color:#6b7280;min-width:60px">🔧 头部舵机</span>
+      <input type="range" id="servoRange" min="0" max="180" value="82" style="flex:1;min-width:0;height:28px" oninput="onServoInput(this)">
+      <span id="servoLabel" style="font-size:12px;color:#2563eb;min-width:44px;text-align:right">82°</span>
+      <button class="btn" style="padding:4px 8px;font-size:12px;margin-left:6px;flex-shrink:0" onclick="servoHome()">回正</button>
+    </div>
+    <div class="row" style="align-items:center;margin-top:4px;flex-wrap:nowrap">
+      <span style="font-size:13px;color:#6b7280;min-width:60px">🎯 回正值</span>
+      <button class="btn" style="padding:6px 14px;font-size:18px;flex-shrink:0" onclick="homeStep(-1)">−</button>
+      <input type="number" id="servoHomeVal" min="0" max="180" value="82" style="flex:1;text-align:center;height:38px;min-width:0" readonly>
+      <button class="btn" style="padding:6px 14px;font-size:18px;flex-shrink:0" onclick="homeStep(1)">+</button>
+    </div>
+    <div class="hint">回正值即「回正」按钮让头部停靠的角度；点 − / + 实时生效并写入设备(NVS)，断电保留。</div>
+    <div class="row" style="justify-content:center">
+      <button class="btn btn-danger" onclick="unoStop()">🛑 紧急停止</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -117,6 +163,8 @@ btn.classList.add('active');
 document.getElementById('panel-'+id).classList.add('active');
 if(id==='alarm')loadAlarms();
 if(id==='upload')loadSongs();
+if(id==='uno'){startUnoPolling();}
+else{stopUnoPolling();unoStop();}
 }
 // ===== 上传弹窗 =====
 function openUpload(){document.getElementById('uploadModal').classList.add('show');}
@@ -275,6 +323,121 @@ fetch('/alarm',{method:'POST',headers:{'Content-Type':'application/json'},body:J
 .then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
 .then(()=>loadAlarms())
 .catch(()=>{document.getElementById('alarmlog').innerHTML='<div>❌ 删除失败（接口不可用）</div>';});
+}
+// ===== 机器人控制(遥感摇杆) =====
+const JOY_R=72, JOY_DEAD=0.14;
+const JOY_SECTORS=['forward','rightup','right','rightdown','back','leftdown','left','leftup'];
+const JOY_NAMES={forward:'前进',back:'后退',left:'左转',right:'右转',leftmove:'左移',rightmove:'右移',leftup:'左前',rightup:'右前',leftdown:'左后',rightdown:'右后'};
+let unoInterval=null, unoPollTimer=null, unoCurDir='', unoCurSpeed=0;
+function unoSendDrive(){
+if(!unoCurDir)return;
+fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'drive',cmd:unoCurDir,speed:unoCurSpeed})});
+}
+function unoSetDrive(dir,speed){
+const changed=(dir!==unoCurDir||Math.abs(speed-unoCurSpeed)>6);
+unoCurDir=dir;unoCurSpeed=speed;
+if(changed)unoSendDrive();   // 方向/速度变化即时发送(快速响应)
+if(!unoInterval){unoInterval=setInterval(unoSendDrive,120);}  // 心跳维持(约8Hz)
+}
+function unoStop(){
+unoCurDir='';unoCurSpeed=0;
+if(unoInterval){clearInterval(unoInterval);unoInterval=null;}
+fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'stop'})});
+document.getElementById('joyLabel').textContent='松手回中';
+document.getElementById('joySpeed').textContent='速度 0';
+const knob=document.getElementById('joyKnob');if(knob)knob.style.transform='translate(-50%,-50%)';
+}
+function unoKnob(dx,dy){
+const knob=document.getElementById('joyKnob');
+if(knob)knob.style.transform='translate(calc(-50% + '+(dx*JOY_R)+'px), calc(-50% + '+(dy*JOY_R)+'px))';
+const mag=Math.hypot(dx,dy);
+if(mag<JOY_DEAD){unoStop();return;}   // 回中死区 -> 停止
+const ang=Math.atan2(dy,dx)*180/Math.PI;
+let idx=Math.round((ang+90)/45)%8;   // -90°(上)=forward
+if(idx<0)idx+=8;
+const dir=JOY_SECTORS[idx];
+const norm=Math.min(1,mag);
+const speed=Math.round(70+Math.pow(norm,1.4)*(255-70));   // 半径越大越快, 低速区更精细
+unoSetDrive(dir,speed);
+document.getElementById('joyLabel').textContent=JOY_NAMES[dir]||dir;
+document.getElementById('joySpeed').textContent='速度 '+speed;
+}
+(function(){
+const base=document.getElementById('joyBase');
+if(!base)return;
+let active=false;
+function knobAt(e){
+const rect=base.getBoundingClientRect();
+const cx=rect.left+rect.width/2, cy=rect.top+rect.height/2;
+let dx=(e.clientX-cx)/(rect.width/2), dy=(e.clientY-cy)/(rect.height/2);
+const mag=Math.hypot(dx,dy);
+if(mag>1){dx/=mag;dy/=mag;}
+unoKnob(dx,dy);
+}
+base.addEventListener('pointerdown',function(e){base.setPointerCapture(e.pointerId);active=true;knobAt(e);});
+base.addEventListener('pointermove',function(e){if(active)knobAt(e);});
+base.addEventListener('pointerup',function(){active=false;unoStop();});
+base.addEventListener('pointercancel',function(){active=false;unoStop();});
+})();
+function loadUnoStatus(){
+const el=document.getElementById('unoStatus');
+fetch('/uno').then(r=>r.text()).then(t=>{
+try{
+const j=JSON.parse(t);
+const nmap={moving:'运动中',idle:'空闲',line_follow:'巡线中'};
+el.textContent='状态: '+(nmap[j.mode]||j.mode||'?')+' | 动作: '+(j.action||'-')+' | 速度: '+(j.speed!=null?j.speed:'-');
+}catch(e){el.textContent='状态不可用';}
+}).catch(()=>{el.textContent='状态不可用';});
+}
+// ===== 舵机控制(头部转动 0~180°) =====
+let servoTimer=null;
+function servoHome(){
+let v=+document.getElementById('servoHomeVal').value;
+if(isNaN(v))v=82; if(v<0)v=0; if(v>180)v=180;
+fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'servo-home'})});
+const r=document.getElementById('servoRange'),l=document.getElementById('servoLabel');
+if(r)r.value=v; if(l)l.textContent=v+'°';
+}
+// 回正值 − / + 调整: 实时生效(写入设备 NVS + 下发给下位机并回正), 无需保存按钮
+function homeStep(delta){
+const el=document.getElementById('servoHomeVal');
+let v=Math.round(+el.value||82)+delta;
+if(isNaN(v))v=82+delta;
+if(v<0)v=0; if(v>180)v=180;
+el.value=v;
+fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'servo-home-set',value:v})})
+.then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
+.then(j=>{
+const r=document.getElementById('servoRange'),l=document.getElementById('servoLabel');
+if(r)r.value=v; if(l)l.textContent=v+'°';
+})
+.catch(()=>{});
+}
+// 读取已保存的回正值(切换到控制页时)
+function loadServoHome(){
+fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'servo-home-get'})})
+.then(r=>r.text())
+.then(t=>{
+try{const j=JSON.parse(t);const el=document.getElementById('servoHomeVal');if(el&&j.value!=null)el.value=j.value;}
+catch(e){}
+}).catch(()=>{});
+}
+function onServoInput(el){
+const v=+el.value;
+document.getElementById('servoLabel').textContent=v+'°';
+if(servoTimer)clearTimeout(servoTimer);
+servoTimer=setTimeout(function(){
+fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'servo',degree:v})});
+servoTimer=null;
+},100);   // 节流: 拖动时 ~100ms 合并一次, 避免高频刷串口
+}
+function startUnoPolling(){
+loadUnoStatus();
+loadServoHome();
+if(!unoPollTimer)unoPollTimer=setInterval(loadUnoStatus,1500);
+}
+function stopUnoPolling(){
+if(unoPollTimer){clearInterval(unoPollTimer);unoPollTimer=null;}
 }
 </script>
 </body></html>

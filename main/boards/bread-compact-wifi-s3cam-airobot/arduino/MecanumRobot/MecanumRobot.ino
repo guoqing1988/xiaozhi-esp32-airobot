@@ -17,6 +17,10 @@
 //   @speed-{value}         设置电机速度(70-255)
 //   @tj-yaotou / @tj-shandian / @tj-zhuanquan / @tj-sxzw / @tj-diaotou   特技
 //   @line-start / @line-stop   巡线模式(沿地面黑线自动行驶)开始/停止
+//   @drive-{action}-{speed}    进入 web 驾驶模式(非阻塞连续控制): 方向 + 速度(70-255)
+//   @drive-stop                退出 web 驾驶模式并停止
+//       action 同 go-* : forward back left right leftmove rightmove leftup rightup leftdown rightdown
+//       web 驾驶为遥感轮询(类似手柄): 上位机按住期间周期性重发心跳, 无心跳超时自动停
 //
 // 【双向回执】(Arduino -> ESP32, 供 self.uno.get_status 查询)
 //   @busy {动作} / @done {动作}   耗时动作开始/完成(go-*, tj-*, line-follow)
@@ -75,6 +79,16 @@ uint8_t servo1Zero = 82;                        // 舵机1 回正角度 (大于=
 uint8_t servo1Angle = 82;                       // 舵机1 当前角度
 uint8_t servo2Angle = 90;                       // 舵机2 当前角度
 bool     started = true;                        // 主循环开关
+
+// ---------------- web 驾驶模式(非阻塞连续控制遥感) ----------------
+// 由上位机 @drive-{action}-{speed} 驱动(类似手柄摇杆): 方向 + 速度;
+// 上位机按住期间周期性重发心跳, 无心跳超时自动停机(防 web 断连)
+bool            web_drive_ = false;             // 是否处于 web 驾驶模式
+char            web_drive_action_[16] = "";     // 当前持续方向(forward/back/...)
+uint8_t         web_drive_speed_ = 200;         // 当前驾驶速度(70~255)
+unsigned long   web_drive_since_ms_ = 0;        // 最近一次心跳时刻(看门狗基准)
+#define WEB_DRIVE_WATCHDOG_MS  1500             // 无心跳超时自动停(防 web 断开)
+#define WEB_DRIVE_PULSE_MS     30               // 每帧短脉冲时长(ms), 模拟持续运动
 
 // ==================================================================
 // 底层控制
@@ -387,6 +401,82 @@ void handleGamepad() {
 }
 
 // ==================================================================
+// web 驾驶模式 (非阻塞遥感连续控制)
+// ==================================================================
+
+// 按当前方向对 4 个电机发短脉冲(不打印/不蜂鸣), 模拟持续运动; 方向/速度由上位机心跳维持。
+void drivePulse(const char* action_str) {
+    if (strcmp(action_str, "forward") == 0)       runMotors("F", "F", "B", "B", WEB_DRIVE_PULSE_MS);
+    else if (strcmp(action_str, "back") == 0)        runMotors("B", "B", "F", "F", WEB_DRIVE_PULSE_MS);
+    else if (strcmp(action_str, "left") == 0)        runMotors("B", "B", "B", "B", WEB_DRIVE_PULSE_MS);
+    else if (strcmp(action_str, "right") == 0)       runMotors("F", "F", "F", "F", WEB_DRIVE_PULSE_MS);
+    else if (strcmp(action_str, "leftmove") == 0)    runMotors("B", "F", "B", "F", WEB_DRIVE_PULSE_MS);
+    else if (strcmp(action_str, "rightmove") == 0)   runMotors("F", "B", "F", "B", WEB_DRIVE_PULSE_MS);
+    else if (strcmp(action_str, "leftup") == 0)      runMotors("S", "F", "B", "S", WEB_DRIVE_PULSE_MS);
+    else if (strcmp(action_str, "rightup") == 0)     runMotors("F", "S", "S", "B", WEB_DRIVE_PULSE_MS);
+    else if (strcmp(action_str, "leftdown") == 0)    runMotors("B", "S", "S", "F", WEB_DRIVE_PULSE_MS);
+    else if (strcmp(action_str, "rightdown") == 0)   runMotors("S", "B", "F", "S", WEB_DRIVE_PULSE_MS);
+    else runMotors("S", "S", "S", "S", WEB_DRIVE_PULSE_MS);   // 未知/stop -> 刹停
+}
+
+// 退出 web 驾驶: 恢复全局速度并刹停
+void exitWebDrive() {
+    web_drive_ = false;
+    for (int i = 0; i < 4; i++) {
+        motorSpeed[i] = speed;   // 恢复点动/手柄用的全局速度
+    }
+    drivePulse("stop");
+}
+
+// 非阻塞读取串口, 处理 @drive-{action}-{speed} / @drive-stop。
+// 任何模式都可轮询(驾驶模式用于方向切换/心跳/停止; 空闲时用于首次进入驾驶)。
+void checkDriveCommand() {
+    while (Serial.available()) {
+        static char line[64];
+        size_t len = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
+        if (len == 0) continue;
+        line[len] = '\0';
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '@') continue;
+        p++;
+        if (strncmp(p, "drive-", 6) != 0) continue;
+        const char* rest = p + 6;   // "stop" 或 "{action}-{speed}"
+        if (strcmp(rest, "stop") == 0) {
+            exitWebDrive();
+            continue;
+        }
+        // 解析 @drive-{action}-{speed}
+        const char* dash = strchr(rest, '-');
+        if (!dash) continue;   // 格式错误, 忽略
+        char action[16] = {0};
+        size_t alen = static_cast<size_t>(dash - rest);
+        if (alen >= sizeof(action)) alen = sizeof(action) - 1;
+        strncpy(action, rest, alen);
+        int spd = atoi(dash + 1);
+        if (spd < 70) spd = 70;
+        if (spd > 255) spd = 255;
+        strncpy(web_drive_action_, action, sizeof(web_drive_action_) - 1);
+        web_drive_action_[sizeof(web_drive_action_) - 1] = '\0';
+        web_drive_speed_ = (uint8_t)spd;
+        for (int i = 0; i < 4; i++) motorSpeed[i] = web_drive_speed_;
+        web_drive_ = true;
+        web_drive_since_ms_ = millis();   // 心跳基准
+    }
+}
+
+// 驾驶模式每帧: 无心跳超时自动停, 否则持续脉冲驱动当前方向。
+void handleWebDrive() {
+    if (web_drive_ && (millis() - web_drive_since_ms_ > WEB_DRIVE_WATCHDOG_MS)) {
+        exitWebDrive();   // web 断连/松手未收到停止 -> 自动停机, 保证安全
+        return;
+    }
+    if (web_drive_) {
+        drivePulse(web_drive_action_);
+    }
+}
+
+// ==================================================================
 // 上位机(ESP32)串口命令解析   (只认 '@' 开头, char 解析防内存碎片)
 // ==================================================================
 
@@ -462,6 +552,16 @@ void executeCommand() {
 
             Serial.print("@done "); Serial.println(cmd_full);   // 上报动作完成(带动作名)
 
+        } else if (strncmp(p, "servo-home-set", 14) == 0) {
+            // 设置回正角度(0-180)并回正; 由上位机下发(可配置值存于 ESP32 NVS)
+            int v = atoi(p + 14);
+            if (v < 0) v = 0;
+            else if (v > 180) v = 180;
+            servo1Zero = v;
+            setServo1(v);
+        } else if (strcmp(p, "servo-home") == 0) {
+            // 头部舵机回正(回到当前回正角度)
+            setServo1(servo1Zero);
         } else if (strncmp(p, "servo-", 6) == 0) {
             // 格式: @servo-{degree}
             setServo1(atoi(p + 6));
@@ -607,9 +707,14 @@ void loop() {
         }
         checkLineStopCommand();
         handleGamepad();
+    } else if (web_drive_) {
+        // web 遥感驾驶: 非阻塞持续控制(方向+速度), 心跳看门狗自动停
+        checkDriveCommand();     // 读方向切换/心跳/停止
+        handleWebDrive();        // 持续脉冲驱动 + 超时保护
     } else {
-        executeCommand();    // 解析上位机命令
-        handleGamepad();     // 解析手柄
+        checkDriveCommand();     // 空闲也检测 @drive-*, 用于首次进入 web 驾驶
+        executeCommand();        // 解析上位机点动命令(go-*/tj-*/servo-*)
+        handleGamepad();         // 解析手柄
     }
 }
 

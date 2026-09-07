@@ -23,8 +23,11 @@ static std::function<void()> s_on_uploaded;
 static esp_timer_handle_t s_wifi_timer = nullptr;
 // 闹钟管理回调(由板级 SetAlarmWebApi 注入)
 static AlarmWebApi s_alarm_api;
+// 机器人控制回调(由板级 SetUnoWebApi 注入)
+static UnoWebApi s_uno_api;
 
 void SetAlarmWebApi(const AlarmWebApi& api) { s_alarm_api = api; }
+void SetUnoWebApi(const UnoWebApi& api) { s_uno_api = api; }
 
 // URL 解码（%XX -> 字符，+ -> 空格），用于文件名
 static void UrlDecode(char* out, size_t out_size, const char* in) {
@@ -263,6 +266,89 @@ static esp_err_t HandleMusicPost(httpd_req_t* req) {
     return httpd_resp_sendstr(req, resp.c_str());
 }
 
+// GET /uno：返回下位机(Arduino)状态 JSON(供前端遥控页面轮询)
+static esp_err_t HandleUnoGet(httpd_req_t* req) {
+    std::string body = s_uno_api.get_status ? s_uno_api.get_status() : "{}";
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, body.c_str());
+}
+
+// POST /uno：JSON body 控制下位机。
+//   drive: {"action":"drive","cmd":"forward","speed":200}  进入 web 驾驶(方向+速度)
+//   stop:  {"action":"stop"}                                  停止驾驶
+//   speed: {"action":"speed","speed":200}                   单独调速度
+static esp_err_t HandleUnoPost(httpd_req_t* req) {
+    char buf[256];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_OK;
+    }
+    buf[len] = '\0';
+
+    cJSON* root = cJSON_Parse(buf);
+    if (root == nullptr) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_OK;
+    }
+    cJSON* c_action = cJSON_GetObjectItem(root, "action");
+    const char* action = (c_action && c_action->valuestring) ? c_action->valuestring : "";
+
+    std::string resp = "{\"ok\":false,\"error\":\"unknown action\"}";
+    if (s_uno_api.send_drive) {
+        if (strcmp(action, "drive") == 0) {
+            cJSON* c_cmd = cJSON_GetObjectItem(root, "cmd");
+            cJSON* c_speed = cJSON_GetObjectItem(root, "speed");
+            const char* cmd = (c_cmd && c_cmd->valuestring) ? c_cmd->valuestring : "";
+            int spd = c_speed ? c_speed->valueint : 200;
+            if (spd < 70) spd = 70;
+            if (spd > 255) spd = 255;
+            if (cmd[0] == '\0') {
+                resp = "{\"ok\":false,\"error\":\"missing cmd\"}";
+            } else {
+                std::string dcmd = std::string("drive-") + cmd + "-" + std::to_string(spd);
+                resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive(dcmd) + "\"}";
+            }
+        } else if (strcmp(action, "stop") == 0) {
+            resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("drive-stop") + "\"}";
+        } else if (strcmp(action, "speed") == 0) {
+            cJSON* c_speed = cJSON_GetObjectItem(root, "speed");
+            int spd = c_speed ? c_speed->valueint : 200;
+            if (spd < 70) spd = 70;
+            if (spd > 255) spd = 255;
+            resp = std::string("{\"ok\":true,\"msg\":\"") +
+                   s_uno_api.send_drive(std::string("speed-") + std::to_string(spd)) + "\"}";
+        } else if (strcmp(action, "servo") == 0) {
+            // 舵机(头部)角度控制 0~180
+            cJSON* c_degree = cJSON_GetObjectItem(root, "degree");
+            int deg = c_degree ? c_degree->valueint : 90;
+            if (deg < 0) deg = 0;
+            if (deg > 180) deg = 180;
+            resp = std::string("{\"ok\":true,\"msg\":\"") +
+                   s_uno_api.send_drive(std::string("servo-") + std::to_string(deg)) + "\"}";
+        } else if (strcmp(action, "servo-home") == 0) {
+            // 头部舵机回正(回到当前回正角度)
+            resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("servo-home") + "\"}";
+        } else if (strcmp(action, "servo-home-set") == 0) {
+            // 设置回正角度(0-180), 存储到 NVS
+            cJSON* c_value = cJSON_GetObjectItem(root, "value");
+            int val = c_value ? c_value->valueint : 82;
+            if (val < 0) val = 0;
+            if (val > 180) val = 180;
+            resp = s_uno_api.set_servo_home ? s_uno_api.set_servo_home(val)
+                                            : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
+        } else if (strcmp(action, "servo-home-get") == 0) {
+            // 读取已保存的回正角度
+            resp = s_uno_api.get_servo_home ? s_uno_api.get_servo_home()
+                                            : std::string("{\"value\":82}");
+        }
+    }
+    cJSON_Delete(root);
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, resp.c_str());
+}
+
 // GET /alarm?action=list：返回闹钟 JSON 数组(供网页/外部读取)
 static esp_err_t HandleAlarmGet(httpd_req_t* req) {
     const char* q = strchr(req->uri, '?');
@@ -350,6 +436,12 @@ static void StartHttpServer() {
     httpd_uri_t music_post_uri = {
         .uri = "/music", .method = HTTP_POST, .handler = HandleMusicPost, .user_ctx = nullptr,
     };
+    httpd_uri_t uno_get_uri = {
+        .uri = "/uno", .method = HTTP_GET, .handler = HandleUnoGet, .user_ctx = nullptr,
+    };
+    httpd_uri_t uno_post_uri = {
+        .uri = "/uno", .method = HTTP_POST, .handler = HandleUnoPost, .user_ctx = nullptr,
+    };
     httpd_uri_t alarm_get_uri = {
         .uri = "/alarm", .method = HTTP_GET, .handler = HandleAlarmGet, .user_ctx = nullptr,
     };
@@ -360,6 +452,8 @@ static void StartHttpServer() {
         httpd_register_uri_handler(server, &upload_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &music_get_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &music_post_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &uno_get_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &uno_post_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &alarm_get_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register uri handlers");

@@ -20,3 +20,16 @@ struct AlarmWebApi {
 
 // 注入闹钟管理回调；之后 /alarm REST 接口（GET list / POST add/remove/clear）即可读写闹钟。
 void SetAlarmWebApi(const AlarmWebApi& api);
+
+// 机器人(Arduino 下位机)控制回调：由板级注入，供 web 摇杆页面连续控制。
+// send_drive: 发送一条驾驶指令(cmd 如 "drive-forward-180"/"drive-stop")，返回描述性文本(成功/失败)。
+// get_status: 返回下位机状态 JSON 字符串(供前端轮询 mode/action/speed/servo)。
+struct UnoWebApi {
+    std::function<std::string(const std::string& cmd)> send_drive;
+    std::function<std::string()> get_status;
+    std::function<std::string(int value)> set_servo_home;   // 存 NVS + 下发回正角度, 返回说明
+    std::function<std::string()> get_servo_home;            // 返回当前回正角度 JSON
+};
+
+// 注入机器人控制回调；之后 /uno REST 接口（GET status / POST drive/stop/speed）即可控制下位机。
+void SetUnoWebApi(const UnoWebApi& api);
