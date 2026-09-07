@@ -428,41 +428,29 @@ void exitWebDrive() {
     drivePulse("stop");
 }
 
-// 非阻塞读取串口, 处理 @drive-{action}-{speed} / @drive-stop。
-// 任何模式都可轮询(驾驶模式用于方向切换/心跳/停止; 空闲时用于首次进入驾驶)。
-void checkDriveCommand() {
-    while (Serial.available()) {
-        static char line[64];
-        size_t len = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
-        if (len == 0) continue;
-        line[len] = '\0';
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p != '@') continue;
-        p++;
-        if (strncmp(p, "drive-", 6) != 0) continue;
-        const char* rest = p + 6;   // "stop" 或 "{action}-{speed}"
-        if (strcmp(rest, "stop") == 0) {
-            exitWebDrive();
-            continue;
-        }
-        // 解析 @drive-{action}-{speed}
-        const char* dash = strchr(rest, '-');
-        if (!dash) continue;   // 格式错误, 忽略
-        char action[16] = {0};
-        size_t alen = static_cast<size_t>(dash - rest);
-        if (alen >= sizeof(action)) alen = sizeof(action) - 1;
-        strncpy(action, rest, alen);
-        int spd = atoi(dash + 1);
-        if (spd < 70) spd = 70;
-        if (spd > 255) spd = 255;
-        strncpy(web_drive_action_, action, sizeof(web_drive_action_) - 1);
-        web_drive_action_[sizeof(web_drive_action_) - 1] = '\0';
-        web_drive_speed_ = (uint8_t)spd;
-        for (int i = 0; i < 4; i++) motorSpeed[i] = web_drive_speed_;
-        web_drive_ = true;
-        web_drive_since_ms_ = millis();   // 心跳基准
+// 处理 web 驾驶命令(由 serialCommand 分发, rest 指向去掉 "drive-" 后的部分, 无 '@')。
+// @rest: "stop" 或 "{action}-{speed}"。
+void handleDrive(const char* rest) {
+    if (strcmp(rest, "stop") == 0) {
+        exitWebDrive();
+        return;
     }
+    // 解析 @drive-{action}-{speed}
+    const char* dash = strchr(rest, '-');
+    if (!dash) return;   // 格式错误, 忽略
+    char action[16] = {0};
+    size_t alen = static_cast<size_t>(dash - rest);
+    if (alen >= sizeof(action)) alen = sizeof(action) - 1;
+    strncpy(action, rest, alen);
+    int spd = atoi(dash + 1);
+    if (spd < 70) spd = 70;
+    if (spd > 255) spd = 255;
+    strncpy(web_drive_action_, action, sizeof(web_drive_action_) - 1);
+    web_drive_action_[sizeof(web_drive_action_) - 1] = '\0';
+    web_drive_speed_ = (uint8_t)spd;
+    for (int i = 0; i < 4; i++) motorSpeed[i] = web_drive_speed_;
+    web_drive_ = true;
+    web_drive_since_ms_ = millis();   // 心跳基准
 }
 
 // 驾驶模式每帧: 无心跳超时自动停, 否则持续脉冲驱动当前方向。
@@ -476,29 +464,39 @@ void handleWebDrive() {
     }
 }
 
+// 统一从串口读取并按前缀分发命令(每次循环只读一次)。
+// 旧实现 checkDriveCommand() 用 while(Serial.available()) 把缓冲里所有命令读走并
+// 丢弃非 drive- 前缀的命令, 导致后续 executeCommand() 再也读不到 AI 的点动命令
+// (go-*/servo-*/tj-*/speed-*/line-*)。表现为: web 上下左右可用, 但头部舵机 & AI 控制
+// 全部失效。现在一次读一行并按前缀分发, 不再互相吞命令。
+void serialCommand() {
+    static char line[64];
+    while (Serial.available()) {
+        size_t len = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
+        if (len == 0) continue;
+        line[len] = '\0';
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '@') continue;
+        p++;
+        if (strncmp(p, "drive-", 6) == 0) {
+            handleDrive(p + 6);   // web 摇杆驾驶命令
+        } else {
+            handleCommand(p);     // AI/舵机点动命令
+        }
+    }
+}
+
 // ==================================================================
 // 上位机(ESP32)串口命令解析   (只认 '@' 开头, char 解析防内存碎片)
 // ==================================================================
 
-// 解析上位机(ESP32)下发的串口命令。只认以 '@' 开头且带换行的行,
-// 其余(如日志乱码)全部忽略。用固定 char 缓冲解析, 避免 String 动态分配。
-void executeCommand() {
-    static char line[64];                    // 复用缓冲, 不反复分配内存
-    if (Serial.available()) {
-        size_t len = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
-        if (len == 0) {
-            return;
-        }
-        line[len] = '\0';
-
-        char *p = line;
-        while (*p == ' ' || *p == '\t') {    // 去前导空白
-            p++;
-        }
-        if (*p != '@') {                     // 只认 '@' 前缀
-            return;
-        }
-        p++;
+// 点动/AI 命令分发(由 serialCommand 调用, p 已去掉 '@' 前缀)。
+// 处理 go-*/servo-*/tj-*/speed-*/line-* 等一次性点动命令。
+// 说明: 旧 executeCommand 内自身的串口读取与 checkDriveCommand 各自 while(Serial.available())
+// 抢读同一串口缓冲, 导致 checkDriveCommand 把 AI 点动命令读走丢弃, AI 控制与头部舵机全部失效。
+// 读取现统一由 serialCommand 完成, 本函数只做命令分发, 不再自行读串口。
+void handleCommand(char* p) {
 
         if (strncmp(p, "go-", 3) == 0) {
             // 格式: @go-{action}-{steps}
@@ -621,7 +619,6 @@ void executeCommand() {
             // 退出巡线模式(急停)
             setLineFollow(false);
         }
-    }
 }
 
 // 预留: 早期简单命令处理 (未在 loop 调用)。char 解析, 只认 '@' 开头。
@@ -709,11 +706,10 @@ void loop() {
         handleGamepad();
     } else if (web_drive_) {
         // web 遥感驾驶: 非阻塞持续控制(方向+速度), 心跳看门狗自动停
-        checkDriveCommand();     // 读方向切换/心跳/停止
+        serialCommand();         // 统一读串口并分发: drive 心跳/停止 + AI 点动(不互相吞)
         handleWebDrive();        // 持续脉冲驱动 + 超时保护
     } else {
-        checkDriveCommand();     // 空闲也检测 @drive-*, 用于首次进入 web 驾驶
-        executeCommand();        // 解析上位机点动命令(go-*/tj-*/servo-*)
+        serialCommand();         // 统一读串口并分发: drive-* + 点动命令(修复 AI 控制被吞)
         handleGamepad();         // 解析手柄
     }
 }

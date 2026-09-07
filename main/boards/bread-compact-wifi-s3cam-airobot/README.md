@@ -690,6 +690,19 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 3. **指令防抖**：相同指令 1 秒内只发送一次（防抖命中返回“指令已发送(防抖): xxx”视为成功），AI 不听话也挡得住；不同指令（组合编排）不受影响。
 **排查方法备忘**：在 `McpServer::ReplyResult` 临时加一行日志打印 payload，可确认设备端每次调用都发出结果；比较重复调用 id 递增（服务器独立请求）还是相同（重发）；对比不同工具（uno 重复 vs music 正常）即可定位是设备端还是服务器端。
 
+#### 3. Web 控制与 AI 控制互斥（AI 指令 & 头部舵机失效，已修复）
+
+**现象**：启用 web 页面机器人摇杆后，上下左右（`@drive-*`）正常，但**头部舵机 & AI 全部控制指令失效**；AI 发 `@go-*` 无反应，于是 AI 反复调用 `uno.get_status` 查询状态（因指令未生效只能反复确认）。
+**根因**：Arduino 下位机 `MecanumRobot.ino` 的 `loop()` 里，`checkDriveCommand()`（处理 web 摇杆 `@drive-*`）与 `executeCommand()`（处理 AI 的 `@go-*`/`@servo-*`/`@tj-*`）**各自用 `while(Serial.available())`/`if(Serial.available())` 抢读同一串口**。而 `checkDriveCommand()` 的 `while` 会**一次性读空整个 RX 缓冲**，只识别 `drive-` 前缀，其余命令（含 AI 的 go/servo/tj）被 `continue` 丢弃，导致随后执行的 `executeCommand()` 永远读不到——AI 控制与头部舵机全部失效。web 摇杆心跳（`@drive-*`）本身能被 `checkDriveCommand` 识别，所以上下左右正常。
+**修复**（Arduino）：将串口命令读取统一收敛为 `serialCommand()`，一次读一行并按前缀**分发**：`drive-*` → `handleDrive()`（保留原 web 驾驶逻辑），其余 → `handleCommand()`（原 `executeCommand` 的点动逻辑）。`loop()` 的三个分支统一调用 `serialCommand()`，不再有两个函数抢读互相吞命令。
+
+#### 4. `/uno` HTTP 接口慢（~1s，已修复）
+
+**现象**：web 摇杆按下后 `/uno` GET 每次约 1s、POST 几百 ms~1s；“网页多控制时延迟特别高”。
+**根因**：ESP32 侧 `InitializeEchoUart()` 里 `uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE*2, 0, ...)` 的 **`tx_buffer_size=0`**（仅 128B 硬件 FIFO）。web 摇杆 8Hz 心跳（`@drive-*`，走 `SendUartMessage(..., false)`，绕过防抖）+ AI 指令同时涌入时，`uart_write_bytes` 会因 TX FIFO 填满而**阻塞**。而 `/uno` 的 `HandleUnoGet`/`HandleUnoPost` 都运行在 **httpd 单任务** 里，一旦被阻塞，后续所有 `/uno` 请求（含 GET）**串行排队**，表现为每次调用 1s、多控制时延迟叠加。
+**修复**：`uart_driver_install` 的 TX buffer 从 `0` 改为 `BUF_SIZE`（1024，软件环形缓冲），避免短时高频写阻塞 httpd。
+**备注**：该修复是降低阻塞概率；若 web 心跳频率仍过高（120ms），可考虑前端加大心跳间隔或在 ESP32 侧改为非阻塞/带超时写，需实测确认。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。

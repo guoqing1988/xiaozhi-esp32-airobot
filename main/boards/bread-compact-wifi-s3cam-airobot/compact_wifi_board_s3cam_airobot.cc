@@ -748,7 +748,10 @@ private:
             .source_clk = UART_SCLK_DEFAULT,
         };
         int intr_alloc_flags = 0;
-        ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));
+        // TX buffer 传 BUF_SIZE(1024) 而非 0: 默认 0 只用 128B 硬件 FIFO,
+        // web 摇杆 8Hz 心跳 + AI 指令同时涌来时 uart_write_bytes 会因 FIFO 满而阻塞
+        // httpd 单任务, 导致 /uno GET/POST 串行排队变慢。分配软件环形缓冲可降低阻塞。
+        ESP_ERROR_CHECK(uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE * 2, BUF_SIZE, 0, NULL, intr_alloc_flags));
         ESP_ERROR_CHECK(uart_param_config(ECHO_UART_PORT_NUM, &uart_config));
         ESP_ERROR_CHECK(uart_set_pin(ECHO_UART_PORT_NUM, UART_ECHO_TXD, UART_ECHO_RXD, UART_ECHO_RTS, UART_ECHO_CTS));
         // 未接 Arduino 时 GPIO44(RX) 悬空, 噪声会触发 RX 中断风暴(偶发中断看门狗复位);
