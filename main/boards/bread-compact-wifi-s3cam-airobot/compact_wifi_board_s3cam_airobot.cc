@@ -101,9 +101,12 @@ private:
     esp_timer_handle_t ip_timer_ = nullptr;  // 待机状态底部显示 IP 的定时器
     // Arduino 下位机双向状态(RX 解析任务写, MCP 工具读)
     std::atomic<bool> uno_busy_{false};       // Arduino 正在执行动作
+    std::atomic<int64_t> uno_busy_since_us_{0};  // 进入 busy 时刻(看门狗用)
     std::mutex uno_status_mutex_;             // 保护 uno_last_*
     std::string uno_last_action_;             // 最近动作(如 go-forward-10)
     std::string uno_last_result_;             // 最近结果(busy/done)
+    std::atomic<int> uno_speed_{-1};          // 最新速度(@stat 上报, -1=未上报)
+    std::atomic<int> uno_servo_{-1};          // 最新舵机1角度(@stat 上报, -1=未上报)
     TaskHandle_t uno_status_task_ = nullptr;  // UART0 RX 解析任务
 
     // ---- 待机全屏大时钟（AI 可控: self.clock.set(开关+主题合一) / self.clock.current, NVS 持久化）----
@@ -740,6 +743,12 @@ private:
     void UnoStatusLoop() {
         char line[64];
         while (true) {
+            // 看门狗: @busy 后 30 秒未收到 @done(下位机复位/串口丢失)自动清零,
+            // 防止状态卡死在 moving 导致 AI 无限轮询
+            if (uno_busy_ && (esp_timer_get_time() - uno_busy_since_us_.load()) > 30LL * 1000 * 1000) {
+                ESP_LOGW(TAG, "Uno @busy without @done for 30s, force clear");
+                uno_busy_ = false;
+            }
             int len = uart_read_bytes(ECHO_UART_PORT_NUM, line, sizeof(line) - 1, pdMS_TO_TICKS(200));
             if (len <= 0) {
                 continue;
@@ -750,10 +759,18 @@ private:
             while (tok != nullptr) {
                 if (strncmp(tok, "@busy", 5) == 0) {
                     uno_busy_ = true;
+                    uno_busy_since_us_ = esp_timer_get_time();
                     std::lock_guard<std::mutex> lock(uno_status_mutex_);
                     uno_last_result_ = "busy";
                     if (tok[5] == ' ') {
                         uno_last_action_ = tok + 6;
+                    }
+                } else if (strncmp(tok, "@stat ", 6) == 0) {
+                    // 事件驱动的状态快照(速度/舵机变化时上报), 后续在此追加可选字段
+                    int s = -1, v = -1;
+                    if (sscanf(tok, "@stat s%d v%d", &s, &v) == 2) {
+                        uno_speed_ = s;
+                        uno_servo_ = v;
                     }
                 } else if (strncmp(tok, "@done", 5) == 0) {
                     uno_busy_ = false;
@@ -819,7 +836,17 @@ private:
                 }
                 char cmd[32];
                 snprintf(cmd, sizeof(cmd), "go-%s-%d", action_str, steps);
-                return SendUartMessage(cmd);
+                std::string result = SendUartMessage(cmd);
+                // 附上确定性的动作时长, 让 AI 知道动作会自动完成停止, 无需查状态确认
+                int t_ms = (strcmp(action_str, "left") == 0 || strcmp(action_str, "right") == 0)
+                               ? steps * 10
+                               : steps * 100;
+                if (t_ms % 1000 == 0) {
+                    result += "，动作约" + std::to_string(t_ms / 1000) + "秒后自动停止";
+                } else {
+                    result += "，动作约" + std::to_string(t_ms) + "毫秒后自动停止";
+                }
+                return result;
             });
 
         mcp_server.AddTool(
@@ -830,7 +857,7 @@ private:
                 int degree = properties["degree"].value<int>();
                 char cmd[16];
                 snprintf(cmd, sizeof(cmd), "servo-%d", degree);
-                return SendUartMessage(cmd);
+                return SendUartMessage(cmd) + "，舵机约0.5秒后到位";
             });
 
         mcp_server.AddTool(
@@ -852,7 +879,7 @@ private:
                 }
                 char cmd[32];
                 snprintf(cmd, sizeof(cmd), "tj-%s", action_str);
-                return SendUartMessage(cmd);
+                return SendUartMessage(cmd) + "，特技执行完毕后自动结束";
             });
 
         mcp_server.AddTool(
@@ -868,18 +895,36 @@ private:
 
         mcp_server.AddTool(
             "self.uno.get_status",
-            "获取 Arduino 下位机(麦克纳姆轮机器人)的实时状态。返回 moving(正在执行动作)或 idle(空闲)；"
-            "若刚执行完动作会附上最近动作与结果(如 idle (last: go-forward-10 done))。",
+            "获取 Arduino 下位机(麦克纳姆轮机器人)的状态。返回 JSON: mode(idle=空闲/moving=正在执行动作/"
+            "line_follow=巡线中), action(当前或最近动作名), speed(电机速度, null=下位机未上报), "
+            "servo(头部舵机角度, null=下位机未上报)。仅当用户询问状态/速度/舵机/在干什么时使用；"
+            "发送控制指令后动作会自动完成并停止, 无需查询状态确认。",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
+                std::string mode, action;
+                {
+                    std::lock_guard<std::mutex> lock(uno_status_mutex_);
+                    action = uno_last_action_;
+                }
                 if (uno_busy_) {
-                    return std::string("moving");
+                    mode = (action == "line-follow") ? "line_follow" : "moving";
+                } else {
+                    mode = "idle";
                 }
-                std::lock_guard<std::mutex> lock(uno_status_mutex_);
-                if (!uno_last_result_.empty()) {
-                    return std::string("idle (last: ") + uno_last_action_ + " " + uno_last_result_ + ")";
-                }
-                return std::string("idle");
+                int speed = uno_speed_.load();
+                int servo = uno_servo_.load();
+                auto root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "mode", mode.c_str());
+                cJSON_AddStringToObject(root, "action", action.c_str());
+                if (speed >= 0) cJSON_AddNumberToObject(root, "speed", speed);
+                else cJSON_AddNullToObject(root, "speed");
+                if (servo >= 0) cJSON_AddNumberToObject(root, "servo", servo);
+                else cJSON_AddNullToObject(root, "servo");
+                auto str = cJSON_PrintUnformatted(root);
+                std::string result(str);
+                cJSON_free(str);
+                cJSON_Delete(root);
+                return result;
             });
 
         mcp_server.AddTool(

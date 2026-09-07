@@ -20,6 +20,7 @@
 //
 // 【双向回执】(Arduino -> ESP32, 供 self.uno.get_status 查询)
 //   @busy {动作} / @done {动作}   耗时动作开始/完成(go-*, tj-*, line-follow)
+//   @stat s{速度} v{舵机1角度}    速度/舵机变化时上报最新快照(事件驱动, 非常驻周期)
 //
 // 【PS2 手柄键位】
 //   十字键: 移动      PINK/RED: 左右转      GREEN/BLUE(单击): 减速/加速
@@ -196,6 +197,7 @@ void setSpeed(int value) {
         motorSpeed[i] = value;
     }
     Serial.println(String("speed:") + value);
+    reportStat();
 }
 
 // 增量调整速度(手柄用): 当前速度加 delta, 限制在 70-255。
@@ -318,6 +320,7 @@ void servoMove(Emakefun_Servo *srv, uint8_t &angle, int delta) {
     angle = x;
     srv->writeServo(angle, 10);
     Serial.println(String("angle:") + angle);
+    if (srv == servo1) reportStat();   // 只有舵机1(头部)需要上报
 }
 
 // 舵机1(头部) 增量控制
@@ -341,6 +344,17 @@ void setServo1(int angle) {
     servo1Angle = angle;
     servo1->writeServo(angle, 10);
     Serial.println(String("angle:") + angle);
+    reportStat();
+}
+
+// 状态上报: 速度/舵机1角度变化时上报最新快照(事件驱动, 不做周期轮询)。
+// ESP32 侧维护最新一帧, self.uno.get_status 直接返回, 无需下位机实时应答。
+// 后续扩充: 在此追加字段即可(如 ToF 距离: " d{cm}"), 解析端按可选字段处理。
+void reportStat() {
+    Serial.print("@stat s");
+    Serial.print(speed);
+    Serial.print(" v");
+    Serial.println(servo1Angle);
 }
 
 // ==================================================================

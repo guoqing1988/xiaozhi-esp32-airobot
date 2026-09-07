@@ -579,7 +579,11 @@ main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot/MecanumRobot.i
 | `@tj-yaotou` / `@tj-shandian` / `@tj-zhuanquan` / `@tj-sxzw` / `@tj-diaotou` | 特技动作 |
 | `@line-start` / `@line-stop` | 巡线模式（沿地面黑线自动行驶）开始/停止 |
 
-**双向回执（Arduino → ESP32）**：耗时动作（`go-*` / `tj-*` / 巡线）开始执行时回传 `@busy`，执行完毕回传 `@done`。ESP32 的 UART0 RX 解析任务维护状态，AI 可通过 `self.uno.get_status` 查询（返回 `moving` / `idle (last: ...)`）。
+**双向回执（Arduino → ESP32）**：
+- 耗时动作（`go-*` / `tj-*` / 巡线）开始执行时回传 `@busy {动作}`，执行完毕回传 `@done {动作}`；
+- 速度/舵机1角度变化时回传状态快照 `@stat s{速度} v{舵机1角度}`（事件驱动，非周期轮询；后续扩充在此追加字段，如 ToF 距离 ` d{cm}`）。
+
+ESP32 的 UART0 RX 解析任务维护状态（含 30 秒 busy 看门狗，防 `@done` 丢失导致状态卡死），AI 通过 `self.uno.get_status` 查询，返回 JSON：`mode`(idle/moving/line_follow)、`action`(当前或最近动作名)、`speed`(电机速度，未上报为 null)、`servo`(头部舵机角度，未上报为 null)。工具描述已明确：仅在用户询问状态时使用，发送控制指令后无需查询（动作自动完成停止）。
 
 ### 巡线（4 路循迹传感器）
 - **接线**：传感器 `S1→D7, S2→D4, S3→D3, S4→D2`（`S1..S4` 从左到右），`GND→GND`，`5V→5V`（VCC）。
