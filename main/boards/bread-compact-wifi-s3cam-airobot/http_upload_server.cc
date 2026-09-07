@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <strings.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -25,6 +26,10 @@ static esp_timer_handle_t s_wifi_timer = nullptr;
 static AlarmWebApi s_alarm_api;
 // 机器人控制回调(由板级 SetUnoWebApi 注入)
 static UnoWebApi s_uno_api;
+
+// WebSocket 活动会话(供服务端主动推送状态): 连接时记录 handle+fd, 断开置空。
+static httpd_handle_t s_ws_hd = nullptr;
+static int s_ws_fd = -1;
 
 void SetAlarmWebApi(const AlarmWebApi& api) { s_alarm_api = api; }
 void SetUnoWebApi(const UnoWebApi& api) { s_uno_api = api; }
@@ -161,11 +166,12 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// 列出 /sdcard/music 下所有 .mp3 歌曲(附文件大小字节 + 修改时间/上传时刻)。
-// 用标准库 dirent.h 扫描目录 + stat() 取大小/时间 + cJSON 构建响应；中文文件名(UTF-8)直接作为字符串返回。
-// 注意: 文件修改时间依赖 FATFS 时间戳(FATFS_TIMESTAMP)与设备同步的系统时间；未启用时 mtime 可能为 0。
-static esp_err_t HandleMusicList(httpd_req_t* req) {
-    (void)req;
+// 处理歌曲删除等操作(纯函数)。定义在 HandleMusicPost 之后, 故先前置声明。
+static std::string MusicActionJson(const char* body);
+
+// 生成 /sdcard/music 下所有 .mp3 歌曲的 JSON 数组字符串(含大小/修改时间)。
+// 纯函数(不依赖 httpd_req)，供 HTTP GET /music 与 WebSocket music_list 共用。
+static std::string MusicListJson() {
     cJSON* arr = cJSON_CreateArray();
     DIR* dir = opendir(MUSIC_DIR);
     if (dir != nullptr) {
@@ -201,6 +207,14 @@ static esp_err_t HandleMusicList(httpd_req_t* req) {
     cJSON_Delete(arr);
     std::string body = out ? out : "[]";
     free(out);
+    return body;
+}
+
+// 列出 /sdcard/music 下所有 .mp3 歌曲(附文件大小字节 + 修改时间/上传时刻)。
+// 用标准库 dirent.h 扫描目录 + stat() 取大小/时间 + cJSON 构建响应；中文文件名(UTF-8)直接作为字符串返回。
+// 注意: 文件修改时间依赖 FATFS 时间戳(FATFS_TIMESTAMP)与设备同步的系统时间；未启用时 mtime 可能为 0。
+static esp_err_t HandleMusicList(httpd_req_t* req) {
+    std::string body = MusicListJson();
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, body.c_str());
 }
@@ -216,11 +230,17 @@ static esp_err_t HandleMusicPost(httpd_req_t* req) {
         return ESP_OK;
     }
     buf[len] = '\0';
+    std::string resp = MusicActionJson(buf);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, resp.c_str());
+}
 
-    cJSON* root = cJSON_Parse(buf);
+// 处理歌曲删除等操作(纯函数，不依赖 httpd_req)，供 HTTP POST /music 与 WebSocket music_delete 共用。
+// 入参 body 为 JSON 字符串；返回响应 JSON 字符串。
+static std::string MusicActionJson(const char* body) {
+    cJSON* root = cJSON_Parse(body);
     if (root == nullptr) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
-        return ESP_OK;
+        return "{\"ok\":false,\"error\":\"bad json\"}";
     }
     cJSON* c_action = cJSON_GetObjectItem(root, "action");
     const char* action = (c_action && c_action->valuestring) ? c_action->valuestring : "";
@@ -261,9 +281,7 @@ static esp_err_t HandleMusicPost(httpd_req_t* req) {
         }
     }
     cJSON_Delete(root);
-
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, resp.c_str());
+    return resp;
 }
 
 // GET /uno：返回下位机(Arduino)状态 JSON(供前端遥控页面轮询)
@@ -347,6 +365,168 @@ static esp_err_t HandleUnoPost(httpd_req_t* req) {
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, resp.c_str());
+}
+
+// ==================================================================
+// WebSocket 控制通道 (/ws)
+//   用官方 esp_http_server 内建 WebSocket API(httpd_ws_*): 一条长连接承载
+//   uno 控制/状态、音乐列表/删除、闹钟读写等所有 JSON 消息，替代高频 HTTP
+//   短连接，避免每请求一连接占满 LWIP socket 池(抢走小智 UDP 音频通道)。
+// ==================================================================
+
+// 主动推送状态：由 httpd_ws_send_frame_async 发送(需在 httpd 上下文执行, 故用 httpd_queue_work)。
+// 入参字符串需保持存活直至 work 函数执行完(这里用 std::string 挂在 arg 上, 由 work 释放)。
+struct WsPushArg { std::string data; };
+static void WsPushWork(void* arg) {
+    std::unique_ptr<WsPushArg> a(static_cast<WsPushArg*>(arg));
+    if (s_ws_hd == nullptr || s_ws_fd < 0) return;
+    httpd_ws_frame_t frame = {};
+    frame.type = HTTPD_WS_TYPE_TEXT;
+    frame.payload = reinterpret_cast<uint8_t*>(&a->data[0]);
+    frame.len = a->data.size();
+    httpd_ws_send_frame_async(s_ws_hd, s_ws_fd, &frame);
+}
+
+// 线程安全地向已连接 WS 客户端推送一条文本消息(板级任意任务可调用)。
+static void WsPush(const std::string& data) {
+    if (s_ws_hd == nullptr || s_ws_fd < 0) return;
+    auto* arg = new WsPushArg{data};
+    if (httpd_queue_work(s_ws_hd, WsPushWork, arg) != ESP_OK) {
+        delete arg;
+    }
+}
+
+// 板级状态变化时由回调触发：把当前 uno 状态 JSON 推给前端(替代 1500ms 轮询)。
+static void WsPushStatus() {
+    if (s_uno_api.get_status) WsPush(s_uno_api.get_status());
+}
+
+// 对外接口：板级在状态变化时调用，把当前 uno 状态推给已连接的 web 前端(无连接则空操作)。
+void WebNotifyUnoStatus() { WsPushStatus(); }
+
+// 处理一条来自前端的 JSON 消息(action)并返回响应 JSON 字符串。
+static std::string WsHandleMessage(const char* body) {
+    cJSON* root = cJSON_Parse(body);
+    if (root == nullptr) return "{\"ok\":false,\"error\":\"bad json\"}";
+    cJSON* c_action = cJSON_GetObjectItem(root, "action");
+    const char* action = (c_action && c_action->valuestring) ? c_action->valuestring : "";
+    // 前端请求可带可选 id, 服务端原样透传到响应, 便于前端精确匹配请求-回执; 无 id 则不带(如状态推送)。
+    cJSON* c_id = cJSON_GetObjectItem(root, "id");
+    int req_id = (c_id && c_id->valuestring) ? atoi(c_id->valuestring) : (c_id ? c_id->valueint : -9999);
+    std::string resp = "{\"ok\":false,\"error\":\"unknown action\"}";
+
+    if (strcmp(action, "uno_status") == 0) {
+        if (s_uno_api.get_status) resp = s_uno_api.get_status();
+    } else if (strcmp(action, "uno_drive") == 0) {
+        cJSON* c_cmd = cJSON_GetObjectItem(root, "cmd");
+        cJSON* c_speed = cJSON_GetObjectItem(root, "speed");
+        const char* cmd = (c_cmd && c_cmd->valuestring) ? c_cmd->valuestring : "";
+        int spd = c_speed ? c_speed->valueint : 200;
+        if (spd < 70) spd = 70; if (spd > 255) spd = 255;
+        if (cmd[0] == '\0') { resp = "{\"ok\":false,\"error\":\"missing cmd\"}"; }
+        else if (s_uno_api.send_drive) {
+            std::string dcmd = std::string("drive-") + cmd + "-" + std::to_string(spd);
+            resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive(dcmd) + "\"}";
+        }
+    } else if (strcmp(action, "uno_stop") == 0) {
+        if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("drive-stop") + "\"}";
+    } else if (strcmp(action, "uno_speed") == 0) {
+        cJSON* c_speed = cJSON_GetObjectItem(root, "speed");
+        int spd = c_speed ? c_speed->valueint : 200;
+        if (spd < 70) spd = 70; if (spd > 255) spd = 255;
+        if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") +
+            s_uno_api.send_drive(std::string("speed-") + std::to_string(spd)) + "\"}";
+    } else if (strcmp(action, "uno_servo") == 0) {
+        cJSON* c_degree = cJSON_GetObjectItem(root, "degree");
+        int deg = c_degree ? c_degree->valueint : 90;
+        if (deg < 0) deg = 0; if (deg > 180) deg = 180;
+        if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") +
+            s_uno_api.send_drive(std::string("servo-") + std::to_string(deg)) + "\"}";
+    } else if (strcmp(action, "uno_servo_home") == 0) {
+        if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("servo-home") + "\"}";
+    } else if (strcmp(action, "uno_servo_home_set") == 0) {
+        cJSON* c_value = cJSON_GetObjectItem(root, "value");
+        int val = c_value ? c_value->valueint : 82;
+        if (val < 0) val = 0; if (val > 180) val = 180;
+        resp = s_uno_api.set_servo_home ? s_uno_api.set_servo_home(val)
+                                        : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
+    } else if (strcmp(action, "uno_servo_home_get") == 0) {
+        resp = s_uno_api.get_servo_home ? s_uno_api.get_servo_home() : std::string("{\"value\":82}");
+    } else if (strcmp(action, "music_list") == 0) {
+        resp = MusicListJson();
+    } else if (strcmp(action, "music_delete") == 0) {
+        cJSON* del = cJSON_CreateObject();
+        cJSON_AddStringToObject(del, "action", "delete");
+        cJSON* c_name = cJSON_GetObjectItem(root, "name");
+        if (c_name && c_name->valuestring) cJSON_AddStringToObject(del, "name", c_name->valuestring);
+        char* dstr = cJSON_PrintUnformatted(del);
+        cJSON_Delete(del);
+        if (dstr) { resp = MusicActionJson(dstr); free(dstr); }
+    } else if (strcmp(action, "alarm_list") == 0) {
+        if (s_alarm_api.get_alarms_json) resp = s_alarm_api.get_alarms_json();
+    } else if (strcmp(action, "alarm_add") == 0) {
+        cJSON* c_type = cJSON_GetObjectItem(root, "type");
+        cJSON* c_val = cJSON_GetObjectItem(root, "value");
+        cJSON* c_label = cJSON_GetObjectItem(root, "label");
+        cJSON* c_song = cJSON_GetObjectItem(root, "song");
+        const char* ty = (c_type && c_type->valuestring) ? c_type->valuestring : "relative";
+        int val = c_val ? c_val->valueint : 0;
+        const char* lb = (c_label && c_label->valuestring) ? c_label->valuestring : "";
+        const char* sg = (c_song && c_song->valuestring) ? c_song->valuestring : "";
+        if (s_alarm_api.add_alarm) resp = std::string("{\"id\":") + std::to_string(s_alarm_api.add_alarm(ty, val, lb, sg)) + "}";
+    } else if (strcmp(action, "alarm_remove") == 0) {
+        cJSON* c_id = cJSON_GetObjectItem(root, "id");
+        int id = c_id ? c_id->valueint : -1;
+        if (s_alarm_api.remove_alarm) resp = s_alarm_api.remove_alarm(id) ? "{\"ok\":true}" : "{\"ok\":false}";
+    }
+    cJSON_Delete(root);
+    // 若请求带 id, 将 id 注入到响应 JSON 中
+    if (req_id > -9999) {
+        cJSON* rj = cJSON_Parse(resp.c_str());
+        if (rj) {
+            cJSON_AddNumberToObject(rj, "id", req_id);
+            char* s = cJSON_PrintUnformatted(rj);
+            cJSON_Delete(rj);
+            if (s) { resp = s; free(s); }
+        }
+    }
+    return resp;
+}
+
+// WebSocket handler(官方推荐写法, 参考 IDF ws_echo_server 示例)。
+// httpd 会对每个到达的 WS 帧调用本 handler, 处理一帧后返回 ESP_OK; 收到 CLOSE 帧时清空会话。
+static esp_err_t HandleWs(httpd_req_t* req) {
+    // 记录会话(供服务端主动推送状态)
+    s_ws_hd = req->handle;
+    s_ws_fd = httpd_req_to_sockfd(req);
+    httpd_ws_frame_t frame = {};
+    memset(&frame, 0, sizeof(frame));
+    frame.type = HTTPD_WS_TYPE_TEXT;
+    // 先探长度
+    esp_err_t ret = httpd_ws_recv_frame(req, &frame, 0);
+    if (ret != ESP_OK) return ret;
+    // CLOSE 帧: 浏览器断开, 清空会话并回一个 CLOSE 确认
+    if (frame.type == HTTPD_WS_TYPE_CLOSE) {
+        s_ws_fd = -1;
+        s_ws_hd = nullptr;
+        httpd_ws_frame_t out = {};
+        out.type = HTTPD_WS_TYPE_CLOSE;
+        httpd_ws_send_frame(req, &out);
+        return ESP_OK;
+    }
+    if (frame.len) {
+        std::string buf(frame.len, '\0');
+        frame.payload = reinterpret_cast<uint8_t*>(&buf[0]);
+        ret = httpd_ws_recv_frame(req, &frame, frame.len);
+        if (ret != ESP_OK) return ret;
+        std::string resp = WsHandleMessage(buf.c_str());
+        httpd_ws_frame_t out = {};
+        out.type = HTTPD_WS_TYPE_TEXT;
+        out.payload = reinterpret_cast<uint8_t*>(&resp[0]);
+        out.len = resp.size();
+        httpd_ws_send_frame(req, &out);
+    }
+    return ESP_OK;
 }
 
 // GET /alarm?action=list：返回闹钟 JSON 数组(供网页/外部读取)
@@ -448,6 +628,10 @@ static void StartHttpServer() {
     httpd_uri_t alarm_post_uri = {
         .uri = "/alarm", .method = HTTP_POST, .handler = HandleAlarmPost, .user_ctx = nullptr,
     };
+    // WebSocket 控制/状态通道(官方 httpd_ws_* API)
+    httpd_uri_t ws_uri = {
+        .uri = "/ws", .method = HTTP_GET, .handler = HandleWs, .user_ctx = nullptr, .is_websocket = true,
+    };
     if (httpd_register_uri_handler(server, &index_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &upload_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &music_get_uri) != ESP_OK ||
@@ -455,10 +639,12 @@ static void StartHttpServer() {
         httpd_register_uri_handler(server, &uno_get_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &uno_post_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &alarm_get_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK) {
+        httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &ws_uri) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register uri handlers");
         return;
     }
+    // 板级状态变化时通过 WebSocket 主动推送给前端(见 WebNotifyUnoStatus, 由板级直接调用)
 
     ESP_LOGI(TAG, "Upload server started: http://<device-ip>/ (upload MP3 to %s)", MUSIC_DIR);
 }

@@ -776,13 +776,15 @@ private:
             if (uno_busy_ && (esp_timer_get_time() - uno_busy_since_us_.load()) > 30LL * 1000 * 1000) {
                 ESP_LOGW(TAG, "Uno @busy without @done for 30s, force clear");
                 uno_busy_ = false;
+                WebNotifyUnoStatus();
             }
             int len = uart_read_bytes(ECHO_UART_PORT_NUM, line, sizeof(line) - 1, pdMS_TO_TICKS(200));
             if (len <= 0) {
                 continue;
             }
             line[len] = '\0';
-            // 按行解析 @busy / @done(可能一次读到多行)
+            // 按行解析 @busy / @done(可能一次读到多行); 状态变化后置位 pending, 在锁外推送
+            bool status_changed = false;
             char* tok = strtok(line, "\r\n");
             while (tok != nullptr) {
                 if (strncmp(tok, "@busy", 5) == 0) {
@@ -793,12 +795,14 @@ private:
                     if (tok[5] == ' ') {
                         uno_last_action_ = tok + 6;
                     }
+                    status_changed = true;
                 } else if (strncmp(tok, "@stat ", 6) == 0) {
                     // 事件驱动的状态快照(速度/舵机变化时上报), 后续在此追加可选字段
                     int s = -1, v = -1;
                     if (sscanf(tok, "@stat s%d v%d", &s, &v) == 2) {
                         uno_speed_ = s;
                         uno_servo_ = v;
+                        status_changed = true;
                     }
                 } else if (strncmp(tok, "@done", 5) == 0) {
                     uno_busy_ = false;
@@ -807,8 +811,13 @@ private:
                     if (tok[5] == ' ') {
                         uno_last_action_ = tok + 6;
                     }
+                    status_changed = true;
                 }
                 tok = strtok(nullptr, "\r\n");
+            }
+            // 状态变化时经 WebSocket 推送给 web 前端(锁已在上面作用域释放, 此处可安全读)
+            if (status_changed) {
+                WebNotifyUnoStatus();
             }
         }
     }

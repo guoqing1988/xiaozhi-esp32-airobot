@@ -23,7 +23,7 @@ void SetAlarmWebApi(const AlarmWebApi& api);
 
 // 机器人(Arduino 下位机)控制回调：由板级注入，供 web 摇杆页面连续控制。
 // send_drive: 发送一条驾驶指令(cmd 如 "drive-forward-180"/"drive-stop")，返回描述性文本(成功/失败)。
-// get_status: 返回下位机状态 JSON 字符串(供前端轮询 mode/action/speed/servo)。
+// get_status: 返回下位机状态 JSON 字符串(供前端查询 mode/action/speed/servo)。
 struct UnoWebApi {
     std::function<std::string(const std::string& cmd)> send_drive;
     std::function<std::string()> get_status;
@@ -33,3 +33,7 @@ struct UnoWebApi {
 
 // 注入机器人控制回调；之后 /uno REST 接口（GET status / POST drive/stop/speed）即可控制下位机。
 void SetUnoWebApi(const UnoWebApi& api);
+
+// 下位机状态变化时调用：把当前 uno 状态 JSON 经 WebSocket 推送给已连接的 web 前端。
+// 由板级在解析到 @busy/@done/@stat(状态变化)时调用；无 WS 连接时为安全的空操作。
+void WebNotifyUnoStatus();

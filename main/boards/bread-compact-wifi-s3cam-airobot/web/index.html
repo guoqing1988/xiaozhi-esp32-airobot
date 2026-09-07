@@ -156,6 +156,35 @@ td:last-child{text-align:right}
 </div>
 
 <script>
+// ===== WebSocket 通道(官方 httpd_ws_*, 替代高频 HTTP 短连接) =====
+// 一条长连接承载音乐/闹钟/uno 控制与状态, 避免每请求一连接占满 LWIP socket 池(抢走小智 UDP 音频通道)。
+let ws=null, wsOk=false, wsId=1;
+const wsPending=new Map();   // id -> resolve
+function wsConnect(){
+ws=new WebSocket('ws://'+location.host+'/ws');
+ws.onopen=function(){wsOk=true;logWs('已连接');};
+ws.onclose=function(){wsOk=false;logWs('断开，重连中…');setTimeout(wsConnect,1000);};
+ws.onerror=function(){ws.close();};
+ws.onmessage=function(ev){
+let j=null;try{j=JSON.parse(ev.data);}catch(e){return;}
+// 若带 id 说明是某次请求的回执; 否则(如含 mode 的状态推送)直接当作状态更新
+if(j&&j.id!=null&&wsPending.has(j.id)){const r=wsPending.get(j.id);wsPending.delete(j.id);r(j);return;}
+if(j&&j.mode){updateUnoStatus(j);}
+};
+}
+wsConnect();
+// 发送一条 WS 请求并返回 Promise(带自增 id 供回执匹配)
+function wsSend(obj,timeout){
+timeout=timeout||4000;
+const id=wsId++;
+return new Promise(function(resolve,reject){
+if(!ws||ws.readyState!==1){reject(new Error('ws not ready'));return;}
+wsPending.set(id,function(j){resolve(j);});
+ws.send(JSON.stringify(Object.assign({},obj,{id:id})));
+setTimeout(function(){if(wsPending.has(id)){wsPending.delete(id);reject(new Error('timeout'));}},timeout);
+});
+}
+function logWs(t){const el=document.getElementById('wslog');if(el)el.textContent=t;}
 function showTab(id,btn){
 document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
 document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
@@ -163,7 +192,7 @@ btn.classList.add('active');
 document.getElementById('panel-'+id).classList.add('active');
 if(id==='alarm')loadAlarms();
 if(id==='upload')loadSongs();
-if(id==='uno'){startUnoPolling();}
+if(id==='uno'){startUnoPolling();}   // 由 WS 推送更新状态, 此处只主动问一次
 else{stopUnoPolling();unoStop();}
 }
 // ===== 上传弹窗 =====
@@ -218,8 +247,7 @@ const tb=document.querySelector('#panel-upload table tbody');
 const log=document.getElementById('muslog');
 const empty='<tr><td colspan="4">暂无歌曲，请先上传</td></tr>';
 const unavailable='<tr><td colspan="4">接口不可用，请确认已连接设备</td></tr>';
-fetch('/music')
-.then(r=>r.text())
+wsSend({action:'music_list'})
 .then(t=>{
 let arr=null;
 try{arr=JSON.parse(t);}catch(e){arr=null;}
@@ -249,8 +277,7 @@ tb.appendChild(tr);
 }
 function delSong(name){
 if(!confirm('确定删除歌曲「'+name+'」？\n同名歌词(.lrc)也会一起删除。'))return;
-fetch('/music',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',name:name})})
-.then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
+wsSend({action:'music_delete',name:name})
 .then(j=>{
 if(j.ok){document.getElementById('muslog').innerHTML='<div>✅ 已删除 '+name+'</div>';}
 else{document.getElementById('muslog').innerHTML='<div>❌ 删除失败: '+(j.error||'未知错误')+'</div>';}
@@ -264,8 +291,7 @@ function fmtSec(s){var h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return ('0
 function loadSongOptions(){
 const sel=document.getElementById('asong');
 sel.innerHTML='<option value="">🎲 随机选歌</option>';
-fetch('/music')
-.then(r=>r.text())
+wsSend({action:'music_list'})
 .then(t=>{
 let arr=null;
 try{arr=JSON.parse(t);}catch(e){arr=null;}
@@ -285,8 +311,7 @@ const tb=document.querySelector('#panel-alarm tbody');
 const log=document.getElementById('alarmlog');
 const empty='<tr><td colspan="7">暂无闹钟</td></tr>';
 const unavailable='<tr><td colspan="7">闹钟接口不可用，请确认已连接设备</td></tr>';
-fetch('/alarm?action=list')
-.then(r=>r.text())
+wsSend({action:'alarm_list'})
 .then(t=>{
 let arr=null;
 try{arr=JSON.parse(t);}catch(e){arr=null;}
@@ -313,14 +338,12 @@ if(!value){document.getElementById('alarmlog').innerHTML='<div>请填触发值</
 let sec;
 if(type==='relative'){sec=Math.round(parseFloat(value)*60);}
 else{const p=value.split(':');sec=(+p[0])*3600+(+p[1]||0)*60;}
-fetch('/alarm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',type:type,value:sec,label:label,song:song})})
-.then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
+wsSend({action:'alarm_add',type:type,value:sec,label:label,song:song})
 .then(()=>{loadAlarms();document.getElementById('alarmlog').innerHTML='<div>✅ 已添加</div>';})
 .catch(()=>{document.getElementById('alarmlog').innerHTML='<div>❌ 添加失败（接口不可用）</div>';});
 }
 function delAlarm(id){
-fetch('/alarm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',id:id})})
-.then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
+wsSend({action:'alarm_remove',id:id})
 .then(()=>loadAlarms())
 .catch(()=>{document.getElementById('alarmlog').innerHTML='<div>❌ 删除失败（接口不可用）</div>';});
 }
@@ -331,7 +354,7 @@ const JOY_NAMES={forward:'前进',back:'后退',left:'左转',right:'右转',lef
 let unoInterval=null, unoPollTimer=null, unoCurDir='', unoCurSpeed=0;
 function unoSendDrive(){
 if(!unoCurDir)return;
-fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'drive',cmd:unoCurDir,speed:unoCurSpeed})});
+wsSend({action:'uno_drive',cmd:unoCurDir,speed:unoCurSpeed});
 }
 function unoSetDrive(dir,speed){
 const changed=(dir!==unoCurDir||Math.abs(speed-unoCurSpeed)>6);
@@ -342,7 +365,7 @@ if(!unoInterval){unoInterval=setInterval(unoSendDrive,120);}  // 心跳维持(�
 function unoStop(){
 unoCurDir='';unoCurSpeed=0;
 if(unoInterval){clearInterval(unoInterval);unoInterval=null;}
-fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'stop'})});
+wsSend({action:'uno_stop'});
 document.getElementById('joyLabel').textContent='松手回中';
 document.getElementById('joySpeed').textContent='速度 0';
 const knob=document.getElementById('joyKnob');if(knob)knob.style.transform='translate(-50%,-50%)';
@@ -379,22 +402,24 @@ base.addEventListener('pointermove',function(e){if(active)knobAt(e);});
 base.addEventListener('pointerup',function(){active=false;unoStop();});
 base.addEventListener('pointercancel',function(){active=false;unoStop();});
 })();
-function loadUnoStatus(){
+function renderUnoStatus(j){
 const el=document.getElementById('unoStatus');
-fetch('/uno').then(r=>r.text()).then(t=>{
-try{
-const j=JSON.parse(t);
+if(!el)return;
 const nmap={moving:'运动中',idle:'空闲',line_follow:'巡线中'};
 el.textContent='状态: '+(nmap[j.mode]||j.mode||'?')+' | 动作: '+(j.action||'-')+' | 速度: '+(j.speed!=null?j.speed:'-');
-}catch(e){el.textContent='状态不可用';}
-}).catch(()=>{el.textContent='状态不可用';});
+}
+function updateUnoStatus(j){renderUnoStatus(j);}   // WS 主动推送调用
+function loadUnoStatus(){
+wsSend({action:'uno_status'})
+.then(renderUnoStatus)
+.catch(()=>{const el=document.getElementById('unoStatus');if(el)el.textContent='状态不可用';});
 }
 // ===== 舵机控制(头部转动 0~180°) =====
 let servoTimer=null;
 function servoHome(){
 let v=+document.getElementById('servoHomeVal').value;
 if(isNaN(v))v=82; if(v<0)v=0; if(v>180)v=180;
-fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'servo-home'})});
+wsSend({action:'uno_servo_home'});
 const r=document.getElementById('servoRange'),l=document.getElementById('servoLabel');
 if(r)r.value=v; if(l)l.textContent=v+'°';
 }
@@ -405,8 +430,7 @@ let v=Math.round(+el.value||82)+delta;
 if(isNaN(v))v=82+delta;
 if(v<0)v=0; if(v>180)v=180;
 el.value=v;
-fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'servo-home-set',value:v})})
-.then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
+wsSend({action:'uno_servo_home_set',value:v})
 .then(j=>{
 const r=document.getElementById('servoRange'),l=document.getElementById('servoLabel');
 if(r)r.value=v; if(l)l.textContent=v+'°';
@@ -415,10 +439,9 @@ if(r)r.value=v; if(l)l.textContent=v+'°';
 }
 // 读取已保存的回正值(切换到控制页时)
 function loadServoHome(){
-fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'servo-home-get'})})
-.then(r=>r.text())
+wsSend({action:'uno_servo_home_get'})
 .then(t=>{
-try{const j=JSON.parse(t);const el=document.getElementById('servoHomeVal');if(el&&j.value!=null)el.value=j.value;}
+try{const j=typeof t==='object'?t:JSON.parse(t);const el=document.getElementById('servoHomeVal');if(el&&j.value!=null)el.value=j.value;}
 catch(e){}
 }).catch(()=>{});
 }
@@ -427,17 +450,17 @@ const v=+el.value;
 document.getElementById('servoLabel').textContent=v+'°';
 if(servoTimer)clearTimeout(servoTimer);
 servoTimer=setTimeout(function(){
-fetch('/uno',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'servo',degree:v})});
+wsSend({action:'uno_servo',degree:v});
 servoTimer=null;
 },100);   // 节流: 拖动时 ~100ms 合并一次, 避免高频刷串口
 }
 function startUnoPolling(){
 loadUnoStatus();
 loadServoHome();
-if(!unoPollTimer)unoPollTimer=setInterval(loadUnoStatus,1500);
+// 状态由 WS 主动推送更新(替代旧的 1500ms 轮询), 此处只需初始化一次
 }
 function stopUnoPolling(){
-if(unoPollTimer){clearInterval(unoPollTimer);unoPollTimer=null;}
+// WS 常驻, 无需停止; 仅在离开面板时由 showTab 触发 unoStop()
 }
 </script>
 </body></html>
