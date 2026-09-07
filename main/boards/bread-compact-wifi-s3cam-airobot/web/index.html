@@ -34,29 +34,57 @@ th,td{padding:8px 6px;text-align:left;border-bottom:1px solid #eef0f4}
 th{color:#6b7280;font-weight:600;font-size:12.5px}
 td:last-child{text-align:right}
 #alarmlog{font-size:13px;color:#374151;margin-top:10px}
+/* 上传弹窗 */
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:100;align-items:center;justify-content:center;padding:16px}
+.modal.show{display:flex}
+.modal-box{background:#fff;border-radius:12px;padding:18px;width:100%;max-width:480px;box-shadow:0 8px 30px rgba(0,0,0,.22);max-height:90vh;overflow:auto}
+.modal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.modal-head h3{margin:0}
+.modal-close{background:none;border:none;font-size:24px;line-height:1;color:#9aa3b2;cursor:pointer;padding:0 4px}
+.modal-close:hover{color:#333}
 </style></head><body>
 <div class="wrap">
-  <div class="app-title">小智 AI 机器人<small>设备管理 · 歌曲上传 & 闹钟提醒</small></div>
+  <div class="app-title">小智 AI 机器人<small>设备管理 · 歌曲管理 & 闹钟提醒</small></div>
 
   <div class="tabs">
-    <button class="tab active" onclick="showTab('upload',this)">🎵 歌曲上传</button>
+    <button class="tab active" onclick="showTab('upload',this)">🎵 歌曲管理</button>
     <button class="tab" onclick="showTab('alarm',this)">⏰ 闹钟提醒</button>
   </div>
 
-  <!-- 歌曲上传 -->
+  <!-- 歌曲管理 -->
   <div class="panel active" id="panel-upload">
-    <h3>🎵 上传歌曲到 TF 卡</h3>
-    <div class="hint">建议先用转码脚本处理（24000Hz 单声道低码率 MP3，歌词转 UTF-8）：<br>
-      <code>python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp32s3.py 源目录 输出目录</code></div>
+    <h3>🎵 TF 卡歌曲管理</h3>
+    <div class="hint">TF 卡「歌曲」目录下的 MP3 列表；删除会同时删除同名歌词(.lrc)。</div>
     <div class="row">
-      <input type="file" id="f" accept=".mp3,.lrc" multiple>
+      <button class="btn" onclick="openUpload()">⬆️ 上传歌曲</button>
+      <button class="btn" onclick="loadSongs()">🔄 刷新列表</button>
     </div>
-    <div class="row">
-      <button class="btn" onclick="up()">上传</button>
-      <label class="check"><input type="checkbox" id="ov" checked> 同名文件覆盖</label>
+    <table>
+      <thead><tr><th>歌曲名</th><th>大小</th><th>上传时间</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="muslog"></div>
+  </div>
+
+  <!-- 上传弹窗 -->
+  <div class="modal" id="uploadModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3>🎵 上传歌曲到 TF 卡</h3>
+        <button class="modal-close" onclick="closeUpload()" title="关闭">×</button>
+      </div>
+      <div class="hint">建议先用转码脚本处理（24000Hz 单声道低码率 MP3，歌词转 UTF-8）：<br>
+        <code>python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp32s3.py 源目录 输出目录</code></div>
+      <div class="row">
+        <input type="file" id="f" accept=".mp3,.lrc" multiple>
+      </div>
+      <div class="row">
+        <button class="btn" onclick="up()">上传</button>
+        <label class="check"><input type="checkbox" id="ov" checked> 同名文件覆盖</label>
+      </div>
+      <div class="progress"><div id="bar">0%</div></div>
+      <div id="log"></div>
     </div>
-    <div class="progress"><div id="bar">0%</div></div>
-    <div id="log"></div>
   </div>
 
   <!-- 闹钟提醒 -->
@@ -87,7 +115,16 @@ document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
 btn.classList.add('active');
 document.getElementById('panel-'+id).classList.add('active');
 if(id==='alarm')loadAlarms();
+if(id==='upload')loadSongs();
 }
+// ===== 上传弹窗 =====
+function openUpload(){document.getElementById('uploadModal').classList.add('show');}
+function closeUpload(){document.getElementById('uploadModal').classList.remove('show');}
+// 点击遮罩空白处关闭弹窗
+(function(){
+const m=document.getElementById('uploadModal');
+if(m)m.addEventListener('click',function(e){if(e.target===this)closeUpload();});
+})();
 // ===== 上传 =====
 function up(){
 const files=document.getElementById('f').files;
@@ -96,7 +133,7 @@ const bar=document.getElementById('bar');
 if(!files.length){log.innerHTML='<div>请先选择文件</div>';return;}
 let i=0;
 function next(){
-if(i>=files.length){log.innerHTML+='<div><b>全部完成</b></div>';bar.style.width='0%';bar.textContent='0%';return;}
+if(i>=files.length){log.innerHTML+='<div><b>全部完成</b></div>';bar.style.width='0%';bar.textContent='0%';loadSongs();return;}
 const f=files[i++];
 log.innerHTML+='<div>⏳ 上传 '+f.name+' ('+(f.size/1024/1024).toFixed(1)+'MB) ...</div>';
 const xhr=new XMLHttpRequest();
@@ -112,6 +149,65 @@ xhr.onerror=function(){log.innerHTML+='<div>❌ 网络错误 '+f.name+'</div>';n
 xhr.send(f);
 }
 next();
+}
+// ===== 歌曲管理 =====
+function fmtSize(b){
+if(b>=1024*1024)return (b/1024/1024).toFixed(1)+' MB';
+if(b>=1024)return (b/1024).toFixed(1)+' KB';
+return b+' B';
+}
+// 时间戳(秒) -> 本地 'YYYY-MM-DD HH:MM'；为 0/无效时返回 '-'（FATFS 未启用时间戳或未同步时间）
+function fmtTime(t){
+if(!t)return '-';
+const d=new Date(t*1000);
+if(isNaN(d.getTime()))return '-';
+function p(n){return ('0'+n).slice(-2);}
+return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
+}
+function loadSongs(){
+const tb=document.querySelector('#panel-upload table tbody');
+const log=document.getElementById('muslog');
+const empty='<tr><td colspan="4">暂无歌曲，请先上传</td></tr>';
+const unavailable='<tr><td colspan="4">接口不可用，请确认已连接设备</td></tr>';
+fetch('/music')
+.then(r=>r.text())
+.then(t=>{
+let arr=null;
+try{arr=JSON.parse(t);}catch(e){arr=null;}
+tb.innerHTML='';
+if(!Array.isArray(arr)){tb.innerHTML=unavailable;log.innerHTML='';return;}
+if(arr.length===0){tb.innerHTML=empty;log.innerHTML='';return;}
+log.innerHTML='';
+arr.forEach(function(song){
+const tr=document.createElement('tr');
+const tdName=document.createElement('td');
+tdName.textContent=song.name;
+const tdSize=document.createElement('td');
+tdSize.textContent=fmtSize(song.size||0);
+const tdTime=document.createElement('td');
+tdTime.textContent=fmtTime(song.mtime||0);
+const tdOp=document.createElement('td');
+const btn=document.createElement('button');
+btn.className='btn btn-danger';
+btn.textContent='删除';
+btn.onclick=function(){delSong(song.name);};
+tdOp.appendChild(btn);
+tr.appendChild(tdName);tr.appendChild(tdSize);tr.appendChild(tdTime);tr.appendChild(tdOp);
+tb.appendChild(tr);
+});
+})
+.catch(()=>{tb.innerHTML=unavailable;log.innerHTML='';});
+}
+function delSong(name){
+if(!confirm('确定删除歌曲「'+name+'」？\n同名歌词(.lrc)也会一起删除。'))return;
+fetch('/music',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',name:name})})
+.then(resp=>{if(!resp.ok)throw new Error('HTTP '+resp.status);return resp.json();})
+.then(j=>{
+if(j.ok){document.getElementById('muslog').innerHTML='<div>✅ 已删除 '+name+'</div>';}
+else{document.getElementById('muslog').innerHTML='<div>❌ 删除失败: '+(j.error||'未知错误')+'</div>';}
+loadSongs();
+})
+.catch(()=>{document.getElementById('muslog').innerHTML='<div>❌ 删除失败（接口不可用）</div>';});
 }
 // ===== 闹钟 =====
 function fmtSec(s){var h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return ('0'+h).slice(-2)+':'+('0'+m).slice(-2);}

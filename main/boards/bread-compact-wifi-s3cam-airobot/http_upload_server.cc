@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <functional>
 #include <strings.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 #define TAG "HttpUpload"
 
@@ -156,6 +158,111 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// 列出 /sdcard/music 下所有 .mp3 歌曲(附文件大小字节 + 修改时间/上传时刻)。
+// 用标准库 dirent.h 扫描目录 + stat() 取大小/时间 + cJSON 构建响应；中文文件名(UTF-8)直接作为字符串返回。
+// 注意: 文件修改时间依赖 FATFS 时间戳(FATFS_TIMESTAMP)与设备同步的系统时间；未启用时 mtime 可能为 0。
+static esp_err_t HandleMusicList(httpd_req_t* req) {
+    (void)req;
+    cJSON* arr = cJSON_CreateArray();
+    DIR* dir = opendir(MUSIC_DIR);
+    if (dir != nullptr) {
+        struct dirent* entry = nullptr;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (entry->d_type != DT_REG) {
+                continue;
+            }
+            const char* name = entry->d_name;
+            size_t len = strlen(name);
+            if (len < 4 || strcasecmp(name + len - 4, ".mp3") != 0) {
+                continue;  // 只列出歌曲，.lrc 作为同名附属不单独显示
+            }
+            char path[320];
+            snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
+            // 用 stat() 一次性取文件大小与修改时间(上传时刻)，避免再单独 fopen
+            struct stat st = {};
+            long size = 0;
+            long long mtime = 0;
+            if (stat(path, &st) == 0) {
+                size = static_cast<long>(st.st_size);
+                mtime = static_cast<long long>(st.st_mtime);
+            }
+            cJSON* item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "name", name);
+            cJSON_AddNumberToObject(item, "size", static_cast<double>(size));
+            cJSON_AddNumberToObject(item, "mtime", static_cast<double>(mtime));
+            cJSON_AddItemToArray(arr, item);
+        }
+        closedir(dir);
+    }
+    char* out = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    std::string body = out ? out : "[]";
+    free(out);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, body.c_str());
+}
+
+// POST /music：JSON body 支持删除歌曲。
+//   delete: {"action":"delete","name":"歌曲.mp3"}
+// 删除歌曲(.mp3)时自动删除同名 .lrc 歌词; 成功后回调刷新歌曲列表缓存。
+static esp_err_t HandleMusicPost(httpd_req_t* req) {
+    char buf[1024];
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_OK;
+    }
+    buf[len] = '\0';
+
+    cJSON* root = cJSON_Parse(buf);
+    if (root == nullptr) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_OK;
+    }
+    cJSON* c_action = cJSON_GetObjectItem(root, "action");
+    const char* action = (c_action && c_action->valuestring) ? c_action->valuestring : "";
+    std::string resp = "{\"ok\":false,\"error\":\"unknown action\"}";
+
+    if (strcmp(action, "delete") == 0) {
+        cJSON* c_name = cJSON_GetObjectItem(root, "name");
+        if (c_name && c_name->valuestring && c_name->valuestring[0] != '\0') {
+            char name[256] = {};
+            snprintf(name, sizeof(name), "%s", c_name->valuestring);
+            SanitizeName(name);
+            size_t nlen = strlen(name);
+            bool is_mp3 = nlen >= 4 && strcasecmp(name + nlen - 4, ".mp3") == 0;
+            bool is_lrc = nlen >= 4 && strcasecmp(name + nlen - 4, ".lrc") == 0;
+            if (is_mp3 || is_lrc) {
+                char path[320];
+                snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
+                if (remove(path) == 0) {
+                    if (is_mp3) {
+                        // 删除歌曲时连带删除同名歌词(如存在)
+                        std::string base_name(name, nlen - 4);  // 去掉 .mp3 后缀
+                        char lrc[320];
+                        snprintf(lrc, sizeof(lrc), "%s/%s.lrc", MUSIC_DIR, base_name.c_str());
+                        remove(lrc);
+                    }
+                    resp = "{\"ok\":true}";
+                    if (s_on_uploaded) {
+                        s_on_uploaded();  // 通知刷新歌曲列表缓存
+                    }
+                } else {
+                    resp = "{\"ok\":false,\"error\":\"file not found\"}";
+                }
+            } else {
+                resp = "{\"ok\":false,\"error\":\"only .mp3/.lrc allowed\"}";
+            }
+        } else {
+            resp = "{\"ok\":false,\"error\":\"missing name\"}";
+        }
+    }
+    cJSON_Delete(root);
+
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, resp.c_str());
+}
+
 // GET /alarm?action=list：返回闹钟 JSON 数组(供网页/外部读取)
 static esp_err_t HandleAlarmGet(httpd_req_t* req) {
     const char* q = strchr(req->uri, '?');
@@ -235,6 +342,12 @@ static void StartHttpServer() {
     httpd_uri_t upload_uri = {
         .uri = "/upload", .method = HTTP_POST, .handler = HandleUpload, .user_ctx = nullptr,
     };
+    httpd_uri_t music_get_uri = {
+        .uri = "/music", .method = HTTP_GET, .handler = HandleMusicList, .user_ctx = nullptr,
+    };
+    httpd_uri_t music_post_uri = {
+        .uri = "/music", .method = HTTP_POST, .handler = HandleMusicPost, .user_ctx = nullptr,
+    };
     httpd_uri_t alarm_get_uri = {
         .uri = "/alarm", .method = HTTP_GET, .handler = HandleAlarmGet, .user_ctx = nullptr,
     };
@@ -243,6 +356,8 @@ static void StartHttpServer() {
     };
     if (httpd_register_uri_handler(server, &index_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &upload_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &music_get_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &music_post_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &alarm_get_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register uri handlers");
