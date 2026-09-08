@@ -86,3 +86,9 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 # 会长时间持 spinlock，Arduino 串口 RX 中断等锁超时被误判为死锁而复位。
 # 官方文档建议：临界区/中断访问 PSRAM 更耗时，可按需延长；1000ms 仍能兜住真死锁。
 CONFIG_ESP_INT_WDT_TIMEOUT_MS=1000
+
+# Web 控制页(http://<IP>/)用 WebSocket 承载机器人控制/状态、音乐、闹钟等消息,
+# 替代高频 HTTP 短连接, 避免 LWIP socket 池被占满挤掉小智 UDP 音频通道。
+# 用 idf.py build(不读 config.json)时也需默认开启, 否则 /ws 网页控制功能缺失。
+CONFIG_HTTPD_WS_SUPPORT=y
+CONFIG_LWIP_MAX_SOCKETS=16

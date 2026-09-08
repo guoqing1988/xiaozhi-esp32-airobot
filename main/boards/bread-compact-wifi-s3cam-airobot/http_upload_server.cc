@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <strings.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -27,9 +28,15 @@ static AlarmWebApi s_alarm_api;
 // 机器人控制回调(由板级 SetUnoWebApi 注入)
 static UnoWebApi s_uno_api;
 
-// WebSocket 活动会话(供服务端主动推送状态): 连接时记录 handle+fd, 断开置空。
+// WebSocket 活动会话(供服务端主动推送状态)。
+// 支持多客户端: 用互斥锁保护 fd 登记表; 未启用 CONFIG_HTTPD_WS_SUPPORT 时不编译。
+#if CONFIG_HTTPD_WS_SUPPORT
+#define MAX_WS_CLIENTS 4
+static std::mutex s_ws_mtx;
 static httpd_handle_t s_ws_hd = nullptr;
-static int s_ws_fd = -1;
+static int s_ws_fds[MAX_WS_CLIENTS];
+static int s_ws_count = 0;
+#endif
 
 void SetAlarmWebApi(const AlarmWebApi& api) { s_alarm_api = api; }
 void SetUnoWebApi(const UnoWebApi& api) { s_uno_api = api; }
@@ -367,6 +374,7 @@ static esp_err_t HandleUnoPost(httpd_req_t* req) {
     return httpd_resp_sendstr(req, resp.c_str());
 }
 
+#if CONFIG_HTTPD_WS_SUPPORT
 // ==================================================================
 // WebSocket 控制通道 (/ws)
 //   用官方 esp_http_server 内建 WebSocket API(httpd_ws_*): 一条长连接承载
@@ -376,23 +384,32 @@ static esp_err_t HandleUnoPost(httpd_req_t* req) {
 
 // 主动推送状态：由 httpd_ws_send_frame_async 发送(需在 httpd 上下文执行, 故用 httpd_queue_work)。
 // 入参字符串需保持存活直至 work 函数执行完(这里用 std::string 挂在 arg 上, 由 work 释放)。
-struct WsPushArg { std::string data; };
+// 入参随 httpd_queue_work 挂到 arg 上, 由 work 释放; hd/fd 用登记时的快照, 避免 work 执行时读全局被并发修改。
+struct WsPushArg { std::string data; httpd_handle_t hd; int fd; };
 static void WsPushWork(void* arg) {
     std::unique_ptr<WsPushArg> a(static_cast<WsPushArg*>(arg));
-    if (s_ws_hd == nullptr || s_ws_fd < 0) return;
     httpd_ws_frame_t frame = {};
     frame.type = HTTPD_WS_TYPE_TEXT;
     frame.payload = reinterpret_cast<uint8_t*>(&a->data[0]);
     frame.len = a->data.size();
-    httpd_ws_send_frame_async(s_ws_hd, s_ws_fd, &frame);
+    // 该 API 实际为同步发送(内部直接 sess->send_fn), 且是按 (handle, fd) 发送的唯一接口,
+    // 故经 httpd_queue_work 调度到 httpd 上下文后用它; payload 在发送完成后才释放, 安全。
+    httpd_ws_send_frame_async(a->hd, a->fd, &frame);
 }
 
-// 线程安全地向已连接 WS 客户端推送一条文本消息(板级任意任务可调用)。
+// 向已连接的所有 WS 客户端广播一条文本消息(板级任意任务可调用)。
+// 在锁内取 (handle, fd) 快照后再在锁外排队, 避免 work 里读共享会话表的数据竞争; 并支持多客户端。
 static void WsPush(const std::string& data) {
-    if (s_ws_hd == nullptr || s_ws_fd < 0) return;
-    auto* arg = new WsPushArg{data};
-    if (httpd_queue_work(s_ws_hd, WsPushWork, arg) != ESP_OK) {
-        delete arg;
+    httpd_handle_t hd; int fds[MAX_WS_CLIENTS]; int n;
+    {
+        std::lock_guard<std::mutex> lk(s_ws_mtx);
+        hd = s_ws_hd; n = s_ws_count;
+        for (int i = 0; i < n; ++i) fds[i] = s_ws_fds[i];
+    }
+    if (hd == nullptr || n == 0) return;
+    for (int i = 0; i < n; ++i) {
+        auto* arg = new WsPushArg{data, hd, fds[i]};
+        if (httpd_queue_work(hd, WsPushWork, arg) != ESP_OK) delete arg;
     }
 }
 
@@ -496,24 +513,54 @@ static std::string WsHandleMessage(const char* body) {
 // WebSocket handler(官方推荐写法, 参考 IDF ws_echo_server 示例)。
 // httpd 会对每个到达的 WS 帧调用本 handler, 处理一帧后返回 ESP_OK; 收到 CLOSE 帧时清空会话。
 static esp_err_t HandleWs(httpd_req_t* req) {
-    // 记录会话(供服务端主动推送状态)
-    s_ws_hd = req->handle;
-    s_ws_fd = httpd_req_to_sockfd(req);
+    // 登记会话(供服务端主动推送状态): 支持多客户端, 用互斥锁保护 fd 登记表。
+    int fd = httpd_req_to_sockfd(req);
+    {
+        std::lock_guard<std::mutex> lk(s_ws_mtx);
+        if (s_ws_count == 0) s_ws_hd = req->handle;  // handle 来自同一 server, 记一次即可
+        int j = 0;
+        for (; j < s_ws_count; ++j) if (s_ws_fds[j] == fd) break;
+        if (j == s_ws_count && s_ws_count < MAX_WS_CLIENTS) s_ws_fds[s_ws_count++] = fd;
+    }
     httpd_ws_frame_t frame = {};
     memset(&frame, 0, sizeof(frame));
     frame.type = HTTPD_WS_TYPE_TEXT;
-    // 先探长度
+    // 先探长度(读帧头)
     esp_err_t ret = httpd_ws_recv_frame(req, &frame, 0);
     if (ret != ESP_OK) return ret;
-    // CLOSE 帧: 浏览器断开, 清空会话并回一个 CLOSE 确认
+    // CLOSE 帧: 浏览器断开, 从登记表移除该 fd 并回一个 CLOSE 确认
     if (frame.type == HTTPD_WS_TYPE_CLOSE) {
-        s_ws_fd = -1;
-        s_ws_hd = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(s_ws_mtx);
+            for (int i = 0; i < s_ws_count; ++i) {
+                if (s_ws_fds[i] == fd) { s_ws_fds[i] = s_ws_fds[--s_ws_count]; break; }
+            }
+            if (s_ws_count == 0) s_ws_hd = nullptr;
+        }
         httpd_ws_frame_t out = {};
         out.type = HTTPD_WS_TYPE_CLOSE;
         httpd_ws_send_frame(req, &out);
         return ESP_OK;
     }
+    // PING 帧: 按 RFC6455 须回 PONG(浏览器/代理空闲心跳), 否则连接会被判失活断开
+    if (frame.type == HTTPD_WS_TYPE_PING) {
+        httpd_ws_frame_t pong = {};
+        pong.type = HTTPD_WS_TYPE_PONG;
+        pong.len = frame.len;
+        if (frame.len > 0) {  // ping 带的数据原样随 pong 返回
+            std::string pb(frame.len, '\0');
+            frame.payload = reinterpret_cast<uint8_t*>(&pb[0]);
+            if (httpd_ws_recv_frame(req, &frame, frame.len) == ESP_OK) {
+                pong.payload = frame.payload;
+                httpd_ws_send_frame(req, &pong);
+            }
+        } else {
+            httpd_ws_send_frame(req, &pong);
+        }
+        return ESP_OK;
+    }
+    // PONG 帧(客户端回的心跳): 忽略不处理
+    if (frame.type == HTTPD_WS_TYPE_PONG) return ESP_OK;
     if (frame.len) {
         std::string buf(frame.len, '\0');
         frame.payload = reinterpret_cast<uint8_t*>(&buf[0]);
@@ -528,6 +575,11 @@ static esp_err_t HandleWs(httpd_req_t* req) {
     }
     return ESP_OK;
 }
+
+#else  // !CONFIG_HTTPD_WS_SUPPORT
+// 未启用 WebSocket 时, 状态推送为空操作(板级调用 WebNotifyUnoStatus 安全)
+void WebNotifyUnoStatus() {}
+#endif
 
 // GET /alarm?action=list：返回闹钟 JSON 数组(供网页/外部读取)
 static esp_err_t HandleAlarmGet(httpd_req_t* req) {
@@ -628,10 +680,6 @@ static void StartHttpServer() {
     httpd_uri_t alarm_post_uri = {
         .uri = "/alarm", .method = HTTP_POST, .handler = HandleAlarmPost, .user_ctx = nullptr,
     };
-    // WebSocket 控制/状态通道(官方 httpd_ws_* API)
-    httpd_uri_t ws_uri = {
-        .uri = "/ws", .method = HTTP_GET, .handler = HandleWs, .user_ctx = nullptr, .is_websocket = true,
-    };
     if (httpd_register_uri_handler(server, &index_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &upload_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &music_get_uri) != ESP_OK ||
@@ -639,11 +687,20 @@ static void StartHttpServer() {
         httpd_register_uri_handler(server, &uno_get_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &uno_post_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &alarm_get_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &ws_uri) != ESP_OK) {
+        httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register uri handlers");
         return;
     }
+    // WebSocket 控制/状态通道(官方 httpd_ws_* API, 需启用 CONFIG_HTTPD_WS_SUPPORT)
+#if CONFIG_HTTPD_WS_SUPPORT
+    httpd_uri_t ws_uri = {
+        .uri = "/ws", .method = HTTP_GET, .handler = HandleWs, .user_ctx = nullptr, .is_websocket = true,
+    };
+    if (httpd_register_uri_handler(server, &ws_uri) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /ws handler");
+        return;
+    }
+#endif
     // 板级状态变化时通过 WebSocket 主动推送给前端(见 WebNotifyUnoStatus, 由板级直接调用)
 
     ESP_LOGI(TAG, "Upload server started: http://<device-ip>/ (upload MP3 to %s)", MUSIC_DIR);
