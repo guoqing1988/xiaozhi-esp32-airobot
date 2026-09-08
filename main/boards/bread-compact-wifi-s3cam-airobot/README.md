@@ -127,6 +127,28 @@
 
 > ⚠️ 本项目必须使用 **ESP-IDF v6.0.2**。v6 使用**独立的 Python 虚拟环境**（`idf6.0_py3.12_env`），与 v5.5（`idf5.5_py3.11_env`）**完全隔离**，两者共存于 `D:\Espressif`，互不影响。
 
+### 本机（macOS）快速启动（先看这里）
+
+> 当前开发机为 **macOS**，IDF v6.0.2 已安装在此：
+>
+> - IDF 根目录：`~/esp/v6.0.2/esp-idf`
+> - 激活命令：`source ~/esp/v6.0.2/esp-idf/export.sh`
+> - 版本验证：`idf.py --version`（应输出 `ESP-IDF v6.0.2`，**已实测可用**）
+>
+> 编译/烧录前先执行激活；Windows 上的安装与加载细节见下方章节（备查）。
+
+### 本机（Windows）快速启动（先看这里）
+
+> Windows 开发机（主力）IDF v6.0.2 已安装：
+>
+> - IDF 根目录：`D:\Espressif\frameworks\esp-idf-v6.0.2`
+> - 工具链目录：`D:\Espressif\tools`（按版本子目录与 v5.5 共存）
+> - 快捷脚本：`D:\Espressif\idf6.bat`（CMD，双击或命令行运行） / `idf6.ps1`（PowerShell，需点源）
+> - 手动激活：`set IDF_TOOLS_PATH=D:\Espressif && set IDF_PYTHON_ENV_PATH=D:\Espressif\python_env\idf6.0_py3.12_env && call D:\Espressif\frameworks\esp-idf-v6.0.2\export.bat`
+> - 版本验证：`idf.py --version`（应显示 `ESP-IDF v6.0.2`）
+>
+> 编译/烧录前先执行激活；完整安装流程见下方「安装（Windows 11，备查）」。
+
 ### 安装（Windows 11，备查）
 
 以下是在 **Windows 11 + cmd** 上安装 v6.0.2 的完整流程，与 v5.5 共存于 `D:\Espressif`，互不覆盖。
@@ -235,6 +257,8 @@ idf.py build flash
 
 > ⚠️ `idf.py build` **不读取** config.json 的 `sdkconfig_append`（如屏幕类型、console 配置），需通过 `menuconfig` 手动设置——详见下方「踩坑记录」。
 
+> ⚠️ 用此方式构建时，还需在 `menuconfig` 开启 **WebSocket 支持**：`Component config → ESP HTTP server → HTTPD WS Support`（即 `CONFIG_HTTPD_WS_SUPPORT=y`）。否则本板 `/ws` 网页控制代码（`httpd_ws_*`）在未开启时未声明，会**编译失败**。
+
 ### 查看编译日志与运行日志
 
 - `idf.py build` / `scripts/build.py` 都会把编译进度**打印到终端**，报错也会完整输出。若想留存日志：
@@ -308,27 +332,18 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 >
 > **引脚自动切换（重要）**：无 TF 卡模式下功放恢复与**原始板 `bread-compact-wifi-s3cam` 完全一致**的接线：DOUT=`39`、BCLK=`40`、LRCK=`41`（TF 版为 `3/14/46`），背光也恢复 `38`（TF 版为 NC）。若你的功放仍按 `3/14/46` 接线（TF 版），无 TF 卡版会无声——此时把功放三根线改回 `39/40/41` 即可。
 
-### ⚠️ 踩坑记录：改 config.json 后 `idf.py build` 不生效
+## Web 控制页（http://<设备IP>/ 功能总览）
 
-> **教训**：只修改 `config.json` 的 `sdkconfig_append`，再用 `idf.py build` 编译，新配置**完全不会生效**——`idf.py build` / `idf.py menuconfig` 根本不读 config.json，它只被 `scripts/build.py` 读取。本次调试 TF 卡中文文件名乱码时就因此误以为改动无效，浪费了时间。
+> 浏览器打开设备 IP（待机状态屏幕底部会显示，如 `192.168.31.74`）即进入同一网页 `http://<设备IP>/`，聚合了以下功能：
 
-改 Kconfig 配置有三条路径，按推荐度排序：
+| 功能区 | 说明 | 详见 |
+|--------|------|------|
+| 🎵 歌曲上传 | 多选上传 .mp3/.lrc、实时进度条、同名覆盖开关 | 「TF 卡本地歌曲播放」|
+| ⏰ AI 闹钟 | 查看/新增/删除闹钟 | 「AI 闹钟提醒」|
+| 🕹️ 机器人摇杆 | 麦克纳姆轮方向/速度控制 + 头部舵机 | 「Arduino 下位机」|
 
-1. **统一用 `scripts/build.py` 构建**（推荐）：配置只写在 `config.json` 的 `sdkconfig_append`，一处维护，脚本每次重新生成 sdkconfig 自动带上。
-2. **`idf.py menuconfig` 手动设置**：直观，但每次改动都要手动操作，易漏。
-3. **直接改 `sdkconfig` 文件**：当前构建立即生效，但 `sdkconfig` 是构建生成物（已被 .gitignore），kconfig 在 cmake 阶段可能回写/重建，改动可能被覆盖，不推荐作为长期维护方式。
-
-**本板实例**：TF 卡中文文件名乱码的根因是 FATFS API 编码为 ANSI/OEM(CP437，不含中文字符)，需改为 `CONFIG_FATFS_API_ENCODING_UTF_8=y`。该配置按标准做法写入两处**持久入口**：
-- **`sdkconfig.defaults`**（项目级）：`idf.py build` 重建 sdkconfig 时生效；
-- **`config.json` 的 `sdkconfig_append`**（本板）：`scripts/build.py` 构建时生效。
-
-> ⚠️ **不要直接改 `sdkconfig` 文件**——它是构建生成物（`.gitignore`），`reconfigure`/`build.py` 重建时会被覆盖丢失，不是配置入口。验证方法：
-
-```bash
-# Windows PowerShell
-Select-String FATFS_API_ENCODING sdkconfig
-# 应看到 CONFIG_FATFS_API_ENCODING_UTF_8=y
-```
+- **入口与 IP**：待机时屏幕底部显示本机 IP，照输入浏览器即可；其他状态（说话中/聆听中等）自动隐藏。
+- 上传成功自动刷新歌曲列表，AI 立即能查到新歌；具体细节见对应章节。
 
 ## TF 卡本地歌曲播放（AI 控制）
 
@@ -399,90 +414,6 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 设置写入 NVS（`clock/mode` + `clock/theme`），**断电重启自动恢复**。
 - 实现：板级显示子类 `airobot_lcd_display.h`（`AirobotLcdDisplay : SpiLcdDisplay`，标准 `SetupUI()` 钩子叠加 LVGL 标签，不改核心 display 代码）+ 1 秒 `esp_timer` 刷新（仅在文本/日期变化时更新标签，省 SPI 刷屏）。字体内嵌见下方「时钟字体说明」。
 
-## 网络状态（AI 可读本机 IP/SSID/信号）
-
-- 说「当前 IP 是多少 / 连的哪个 WiFi / 信号好不好」→ `self.network.get_status`，返回 JSON：`ip`(局域网 IPv4)、`connected`(是否已连接)、`ssid`(WiFi 名)、`rssi`(信号原始值 dBm)、`signal`(strong/medium/weak，按 rssi>= -60/ -70 划分)。未连接时 `ip`/`ssid` 为空。
-- 用途：AI 引导用户访问本机 Web（如 `http://<ip>/`）、排查网络、判断设备是否在线。
-- 工具为板级可扩展入口（后续可加 `channel`/`mac` 等字段）。
-
-### 时钟字体说明（内嵌，无需任何 menuconfig 配置）
-
-时间/日期使用**板内嵌 Bebas Neue 等宽高瘦数字字体**（`clock_bebas_130/60/48.c` 时间大字，`clock_bebas_date.c` 日期小字，仅含 `0-9` `:` `-` 字形，Bebas Neue 风格）：
-
-- 字体为开源 **Bebas Neue**（Google Fonts，SIL OFL）。高瘦(condensed)标题型无衬线字体，且**数字严格等宽**（0-9 与冒号每字符 adw 相同）——保证任何时间 HH:MM 宽度恒定，不会因窄数字(如 '1')让时间变窄、两侧留白忽大忽小，实现"始终占满两边"。高瘦字形让同屏宽能上更大字号、字更高，"长方形"视觉更显高大。
-- 全部按 `lv_font_conv --bpp 2` 生成（**bpp2 抗锯齿**），未做任何手工加粗/拉伸/收紧字距（**不再有** `scripts/thicken_clock_font.py` / `stretch_clock_font_76.py`）。
-- 字形数据是 `const` 数组，放 **flash**（`.rodata`），LVGL 按需从 flash 读取位图，**运行时不占 RAM**。
-- **档位宏门控**（`clock_fonts_config.h`）：按屏幕 `DISPLAY_WIDTH` 编译期只启用本屏用到的档，其余档位 `.c` 内容为 `#if 0` 空、**不占 flash**。
-- 仓库不存字体源文件，只存生成的位图 `clock_bebas_*.c`。
-
-> ⚠️ **横/竖屏是编译期决定**（`config.h` 的 `DISPLAY_SWAP_XY`）。想横屏：把对应分支的 `DISPLAY_WIDTH`/`DISPLAY_HEIGHT` 一并改成横的值（如 128×160 屏横屏 → `WIDTH=160, HEIGHT=128, SWAP_XY=true`），**不是**只改 `SWAP_XY`。重编后生效。
-
-若以后想**换字体 / 调字号 / 换样式**，只需重新生成**同名**字体文件即可——**不改任何显示逻辑**（`PickClockFont()` 运行时实测 `88:88` 宽度自适应选档）、**不改 CMakeLists**、**不用清 build**。
-
-### ▶ 关键原则：文件名固定，只改内容
-
-所有字体**文件名已经固定**（`clock_bebas_130/60/48.c` 时间 + `clock_bebas_date.c` 日期），代表「大屏主档 / 中档 / 小屏兜底 / 日期」四个**角色**，**不随字号或字体变**。换字体/改字号时，只把**新内容写进同名的 `.c`**（文件名不变 → `file(GLOB)` 列表不变 → CMake 不重扫 → 永不删 build、永不改逻辑）。
-
-> ⚠️ **千万不要给字体文件改新名字**（如新建 `clock_xxx_140.c`）。一旦文件名变了，GLOB 列表就变，需要清 build 才能让 CMake 重新扫描。
-
-### ▶ 换字体完整流程（约 5 步）
-
-**1. 准备源字体**（开源、SIL OFL，任选粗壮/等宽数字字体）：
-```bash
-npm i @fontsource/<字体名>        # 例: @fontsource/anton / archivo-black / bebas-neue
-# 源字体文件: node_modules/@fontsource/<字体名>/files/<字体名>-latin-400-normal.woff
-```
-
-**2. 确定各档该用多大字号**（不同字体宽高比不同，不能沿用旧字号！）：
-换字体后用旧字号很可能放不下 240 宽（或偏小）。用 `lv_font_conv` 生成一个临时档，实测 `88:88` 宽度，选出**刚好放得下 240 宽**（avail = `DISPLAY_WIDTH - 4`）的最大字号：
-```bash
-# 先用某字号试生成, 读时钟文件里数字/冒号的 adv_w 算宽度
-npx lv_font_conv --size 130 --font 新字体.woff --range 0x30-0x39,0x3A --lv-font-name probe -o /tmp/probe.c
-# 宽度 ≈ (4*数字adv + 冒号adv)/16, 目标 ≤ 236px(240-4)。偏大→降字号, 偏小→升字号。
-# 宽高比更宽的字体会需要更小字号; 更窄的(高瘦)可用更大字号。
-```
-
-**3. 正式生成**（写进**同名**文件，覆盖 Bebas）：
-```bash
-# 时间大字: 大屏/中屏/小屏三档, 用上一步定好的字号填入 size
-npx lv_font_conv --bpp 2 --size <新字号> --format lvgl --no-compress \
-  --font 新字体.woff --range 0x30-0x39,0x3A --lv-font-name clock_bebas_130 -o clock_bebas_130.c
-# 日期小字: 0-9 与 '-' 一个档
-npx lv_font_conv --bpp 2 --size <日期字号> --format lvgl --no-compress \
-  --font 新字体.woff --range 0x30-0x39,0x2D --lv-font-name clock_bebas_date -o clock_bebas_date.c
-```
-
-**4. 编译烧录**（**不用清 build**）：
-```bash
-idf.py -p /dev/cu.usbserial-XXXX flash monitor
-```
-
-**5. 看效果**：若大屏主档没被选中（显示偏小），说明新字体特定字号放不进 240 宽，`PickClockFont` 自动落到了小档——回第 2 步调大或调小主档字号。
-
-### ▶ 现有 Bebas Neue 的生成命令（参考）
-
-```bash
-# 源字体(npm): npm i @fontsource/bebas-neue, 解包取 files/bebas-neue-latin-400-normal.woff
-# 时间大字 130/60/48px (0-9 与 ':'); 这里是当前定稿的三档字号:
-npx lv_font_conv --bpp 2 --size 130 --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
-  --range 0x30-0x39,0x3A --lv-font-name clock_bebas_130 -o clock_bebas_130.c
-npx lv_font_conv --bpp 2 --size 60  --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
-  --range 0x30-0x39,0x3A --lv-font-name clock_bebas_60  -o clock_bebas_60.c
-npx lv_font_conv --bpp 2 --size 48  --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
-  --range 0x30-0x39,0x3A --lv-font-name clock_bebas_48  -o clock_bebas_48.c
-# 日期小字 18px (0-9 与 '-'):
-npx lv_font_conv --bpp 2 --size 18 --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
-  --range 0x30-0x39,0x2D --lv-font-name clock_bebas_date -o clock_bebas_date.c
-```
-
-> ℹ️ `lv_font_conv` 直接生成即 LVGL9 兼容格式，无需手工改 `adv_w`。若改 bpp/字号后 flash 吃紧，可把 **bpp 降到 1**（粗体下仍清晰）或**减少档位**（整机只一块屏时只需 1-2 档）。
-
-编译完成后烧录看日志（`scripts/build.py` 只管配置+编译，**不支持** flash/monitor 参数，烧录统一用 `idf.py`，端口按实际修改）：
-
-```bash
-idf.py -p /dev/cu.usbserial-XXXX flash monitor
-```
-
 ### 真机验证要点
 
 1. 说「打开时钟」→ 待机时屏幕出现大号 `HH:MM` 时间（分钟正常跳动）+ 上方日期，状态栏/字幕条隐藏。
@@ -490,6 +421,12 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 3. 说「切换时钟模式」→ 时钟消失、原 UI 恢复；再说一次 → 恢复。
 4. 开启时钟后唤醒对话/播放音乐 → 时钟隐藏，结束后回到待机自动恢复显示。
 5. 开启时钟 + 切换主题后断电重启 → 均保持（NVS 持久化生效）。
+
+## 网络状态（AI 可读本机 IP/SSID/信号）
+
+- 说「当前 IP 是多少 / 连的哪个 WiFi / 信号好不好」→ `self.network.get_status`，返回 JSON：`ip`(局域网 IPv4)、`connected`(是否已连接)、`ssid`(WiFi 名)、`rssi`(信号原始值 dBm)、`signal`(strong/medium/weak，按 rssi>= -60/ -70 划分)。未连接时 `ip`/`ssid` 为空。
+- 用途：AI 引导用户访问本机 Web（如 `http://<ip>/`）、排查网络、判断设备是否在线。
+- 工具为板级可扩展入口（后续可加 `channel`/`mac` 等字段）。
 
 ## AI 闹钟提醒（AI 语音 + 网页 + TF 卡持久化）
 
@@ -542,6 +479,95 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 2. 设置闹钟后断电重启 → `self.alarm.list` 仍能查到（`/sdcard/alarms.json` 存在且正确）。
 3. 网页打开 `http://<设备IP>/` → 可看到闹钟列表，新增/删除后设备端 `self.alarm.list` 同步。
 4. 绝对闹钟（设一个当天下一个未到时刻）→ 到点触发，且当天重复设置不重复响。
+
+## 时钟字体（LVGL 字体生成与更换）
+
+### 时钟字体说明（内嵌，无需任何 menuconfig 配置）
+
+时间/日期使用**板内嵌 Bebas Neue 等宽高瘦数字字体**（`clock_bebas_130/60/48.c` 时间大字，`clock_bebas_date.c` 日期小字，仅含 `0-9` `:` `-` 字形，Bebas Neue 风格）：
+
+- 字体为开源 **Bebas Neue**（Google Fonts，SIL OFL）。高瘦(condensed)标题型无衬线字体，且**数字严格等宽**（0-9 与冒号每字符 adw 相同）——保证任何时间 HH:MM 宽度恒定，不会因窄数字(如 '1')让时间变窄、两侧留白忽大忽小，实现"始终占满两边"。高瘦字形让同屏宽能上更大字号、字更高，"长方形"视觉更显高大。
+- 全部按 `lv_font_conv --bpp 2` 生成（**bpp2 抗锯齿**），未做任何手工加粗/拉伸/收紧字距（**不再有** `scripts/thicken_clock_font.py` / `stretch_clock_font_76.py`）。
+- 字形数据是 `const` 数组，放 **flash**（`.rodata`），LVGL 按需从 flash 读取位图，**运行时不占 RAM**。
+- **档位宏门控**（`clock_fonts_config.h`）：按屏幕 `DISPLAY_WIDTH` 编译期只启用本屏用到的档，其余档位 `.c` 内容为 `#if 0` 空、**不占 flash**。
+- 仓库不存字体源文件，只存生成的位图 `clock_bebas_*.c`。
+
+> ⚠️ **横/竖屏是编译期决定**（`config.h` 的 `DISPLAY_SWAP_XY`）。想横屏：把对应分支的 `DISPLAY_WIDTH`/`DISPLAY_HEIGHT` 一并改成横的值（如 128×160 屏横屏 → `WIDTH=160, HEIGHT=128, SWAP_XY=true`），**不是**只改 `SWAP_XY`。重编后生效。
+
+若以后想**换字体 / 调字号 / 换样式**，只需重新生成**同名**字体文件即可——**不改任何显示逻辑**（`PickClockFont()` 运行时实测 `88:88` 宽度自适应选档）、**不改 CMakeLists**、**不用清 build**。
+
+### ▶ 关键原则：文件名固定，只改内容
+
+所有字体**文件名已经固定**（`clock_bebas_130/60/48.c` 时间 + `clock_bebas_date.c` 日期），代表「大屏主档 / 中档 / 小屏兜底 / 日期」四个**角色**，**不随字号或字体变**。换字体/改字号时，只把**新内容写进同名的 `.c`**（文件名不变 → `file(GLOB)` 列表不变 → CMake 不重扫 → 永不删 build、永不改逻辑）。
+
+> ⚠️ **千万不要给字体文件改新名字**（如新建 `clock_xxx_140.c`）。一旦文件名变了，GLOB 列表就变，需要清 build 才能让 CMake 重新扫描。
+
+### ▶ 换字体完整流程（约 5 步）
+
+**1. 准备源字体**（开源、SIL OFL，任选粗壮/等宽数字字体）：
+```bash
+npm i @fontsource/<字体名>        # 例: @fontsource/anton / archivo-black / bebas-neue
+
+# 源字体文件: node_modules/@fontsource/<字体名>/files/<字体名>-latin-400-normal.woff
+```
+
+**2. 确定各档该用多大字号**（不同字体宽高比不同，不能沿用旧字号！）：
+换字体后用旧字号很可能放不下 240 宽（或偏小）。用 `lv_font_conv` 生成一个临时档，实测 `88:88` 宽度，选出**刚好放得下 240 宽**（avail = `DISPLAY_WIDTH - 4`）的最大字号：
+```bash
+
+# 先用某字号试生成, 读时钟文件里数字/冒号的 adv_w 算宽度
+npx lv_font_conv --size 130 --font 新字体.woff --range 0x30-0x39,0x3A --lv-font-name probe -o /tmp/probe.c
+
+# 宽度 ≈ (4*数字adv + 冒号adv)/16, 目标 ≤ 236px(240-4)。偏大→降字号, 偏小→升字号。
+
+# 宽高比更宽的字体会需要更小字号; 更窄的(高瘦)可用更大字号。
+```
+
+**3. 正式生成**（写进**同名**文件，覆盖 Bebas）：
+```bash
+
+# 时间大字: 大屏/中屏/小屏三档, 用上一步定好的字号填入 size
+npx lv_font_conv --bpp 2 --size <新字号> --format lvgl --no-compress \
+  --font 新字体.woff --range 0x30-0x39,0x3A --lv-font-name clock_bebas_130 -o clock_bebas_130.c
+
+# 日期小字: 0-9 与 '-' 一个档
+npx lv_font_conv --bpp 2 --size <日期字号> --format lvgl --no-compress \
+  --font 新字体.woff --range 0x30-0x39,0x2D --lv-font-name clock_bebas_date -o clock_bebas_date.c
+```
+
+**4. 编译烧录**（**不用清 build**）：
+```bash
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+```
+
+**5. 看效果**：若大屏主档没被选中（显示偏小），说明新字体特定字号放不进 240 宽，`PickClockFont` 自动落到了小档——回第 2 步调大或调小主档字号。
+
+### ▶ 现有 Bebas Neue 的生成命令（参考）
+
+```bash
+
+# 源字体(npm): npm i @fontsource/bebas-neue, 解包取 files/bebas-neue-latin-400-normal.woff
+
+# 时间大字 130/60/48px (0-9 与 ':'); 这里是当前定稿的三档字号:
+npx lv_font_conv --bpp 2 --size 130 --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
+  --range 0x30-0x39,0x3A --lv-font-name clock_bebas_130 -o clock_bebas_130.c
+npx lv_font_conv --bpp 2 --size 60  --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
+  --range 0x30-0x39,0x3A --lv-font-name clock_bebas_60  -o clock_bebas_60.c
+npx lv_font_conv --bpp 2 --size 48  --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
+  --range 0x30-0x39,0x3A --lv-font-name clock_bebas_48  -o clock_bebas_48.c
+
+# 日期小字 18px (0-9 与 '-'):
+npx lv_font_conv --bpp 2 --size 18 --format lvgl --no-compress --font bebas-neue-latin-400-normal.woff \
+  --range 0x30-0x39,0x2D --lv-font-name clock_bebas_date -o clock_bebas_date.c
+```
+
+> ℹ️ `lv_font_conv` 直接生成即 LVGL9 兼容格式，无需手工改 `adv_w`。若改 bpp/字号后 flash 吃紧，可把 **bpp 降到 1**（粗体下仍清晰）或**减少档位**（整机只一块屏时只需 1-2 档）。
+
+编译完成后烧录看日志（`scripts/build.py` 只管配置+编译，**不支持** flash/monitor 参数，烧录统一用 `idf.py`，端口按实际修改）：
+
+```bash
+idf.py -p /dev/cu.usbserial-XXXX flash monitor
+```
 
 ## Arduino 下位机（Mecanum 机器人）
 
@@ -620,17 +646,21 @@ build_arduino.bat COM5         :: 编译 + 烧录到 COM5
 
 **方式二：命令行（arduino-cli）**
 ```bash
+
 # 1) 把 3 个库 clone 到库目录(示例)
 cd ~/Documents/Arduino/libraries
 git clone <Emakefun_MotorDriver仓库URL>
 git clone <NewTone仓库URL>
 git clone <PS2X_lib仓库URL>
+
 #    (Emakefun 库取仓库内 arduino_lib/ 目录, PS2X_lib 取仓库内 PS2X_lib/ 目录)
 
 # 2) 编译(Arduino UNO)  —— 打印编译进度、依赖库列表、Flash/RAM 占用
 arduino-cli compile --fqbn arduino:avr:uno \
   main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot
+
 #     查看详细日志(编译命令/警告): 加 -v
+
 #     保留日志: 末尾加 2>&1 | tee build.log
 
 # 3) 烧录(示例端口, 按实际修改)
@@ -653,9 +683,34 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 - **顺序执行**：Arduino 读一条执行一条（`runMotors` 内 `delay` 阻塞），先到先执行，**不会乱序**。
 - **RX 缓冲**：UNO 默认 HardwareSerial 接收缓冲仅 **64 字节（≈4-5 条指令）**。动作阻塞执行期间（如 `go-forward-15` 执行 1.5 秒）不读串口，后续指令积压在缓冲里，超出部分**溢出丢弃**（表现为“后面的指令跳过了”）。已通过编译期宏 `SERIAL_RX_BUFFER_SIZE=256`（≈17 条）加大——**注意该宏须在编译时传入**（见上文 arduino-cli `--build-property` / IDE `platform.local.txt`），.ino 内无法设置（`arduino:avr 1.8.8+` 无 `setRxBufferSize` API）；正常 AI 编排序列（3-10 条）不会丢；若实测超长序列仍丢，可再加大或让 ESP32 读 Arduino 回执（`Serial.println("F")` 等已存在）判断动作完成再发下一条。
 
-### ⚠️ 踩坑记录
+## ⚠️ 踩坑记录
 
-#### 1. CH340 新驱动导致 Arduino 上传失败（`cannot set com-state`）
+### 改 config.json 后 `idf.py build` 不生效
+
+> **教训**：只修改 `config.json` 的 `sdkconfig_append`，再用 `idf.py build` 编译，新配置**完全不会生效**——`idf.py build` / `idf.py menuconfig` 根本不读 config.json，它只被 `scripts/build.py` 读取。本次调试 TF 卡中文文件名乱码时就因此误以为改动无效，浪费了时间。
+
+改 Kconfig 配置有三条路径，按推荐度排序：
+
+1. **统一用 `scripts/build.py` 构建**（推荐）：配置只写在 `config.json` 的 `sdkconfig_append`，一处维护，脚本每次重新生成 sdkconfig 自动带上。
+2. **`idf.py menuconfig` 手动设置**：直观，但每次改动都要手动操作，易漏。
+3. **直接改 `sdkconfig` 文件**：当前构建立即生效，但 `sdkconfig` 是构建生成物（已被 .gitignore），kconfig 在 cmake 阶段可能回写/重建，改动可能被覆盖，不推荐作为长期维护方式。
+
+**本板实例**：TF 卡中文文件名乱码的根因是 FATFS API 编码为 ANSI/OEM(CP437，不含中文字符)，需改为 `CONFIG_FATFS_API_ENCODING_UTF_8=y`。该配置按标准做法写入两处**持久入口**：
+- **`sdkconfig.defaults`**（项目级）：`idf.py build` 重建 sdkconfig 时生效；
+- **`config.json` 的 `sdkconfig_append`**（本板）：`scripts/build.py` 构建时生效。
+
+> ⚠️ **不要直接改 `sdkconfig` 文件**——它是构建生成物（`.gitignore`），`reconfigure`/`build.py` 重建时会被覆盖丢失，不是配置入口。验证方法：
+
+```bash
+
+# Windows PowerShell
+Select-String FATFS_API_ENCODING sdkconfig
+
+# 应看到 CONFIG_FATFS_API_ENCODING_UTF_8=y
+```
+
+
+### 1. CH340 新驱动导致 Arduino 上传失败（`cannot set com-state`）
 
 **现象**（Windows + CH340 方案的 UNO 克隆板，本机实测）：
 
@@ -680,7 +735,7 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 - **完全退出 Mixly / Arduino IDE**（它们会独占串口；被占用时报「拒绝访问」而非上面的错误）。
 - 烧录 ESP32 时保持 Arduino 接线断开（见上方「使用注意」）。
 
-#### 2. AI 重复调用 uno 工具（已修复）
+### 2. AI 重复调用 uno 工具（已修复）
 
 **现象**：说一次“前进”，ESP32 串口发出几十次 `@go-forward-10`，机器人反复动。
 **根因**：服务端 AI 无执行确认机制，对 `uno` 工具反复生成相同调用（实测 30 次、间隔约 700-900ms、JSON-RPC id 递增）；设备端每次毫秒级正确回复，**设备端无 bug**——同一日志里 `music.*` 工具全部只调用一次（同样返回 `true` 却不重复），对照即可实锤。
@@ -690,13 +745,13 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 3. **指令防抖**：相同指令 1 秒内只发送一次（防抖命中返回“指令已发送(防抖): xxx”视为成功），AI 不听话也挡得住；不同指令（组合编排）不受影响。
 **排查方法备忘**：在 `McpServer::ReplyResult` 临时加一行日志打印 payload，可确认设备端每次调用都发出结果；比较重复调用 id 递增（服务器独立请求）还是相同（重发）；对比不同工具（uno 重复 vs music 正常）即可定位是设备端还是服务器端。
 
-#### 3. Web 控制与 AI 控制互斥（AI 指令 & 头部舵机失效，已修复）
+### 3. Web 控制与 AI 控制互斥（AI 指令 & 头部舵机失效，已修复）
 
 **现象**：启用 web 页面机器人摇杆后，上下左右（`@drive-*`）正常，但**头部舵机 & AI 全部控制指令失效**；AI 发 `@go-*` 无反应，于是 AI 反复调用 `uno.get_status` 查询状态（因指令未生效只能反复确认）。
 **根因**：Arduino 下位机 `MecanumRobot.ino` 的 `loop()` 里，`checkDriveCommand()`（处理 web 摇杆 `@drive-*`）与 `executeCommand()`（处理 AI 的 `@go-*`/`@servo-*`/`@tj-*`）**各自用 `while(Serial.available())`/`if(Serial.available())` 抢读同一串口**。而 `checkDriveCommand()` 的 `while` 会**一次性读空整个 RX 缓冲**，只识别 `drive-` 前缀，其余命令（含 AI 的 go/servo/tj）被 `continue` 丢弃，导致随后执行的 `executeCommand()` 永远读不到——AI 控制与头部舵机全部失效。web 摇杆心跳（`@drive-*`）本身能被 `checkDriveCommand` 识别，所以上下左右正常。
 **修复**（Arduino）：将串口命令读取统一收敛为 `serialCommand()`，一次读一行并按前缀**分发**：`drive-*` → `handleDrive()`（保留原 web 驾驶逻辑），其余 → `handleCommand()`（原 `executeCommand` 的点动逻辑）。`loop()` 的三个分支统一调用 `serialCommand()`，不再有两个函数抢读互相吞命令。
 
-#### 4. `/uno` HTTP 接口慢（~1s，已修复）
+### 4. `/uno` HTTP 接口慢（~1s，已修复）
 
 **现象**：web 摇杆按下后 `/uno` GET 每次约 1s、POST 几百 ms~1s；“网页多控制时延迟特别高”。
 **根因**：ESP32 侧 `InitializeEchoUart()` 里 `uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE*2, 0, ...)` 的 **`tx_buffer_size=0`**（仅 128B 硬件 FIFO）。web 摇杆 8Hz 心跳（`@drive-*`，走 `SendUartMessage(..., false)`，绕过防抖）+ AI 指令同时涌入时，`uart_write_bytes` 会因 TX FIFO 填满而**阻塞**。而 `/uno` 的 `HandleUnoGet`/`HandleUnoPost` 都运行在 **httpd 单任务** 里，一旦被阻塞，后续所有 `/uno` 请求（含 GET）**串行排队**，表现为每次调用 1s、多控制时延迟叠加。
