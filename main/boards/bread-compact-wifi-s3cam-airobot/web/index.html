@@ -726,10 +726,19 @@
       }
     }
     function unoSetDrive(dir, speed) {
-      const changed = (dir !== unoCurDir || Math.abs(speed - unoCurSpeed) > 6);
+      const dirChanged = (dir !== unoCurDir);
+      const changed = (dirChanged || Math.abs(speed - unoCurSpeed) > 6);
       unoCurDir = dir; unoCurSpeed = speed;
       if (changed) {
-        unoQueueDrive();   // 方向/速度变化发送(约 10Hz 节流, 见 unoQueueDrive)
+        // 方向变化是用户有意操作(摇杆转向/按钮点击), 必须立即发送保证响应,
+        // 否则按钮快速点击会被 unoStop 的 clearTimeout 取消 -> 表现为"必须按住才动"。
+        // 只有方向不变的速度抖动才走节流, 避免 pointermove 数十 Hz 灌爆 ESP32 httpd。
+        if (dirChanged) {
+          if (unoPendTimer) { clearTimeout(unoPendTimer); unoPendTimer = null; }
+          unoSendDrive();
+        } else {
+          unoQueueDrive();
+        }
         // 本地乐观更新状态显示(按住即动): 摇杆由前端直接驱动, 不依赖服务器推送
         renderUnoStatus({ mode: 'moving', action: dir, speed: speed });
       }
@@ -787,8 +796,29 @@
     function bindTurnBtn(id, dir) {
       var b = document.getElementById(id);
       if (!b) return;
-      var start = function (e) { e.preventDefault(); if (b.setPointerCapture && e.pointerId != null) b.setPointerCapture(e.pointerId); unoSetDrive(dir, 140); };
-      var stop = function () { unoStop(); };
+      var pressStart = 0, stopTimer = null, active = false;
+      // 点击(快速按下松开)时也至少让机器人动这么久, 否则 drive-stop 紧跟 drive 命令,
+      // 一个 30ms 脉冲都跑不完 -> 表现为"必须按住才动"。按住则松手即停。
+      var MIN_PRESS_MS = 400;
+      var start = function (e) {
+        e.preventDefault();
+        if (b.setPointerCapture && e.pointerId != null) b.setPointerCapture(e.pointerId);
+        if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
+        active = true;
+        pressStart = Date.now();
+        unoSetDrive(dir, 140);
+      };
+      var stop = function () {
+        if (!active) return;   // pointerup 后 lostpointercapture 会再触发一次, 这里防重入
+        active = false;
+        if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
+        var held = Date.now() - pressStart;
+        if (held < MIN_PRESS_MS) {
+          stopTimer = setTimeout(function () { stopTimer = null; unoStop(); }, MIN_PRESS_MS - held);
+        } else {
+          unoStop();
+        }
+      };
       b.addEventListener('pointerdown', start);
       b.addEventListener('pointerup', stop);
       b.addEventListener('pointercancel', stop);
