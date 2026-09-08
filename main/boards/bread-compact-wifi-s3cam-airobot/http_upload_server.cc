@@ -74,7 +74,58 @@ static void SanitizeName(char* name) {
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[] asm("_binary_index_html_end");
 
+// 允许跨域访问: 本地页面/小程序(开发工具)通过 IP 直连本接口时, 由浏览器做 CORS 校验。
+// 简单请求(GET/POST multipart)只需 Access-Control-Allow-Origin; 复杂请求(POST JSON/自定义头)
+// 会先发 OPTIONS 预检, 故统一加跨域响应头并注册 OPTIONS 预检 handler。
+static void SetCors(httpd_req_t* req) {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type, X-Requested-With");
+}
+
+// OPTIONS 预检 handler: 各 URI 共用, 返回 204 + 跨域头。
+static esp_err_t HandleOptions(httpd_req_t* req) {
+    SetCors(req);
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_set_hdr(req, "Content-Length", "0");
+    return httpd_resp_send(req, "", 0);
+}
+
+// 判断字符串是否以指定后缀结尾(不区分大小写), 用于 .mp3/.lrc 文件名判断。
+static bool HasSuffix(const char* s, const char* ext) {
+    size_t sl = strlen(s), el = strlen(ext);
+    return sl >= el && strcasecmp(s + sl - el, ext) == 0;
+}
+
+// 统一发送 application/json 响应。
+static esp_err_t SendJson(httpd_req_t* req, const std::string& body) {
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, body.c_str());
+}
+
+// 读取 POST 请求 body 到 buf(并置 \0); 空 body 时已发送 400 并返回 false。
+static bool ReadBody(httpd_req_t* req, char* buf, size_t size) {
+    int len = httpd_req_recv(req, buf, size - 1);
+    if (len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return false;
+    }
+    buf[len] = '\0';
+    return true;
+}
+
+// 构建 "<prefix>-<value>" 形式的下位机命令串, 如 speed-200 / servo-82。
+static std::string MakeCmd(const char* prefix, int value) {
+    return std::string(prefix) + "-" + std::to_string(value);
+}
+
+// 构建三段驾驶命令串 "drive-<cmd>-<speed>"。
+static std::string MakeDriveCmd(const char* cmd, int spd) {
+    return std::string("drive-") + cmd + "-" + std::to_string(spd);
+}
+
 static esp_err_t HandleIndex(httpd_req_t* req) {
+    SetCors(req);
     // 页面内容存于独立文件 main/boards/bread-compact-wifi-s3cam-airobot/web/index.html
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, index_html_start, static_cast<size_t>(index_html_end - index_html_start));
@@ -82,6 +133,7 @@ static esp_err_t HandleIndex(httpd_req_t* req) {
 
 
 static esp_err_t HandleUpload(httpd_req_t* req) {
+    SetCors(req);
     // httpd_query_key_value 期望纯 query 字符串（不含路径和 '?'），需从 uri 中提取
     const char* q = strchr(req->uri, '?');
     if (q == nullptr || q[1] == '\0') {
@@ -107,9 +159,8 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     }
     UrlDecode(name, sizeof(name), name);
     SanitizeName(name);
-    size_t len = strlen(name);
-    bool is_mp3 = len >= 4 && strcasecmp(name + len - 4, ".mp3") == 0;
-    bool is_lrc = len >= 4 && strcasecmp(name + len - 4, ".lrc") == 0;
+    bool is_mp3 = HasSuffix(name, ".mp3");
+    bool is_lrc = HasSuffix(name, ".lrc");
     if (!is_mp3 && !is_lrc) {
         ESP_LOGE(TAG, "Upload: rejected non-music file name='%s'", name);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "only .mp3 / .lrc files are allowed");
@@ -188,8 +239,7 @@ static std::string MusicListJson() {
                 continue;
             }
             const char* name = entry->d_name;
-            size_t len = strlen(name);
-            if (len < 4 || strcasecmp(name + len - 4, ".mp3") != 0) {
+            if (!HasSuffix(name, ".mp3")) {
                 continue;  // 只列出歌曲，.lrc 作为同名附属不单独显示
             }
             char path[320];
@@ -221,25 +271,20 @@ static std::string MusicListJson() {
 // 用标准库 dirent.h 扫描目录 + stat() 取大小/时间 + cJSON 构建响应；中文文件名(UTF-8)直接作为字符串返回。
 // 注意: 文件修改时间依赖 FATFS 时间戳(FATFS_TIMESTAMP)与设备同步的系统时间；未启用时 mtime 可能为 0。
 static esp_err_t HandleMusicList(httpd_req_t* req) {
+    SetCors(req);
     std::string body = MusicListJson();
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, body.c_str());
+    return SendJson(req, body);
 }
 
 // POST /music：JSON body 支持删除歌曲。
 //   delete: {"action":"delete","name":"歌曲.mp3"}
 // 删除歌曲(.mp3)时自动删除同名 .lrc 歌词; 成功后回调刷新歌曲列表缓存。
 static esp_err_t HandleMusicPost(httpd_req_t* req) {
+    SetCors(req);
     char buf[1024];
-    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_OK;
-    }
-    buf[len] = '\0';
+    if (!ReadBody(req, buf, sizeof(buf))) return ESP_OK;
     std::string resp = MusicActionJson(buf);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, resp.c_str());
+    return SendJson(req, resp);
 }
 
 // 处理歌曲删除等操作(纯函数，不依赖 httpd_req)，供 HTTP POST /music 与 WebSocket music_delete 共用。
@@ -260,8 +305,8 @@ static std::string MusicActionJson(const char* body) {
             snprintf(name, sizeof(name), "%s", c_name->valuestring);
             SanitizeName(name);
             size_t nlen = strlen(name);
-            bool is_mp3 = nlen >= 4 && strcasecmp(name + nlen - 4, ".mp3") == 0;
-            bool is_lrc = nlen >= 4 && strcasecmp(name + nlen - 4, ".lrc") == 0;
+            bool is_mp3 = HasSuffix(name, ".mp3");
+            bool is_lrc = HasSuffix(name, ".lrc");
             if (is_mp3 || is_lrc) {
                 char path[320];
                 snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
@@ -293,9 +338,9 @@ static std::string MusicActionJson(const char* body) {
 
 // GET /uno：返回下位机(Arduino)状态 JSON(供前端遥控页面轮询)
 static esp_err_t HandleUnoGet(httpd_req_t* req) {
+    SetCors(req);
     std::string body = s_uno_api.get_status ? s_uno_api.get_status() : "{}";
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, body.c_str());
+    return SendJson(req, body);
 }
 
 // POST /uno：JSON body 控制下位机。
@@ -303,13 +348,9 @@ static esp_err_t HandleUnoGet(httpd_req_t* req) {
 //   stop:  {"action":"stop"}                                  停止驾驶
 //   speed: {"action":"speed","speed":200}                   单独调速度
 static esp_err_t HandleUnoPost(httpd_req_t* req) {
+    SetCors(req);
     char buf[256];
-    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_OK;
-    }
-    buf[len] = '\0';
+    if (!ReadBody(req, buf, sizeof(buf))) return ESP_OK;
 
     cJSON* root = cJSON_Parse(buf);
     if (root == nullptr) {
@@ -331,7 +372,7 @@ static esp_err_t HandleUnoPost(httpd_req_t* req) {
             if (cmd[0] == '\0') {
                 resp = "{\"ok\":false,\"error\":\"missing cmd\"}";
             } else {
-                std::string dcmd = std::string("drive-") + cmd + "-" + std::to_string(spd);
+                std::string dcmd = MakeDriveCmd(cmd, spd);
                 resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive(dcmd) + "\"}";
             }
         } else if (strcmp(action, "stop") == 0) {
@@ -342,7 +383,7 @@ static esp_err_t HandleUnoPost(httpd_req_t* req) {
             if (spd < 70) spd = 70;
             if (spd > 255) spd = 255;
             resp = std::string("{\"ok\":true,\"msg\":\"") +
-                   s_uno_api.send_drive(std::string("speed-") + std::to_string(spd)) + "\"}";
+                   s_uno_api.send_drive(MakeCmd("speed", spd)) + "\"}";
         } else if (strcmp(action, "servo") == 0) {
             // 舵机(头部)角度控制 0~180
             cJSON* c_degree = cJSON_GetObjectItem(root, "degree");
@@ -350,7 +391,7 @@ static esp_err_t HandleUnoPost(httpd_req_t* req) {
             if (deg < 0) deg = 0;
             if (deg > 180) deg = 180;
             resp = std::string("{\"ok\":true,\"msg\":\"") +
-                   s_uno_api.send_drive(std::string("servo-") + std::to_string(deg)) + "\"}";
+                   s_uno_api.send_drive(MakeCmd("servo", deg)) + "\"}";
         } else if (strcmp(action, "servo-home") == 0) {
             // 头部舵机回正(回到当前回正角度)
             resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("servo-home") + "\"}";
@@ -370,8 +411,7 @@ static esp_err_t HandleUnoPost(httpd_req_t* req) {
     }
     cJSON_Delete(root);
 
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, resp.c_str());
+    return SendJson(req, resp);
 }
 
 #if CONFIG_HTTPD_WS_SUPPORT
@@ -439,10 +479,11 @@ static std::string WsHandleMessage(const char* body) {
         cJSON* c_speed = cJSON_GetObjectItem(root, "speed");
         const char* cmd = (c_cmd && c_cmd->valuestring) ? c_cmd->valuestring : "";
         int spd = c_speed ? c_speed->valueint : 200;
-        if (spd < 70) spd = 70; if (spd > 255) spd = 255;
+        if (spd < 70) spd = 70;
+        if (spd > 255) spd = 255;
         if (cmd[0] == '\0') { resp = "{\"ok\":false,\"error\":\"missing cmd\"}"; }
         else if (s_uno_api.send_drive) {
-            std::string dcmd = std::string("drive-") + cmd + "-" + std::to_string(spd);
+            std::string dcmd = MakeDriveCmd(cmd, spd);
             resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive(dcmd) + "\"}";
         }
     } else if (strcmp(action, "uno_stop") == 0) {
@@ -450,21 +491,24 @@ static std::string WsHandleMessage(const char* body) {
     } else if (strcmp(action, "uno_speed") == 0) {
         cJSON* c_speed = cJSON_GetObjectItem(root, "speed");
         int spd = c_speed ? c_speed->valueint : 200;
-        if (spd < 70) spd = 70; if (spd > 255) spd = 255;
+        if (spd < 70) spd = 70;
+        if (spd > 255) spd = 255;
         if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") +
-            s_uno_api.send_drive(std::string("speed-") + std::to_string(spd)) + "\"}";
+            s_uno_api.send_drive(MakeCmd("speed", spd)) + "\"}";
     } else if (strcmp(action, "uno_servo") == 0) {
         cJSON* c_degree = cJSON_GetObjectItem(root, "degree");
         int deg = c_degree ? c_degree->valueint : 90;
-        if (deg < 0) deg = 0; if (deg > 180) deg = 180;
+        if (deg < 0) deg = 0;
+        if (deg > 180) deg = 180;
         if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") +
-            s_uno_api.send_drive(std::string("servo-") + std::to_string(deg)) + "\"}";
+            s_uno_api.send_drive(MakeCmd("servo", deg)) + "\"}";
     } else if (strcmp(action, "uno_servo_home") == 0) {
         if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("servo-home") + "\"}";
     } else if (strcmp(action, "uno_servo_home_set") == 0) {
         cJSON* c_value = cJSON_GetObjectItem(root, "value");
         int val = c_value ? c_value->valueint : 82;
-        if (val < 0) val = 0; if (val > 180) val = 180;
+        if (val < 0) val = 0;
+        if (val > 180) val = 180;
         resp = s_uno_api.set_servo_home ? s_uno_api.set_servo_home(val)
                                         : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
     } else if (strcmp(action, "uno_servo_home_get") == 0) {
@@ -583,6 +627,7 @@ void WebNotifyUnoStatus() {}
 
 // GET /alarm?action=list：返回闹钟 JSON 数组(供网页/外部读取)
 static esp_err_t HandleAlarmGet(httpd_req_t* req) {
+    SetCors(req);
     const char* q = strchr(req->uri, '?');
     char action[16] = {};
     if (q != nullptr) {
@@ -595,21 +640,16 @@ static esp_err_t HandleAlarmGet(httpd_req_t* req) {
     } else {
         body = "{\"error\":\"unknown action\"}";
     }
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, body.c_str());
+    return SendJson(req, body);
 }
 
 // POST /alarm：JSON body 支持 add / remove。
 //   add:    {"action":"add","type":"relative|absolute","value":<秒>,"label":"..."}
 //   remove: {"action":"remove","id":<编号>}
 static esp_err_t HandleAlarmPost(httpd_req_t* req) {
+    SetCors(req);
     char buf[1024];
-    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    if (len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_OK;  // 响应已通过 send_err 发送, 返回 OK 避免 httpd 直接关闭 socket
-    }
-    buf[len] = '\0';
+    if (!ReadBody(req, buf, sizeof(buf))) return ESP_OK;
 
     cJSON* root = cJSON_Parse(buf);
     if (root == nullptr) {
@@ -641,8 +681,7 @@ static esp_err_t HandleAlarmPost(httpd_req_t* req) {
     }
     cJSON_Delete(root);
 
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, resp.c_str());
+    return SendJson(req, resp);
 }
 
 static void StartHttpServer() {
@@ -650,6 +689,7 @@ static void StartHttpServer() {
     cfg.server_port = 80;
     cfg.stack_size = 8192;  // 上传写 SD 卡需要较大栈(FATFS)，默认 4096 会栈溢出导致重启
     cfg.task_priority = 6;  // 低于音频输入任务(prio 8)，避免上传/访问时抢占 AI 音频
+    cfg.max_uri_handlers = 20;  // CORS OPTIONS 预检也占用 handler 槽位, 调大预留
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start http server (port 80 may be busy)");
@@ -690,6 +730,20 @@ static void StartHttpServer() {
         httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register uri handlers");
         return;
+    }
+    // CORS 预检: 各 HTTP URI 的 OPTIONS 都回 204 + 跨域头(本地页面/小程序经 IP 跨域访问)。
+    httpd_uri_t options_uris[] = {
+        { .uri = "/",       .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
+        { .uri = "/upload", .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
+        { .uri = "/music",  .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
+        { .uri = "/uno",    .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
+        { .uri = "/alarm",  .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
+    };
+    for (size_t i = 0; i < sizeof(options_uris) / sizeof(options_uris[0]); ++i) {
+        if (httpd_register_uri_handler(server, &options_uris[i]) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to register CORS OPTIONS handler for %s", options_uris[i].uri);
+            return;
+        }
     }
     // WebSocket 控制/状态通道(官方 httpd_ws_* API, 需启用 CONFIG_HTTPD_WS_SUPPORT)
 #if CONFIG_HTTPD_WS_SUPPORT
