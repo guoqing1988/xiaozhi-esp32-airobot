@@ -9,7 +9,7 @@
                 "camera_vflip": false
             },
             "sdkconfig_append": [
-                "CONFIG_LCD_ST7789_240X320=y",
+                "CONFIG_LCD_ST7789_240X240=y",
                 "CONFIG_FATFS_API_ENCODING_UTF_8=y",
                 "CONFIG_LV_FONT_MONTSERRAT_48=y",
                 "CONFIG_HTTPD_WS_SUPPORT=y",
@@ -23,7 +23,7 @@
                 "camera_vflip": false
             },
             "sdkconfig_append": [
-                "CONFIG_LCD_ST7789_240X320=y",
+                "CONFIG_LCD_ST7789_240X240=y",
                 "CONFIG_FATFS_API_ENCODING_UTF_8=y",
                 "CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD=n",
                 "CONFIG_LV_FONT_MONTSERRAT_48=y",
