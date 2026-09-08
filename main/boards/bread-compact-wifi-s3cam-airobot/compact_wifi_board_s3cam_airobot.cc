@@ -848,14 +848,20 @@ private:
         return std::string("指令已发送: ") + command_str;
     }
 
-    // 设置头部舵机回正角度: 存 NVS + 下发给下位机, 返回说明文本(web /uno 调用)。
+    // 设置头部舵机回正角度: 存 NVS + 下发给下位机, 返回统一 JSON(web /uno 调用)。
+    // 说明: 响应须与其它 uno 接口一致(JSON 对象), 否则前端 JSON.parse(裸文本) 抛异常,
+    // 导致回执匹配(id 注入)与响应处理全部失效(此前返回"指令已发送: ..."裸字符串)。
     std::string SetServoHome(int value) {
         if (value < 0) value = 0;
         if (value > 180) value = 180;
         Settings settings("servo", true);
         settings.SetInt("home", value);
         std::string cmd = "servo-home-set " + std::to_string(value);
-        return SendUartMessage(cmd.c_str(), false);
+        std::string msg = SendUartMessage(cmd.c_str(), false);
+        if (msg.find("失败") != std::string::npos) {
+            return std::string("{\"ok\":false,\"error\":\"") + msg + "\"}";
+        }
+        return std::string("{\"ok\":true,\"msg\":\"") + msg + "\"}";
     }
 
     // 读取已保存的头部回正角度(默认 82), 返回 JSON(web /uno 调用)。
@@ -1015,8 +1021,10 @@ private:
         // 让 web 摇杆页面能连续控制下位机(/uno REST 接口)
         SetUnoWebApi({
             .send_drive = [this](const std::string& cmd) {
-                // web 遥感为高频心跳, 绕过 1 秒防抖(防抖只用于点动)
-                return SendUartMessage(cmd.c_str(), false);
+                // drive-* 是 web 遥感保活心跳(必须持续发送, Arduino 1500ms 无心跳会自动停),
+                // 故绕过 1 秒防抖; 其它点命令(speed-*/servo-* 等)幂等, 短时相同不重复下发。
+                bool is_drive_pulse = (cmd.rfind("drive-", 0) == 0);
+                return SendUartMessage(cmd.c_str(), !is_drive_pulse);
             },
             .get_status = [this]() { return UnoStatusJson(); },
             .set_servo_home = [this](int value) { return SetServoHome(value); },

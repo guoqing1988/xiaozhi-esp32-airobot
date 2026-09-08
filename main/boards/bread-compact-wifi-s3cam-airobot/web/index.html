@@ -721,7 +721,7 @@
         // 本地乐观更新状态显示(按住即动): 摇杆由前端直接驱动, 不依赖服务器推送
         renderUnoStatus({ mode: 'moving', action: dir, speed: speed });
       }
-      if (!unoInterval) { unoInterval = setInterval(unoSendDrive, 120); }  // 心跳维持(约8Hz)
+      if (!unoInterval) { unoInterval = setInterval(unoSendDrive, 250); }  // 心跳保活(约4Hz, 仍在 Arduino 1500ms 看门狗窗口内)
     }
     function unoStop() {
       unoCurDir = ''; unoCurSpeed = 0;
@@ -794,7 +794,7 @@
         .catch(() => { const el = document.getElementById('unoStatus'); if (el) el.textContent = '状态不可用'; });
     }
     // ===== 舵机控制(头部转动 0~180°) =====
-    let servoTimer = null;
+    let servoTimer = null, lastServoDeg = null;
     function servoHome() {
       let v = +document.getElementById('servoHomeVal').value;
       if (isNaN(v)) v = 82; if (v < 0) v = 0; if (v > 180) v = 180;
@@ -829,8 +829,10 @@
       document.getElementById('servoLabel').textContent = v + '°';
       if (servoTimer) clearTimeout(servoTimer);
       servoTimer = setTimeout(function () {
-        wsSend({ action: 'uno_servo', degree: v });
         servoTimer = null;
+        if (v === lastServoDeg) return;   // 值未变不重复发送(减少请求)
+        lastServoDeg = v;
+        wsSend({ action: 'uno_servo', degree: v });
       }, 100);   // 节流: 拖动时 ~100ms 合并一次, 避免高频刷串口
     }
     function startUnoPolling() {
