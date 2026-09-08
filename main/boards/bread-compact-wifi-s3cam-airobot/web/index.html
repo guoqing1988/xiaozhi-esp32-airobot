@@ -709,15 +709,27 @@
     const JOY_SECTORS = ['forward', 'rightup', 'rightmove', 'rightdown', 'back', 'leftdown', 'leftmove', 'leftup'];
     const JOY_NAMES = { forward: '前进', back: '后退', left: '左转', right: '右转', leftmove: '左移', rightmove: '右移', leftup: '左前', rightup: '右前', leftdown: '左后', rightdown: '右后' };
     let unoInterval = null, unoPollTimer = null, unoCurDir = '', unoCurSpeed = 0;
+    let unoLastSendMs = 0, unoPendTimer = null;
     function unoSendDrive() {
       if (!unoCurDir) return;
+      unoLastSendMs = Date.now();
       wsSend({ action: 'uno_drive', cmd: unoCurDir, speed: unoCurSpeed });
+    }
+    // 节流: 拖动时 pointermove 可达数十 Hz(速度随半径抖动, |Δspeed|>6 就触发), 高频灌给
+    // ESP32 会让 httpd 单任务串行积压(实测反而比 HTTP 短连接还慢)。合并到约 10Hz,
+    // 并保证窗口内最后一次值必定补发, 不丢方向/速度。
+    function unoQueueDrive() {
+      const wait = 100 - (Date.now() - unoLastSendMs);
+      if (wait <= 0) { unoSendDrive(); return; }
+      if (!unoPendTimer) {
+        unoPendTimer = setTimeout(function () { unoPendTimer = null; unoSendDrive(); }, wait);
+      }
     }
     function unoSetDrive(dir, speed) {
       const changed = (dir !== unoCurDir || Math.abs(speed - unoCurSpeed) > 6);
       unoCurDir = dir; unoCurSpeed = speed;
       if (changed) {
-        unoSendDrive();   // 方向/速度变化即时发送(快速响应)
+        unoQueueDrive();   // 方向/速度变化发送(约 10Hz 节流, 见 unoQueueDrive)
         // 本地乐观更新状态显示(按住即动): 摇杆由前端直接驱动, 不依赖服务器推送
         renderUnoStatus({ mode: 'moving', action: dir, speed: speed });
       }
@@ -726,7 +738,8 @@
     function unoStop() {
       unoCurDir = ''; unoCurSpeed = 0;
       if (unoInterval) { clearInterval(unoInterval); unoInterval = null; }
-      wsSend({ action: 'uno_stop' });
+      if (unoPendTimer) { clearTimeout(unoPendTimer); unoPendTimer = null; }   // 停止时丢弃待补发的 drive
+      wsSend({ action: 'uno_stop' }).catch(() => {});
       // 本地乐观更新: 松手/回中 -> 状态回空闲(web 驾驶不触发服务器推送, 故前端直接改显示值)
       renderUnoStatus({ mode: 'idle', action: '', speed: null });
       document.getElementById('joyLabel').textContent = '松手回中';
@@ -765,6 +778,10 @@
       base.addEventListener('pointerup', function () { active = false; unoStop(); });
       base.addEventListener('pointercancel', function () { active = false; unoStop(); });
     })();
+    // 页面隐藏/离开时停止 web 驾驶: 移动端拖完摇杆后切到小智 App, pointerup 不会触发,
+    // 心跳继续发送会让 Arduino 一直停在 web 驾驶模式, 持续脉冲覆盖 AI 控制。
+    document.addEventListener('visibilitychange', function () { if (document.hidden) unoStop(); });
+    window.addEventListener('pagehide', function () { unoStop(); });
     // 原地旋转按钮: 按住持续转(心跳维持), 松手/取消即停; 复用摇杆方向指令 left/right。
     // 旋转用较慢的固定速度(140), 避免 4 轮同向高速打滑/转过头; 摇杆平移才用 70-255 可变速度。
     function bindTurnBtn(id, dir) {

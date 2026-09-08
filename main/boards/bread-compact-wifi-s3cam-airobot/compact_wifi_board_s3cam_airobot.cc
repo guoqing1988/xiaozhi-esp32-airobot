@@ -838,12 +838,13 @@ private:
             snprintf(s_last_cmd, sizeof(s_last_cmd), "%s", command_str);
             s_last_us = now;
         }
-        // 统一加 '@' 前缀, 让 Arduino 只认带前缀的命令行(过滤日志乱码)
-        int written = uart_write_bytes(ECHO_UART_PORT_NUM, "@", 1);
-        if (written < 0) return std::string("指令发送失败: ") + command_str;
-        written = uart_write_bytes(ECHO_UART_PORT_NUM, command_str, strlen(command_str));
-        if (written < 0) return std::string("指令发送失败: ") + command_str;
-        written = uart_write_bytes(ECHO_UART_PORT_NUM, "\n", 1);
+        // 统一加 '@' 前缀并一次性写完整行(避免拆成多次 uart_write_bytes):
+        // 多次调用之间若被高优先级任务(音频 prio 8)抢占, Arduino 会先收到孤立的 '@',
+        // 其 readBytesUntil('\n') 默认超时 1000ms 会干等 -> web 控制出现约 1 秒延迟。
+        char frame[80];
+        int flen = snprintf(frame, sizeof(frame), "@%s\n", command_str);
+        if (flen <= 0 || flen >= (int)sizeof(frame)) return std::string("指令发送失败: ") + command_str;
+        int written = uart_write_bytes(ECHO_UART_PORT_NUM, frame, flen);
         if (written < 0) return std::string("指令发送失败: ") + command_str;
         return std::string("指令已发送: ") + command_str;
     }

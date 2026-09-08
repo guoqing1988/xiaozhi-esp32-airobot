@@ -498,6 +498,11 @@ void serialCommand() {
 // 读取现统一由 serialCommand 完成, 本函数只做命令分发, 不再自行读串口。
 void handleCommand(char* p) {
 
+        // AI 点动命令优先: 若还在 web 摇杆驾驶模式, 先退出, 否则 handleWebDrive() 会每轮
+        // 持续脉冲 web 方向, 把 AI 动作覆盖掉(表现为"左转一直转/前进停不下来")。
+        // 典型触发: 移动端拖完摇杆后切到小智 App, pointerup 不触发, 心跳未停。
+        if (web_drive_) exitWebDrive();
+
         if (strncmp(p, "go-", 3) == 0) {
             // 格式: @go-{action}-{steps}
             char cmd_full[32];
