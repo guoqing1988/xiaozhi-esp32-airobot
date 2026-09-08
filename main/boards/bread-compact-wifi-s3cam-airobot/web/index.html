@@ -609,8 +609,7 @@
       const unavailable = '<tr><td colspan="4">接口不可用，请确认已连接设备</td></tr>';
       wsSend({ action: 'music_list' })
         .then(t => {
-          let arr = null;
-          try { arr = JSON.parse(t); } catch (e) { arr = null; }
+          const arr = (t && Array.isArray(t.data)) ? t.data : null;
           tb.innerHTML = '';
           if (!Array.isArray(arr)) { tb.innerHTML = unavailable; log.innerHTML = ''; return; }
           if (arr.length === 0) { tb.innerHTML = empty; log.innerHTML = ''; return; }
@@ -653,8 +652,7 @@
       sel.innerHTML = '<option value="">🎲 随机选歌</option>';
       wsSend({ action: 'music_list' })
         .then(t => {
-          let arr = null;
-          try { arr = JSON.parse(t); } catch (e) { arr = null; }
+          const arr = (t && Array.isArray(t.data)) ? t.data : null;
           if (!Array.isArray(arr)) return;
           arr.forEach(function (s) {
             const o = document.createElement('option');
@@ -673,8 +671,7 @@
       const unavailable = '<tr><td colspan="7">闹钟接口不可用，请确认已连接设备</td></tr>';
       wsSend({ action: 'alarm_list' })
         .then(t => {
-          let arr = null;
-          try { arr = JSON.parse(t); } catch (e) { arr = null; }
+          const arr = (t && Array.isArray(t.data)) ? t.data : null;
           tb.innerHTML = '';
           if (!Array.isArray(arr)) { tb.innerHTML = unavailable; log.innerHTML = ''; return; }
           if (arr.length === 0) { tb.innerHTML = empty; log.innerHTML = ''; return; }
@@ -719,13 +716,19 @@
     function unoSetDrive(dir, speed) {
       const changed = (dir !== unoCurDir || Math.abs(speed - unoCurSpeed) > 6);
       unoCurDir = dir; unoCurSpeed = speed;
-      if (changed) unoSendDrive();   // 方向/速度变化即时发送(快速响应)
+      if (changed) {
+        unoSendDrive();   // 方向/速度变化即时发送(快速响应)
+        // 本地乐观更新状态显示(按住即动): 摇杆由前端直接驱动, 不依赖服务器推送
+        renderUnoStatus({ mode: 'moving', action: dir, speed: speed });
+      }
       if (!unoInterval) { unoInterval = setInterval(unoSendDrive, 120); }  // 心跳维持(约8Hz)
     }
     function unoStop() {
       unoCurDir = ''; unoCurSpeed = 0;
       if (unoInterval) { clearInterval(unoInterval); unoInterval = null; }
       wsSend({ action: 'uno_stop' });
+      // 本地乐观更新: 松手/回中 -> 状态回空闲(web 驾驶不触发服务器推送, 故前端直接改显示值)
+      renderUnoStatus({ mode: 'idle', action: '', speed: null });
       document.getElementById('joyLabel').textContent = '松手回中';
       document.getElementById('joySpeed').textContent = '速度 0';
       const knob = document.getElementById('joyKnob'); if (knob) knob.style.transform = 'translate(-50%,-50%)';

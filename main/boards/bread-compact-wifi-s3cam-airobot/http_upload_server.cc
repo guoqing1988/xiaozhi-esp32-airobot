@@ -541,13 +541,29 @@ static std::string WsHandleMessage(const char* body) {
         if (s_alarm_api.remove_alarm) resp = s_alarm_api.remove_alarm(id) ? "{\"ok\":true}" : "{\"ok\":false}";
     }
     cJSON_Delete(root);
-    // 若请求带 id, 将 id 注入到响应 JSON 中
+    // 若请求带 id, 将 id 注入到响应 JSON 中, 便于前端精确匹配请求-回执。
+    // 注意: 数组类响应(music_list/alarm_list)不能直接 AddNumberToObject —— cJSON 会把 id
+    // 当作数组元素追加到末尾(得到 [...,id]), 既污染数据又丢失顶层 id 字段, 前端无法匹配回执。
+    // 故数组响应应包装成对象 {"data": <数组>, "id": <id>}; 对象响应则在顶层加 id 字段。
     if (req_id > -9999) {
         cJSON* rj = cJSON_Parse(resp.c_str());
         if (rj) {
-            cJSON_AddNumberToObject(rj, "id", req_id);
-            char* s = cJSON_PrintUnformatted(rj);
-            cJSON_Delete(rj);
+            char* s = nullptr;
+            if (cJSON_IsArray(rj)) {
+                cJSON* wrapper = cJSON_CreateObject();
+                if (wrapper != nullptr) {
+                    cJSON_AddItemToObject(wrapper, "data", rj);  // rj 转移给 wrapper
+                    cJSON_AddNumberToObject(wrapper, "id", req_id);
+                    s = cJSON_PrintUnformatted(wrapper);
+                    cJSON_Delete(wrapper);  // rj 已转移所有权, 不再单独删除
+                } else {
+                    cJSON_Delete(rj);  // 分配失败: 放弃注入, 保持原数组响应
+                }
+            } else {
+                cJSON_AddNumberToObject(rj, "id", req_id);
+                s = cJSON_PrintUnformatted(rj);
+                cJSON_Delete(rj);
+            }
             if (s) { resp = s; free(s); }
         }
     }
