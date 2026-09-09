@@ -10,7 +10,7 @@ Arduino 下位机固件，由上位机 ESP32（本板 `bread-compact-wifi-s3cam-
 - **Emakefun 电机驱动板**（I2C 地址 `0x60`）：
   - 4 个直流电机（麦克纳姆轮）：`motors[0~3]`（前左/前右/后左/后右）
   - 2 个舵机：`servo1`（头部）、`servo2`
-- **PS2 手柄**：`config_gamepad(13, 11, 10, 12)`
+- **PS2 手柄**：`config_gamepad(13, 11, 10, 12)`，**可选**（未接时 `ps2_ready=false`，手柄轮询被跳过，见下文「注意事项」）
 - **蜂鸣器**：A0（`NewTone`）
 
 ## 与 ESP32 连接
@@ -107,11 +107,15 @@ arduino-cli upload -v -p COM5 --fqbn arduino:avr:uno main/boards/bread-compact-w
 
 | 指令 | 效果 |
 |------|------|
-| `@go-{action}-{steps}` | 动作：forward/back/left/right/leftmove/rightmove/leftup/rightup/leftdown/rightdown |
+| `@go-{action}-{steps}` | 动作：forward/back/left/right/leftmove/rightmove/leftup/rightup/leftdown/rightdown（执行完**显式停车**）|
 | `@servo-{degree}` | 设置舵机1 角度(0-180) |
+| `@servo-home` | 舵机1 回正（回到当前回正角 `servo1Zero`）|
+| `@servo-home-set {degree}` | 设置回正角并回正（上位机写入 NVS 后下发）|
 | `@speed-{value}` | 设置电机速度(70-255) |
-| `@tj-yaotou` / `@tj-shandian` / `@tj-zhuanquan` / `@tj-sxzw` / `@tj-diaotou` | 特技动作 |
+| `@tj-yaotou` / `@tj-shandian` / `@tj-zhuanquan` / `@tj-sxzw` / `@tj-diaotou` | 特技动作（执行完**显式停车**）|
 | `@line-start` / `@line-stop` | 巡线模式（沿地面黑线自动行驶）开始/停止 |
+| `@drive-{action}-{speed}` | web 摇杆驾驶模式（非阻塞连续控制，需上位机周期心跳保活，1500ms 无心跳自动停）|
+| `@drive-stop` | 退出 web 驾驶模式并停止 |
 
 **双向回执（Arduino → ESP32）**：耗时动作（`go-*` / `tj-*` / 巡线）开始执行时回传 `@busy`，执行完毕回传 `@done`；ESP32 的 UART0 RX 解析任务维护状态，AI 可通过 `self.uno.get_status` 查询。
 
@@ -132,4 +136,6 @@ arduino-cli upload -v -p COM5 --fqbn arduino:avr:uno main/boards/bread-compact-w
 - **看日志 / 烧录 ESP32 时请先断开 Arduino 与 ESP32 的接线**（ESP32 板载 USB-UART 走 GPIO43/44，与 Arduino 共用会干扰）。
 - 程序只认 **`@` 开头** 且带 `\n` 结尾的行，其余（如 ESP32 日志）一律忽略。
 - 解析用**固定 `char` 缓冲**（不用 `String`），适合 UNO 2KB SRAM，抗内存碎片。
+- **点动命令必须显式停车**：`moveForward()` 等只做 `runMotors(方向, t)` + `delay(t)`，**自身不停车**，`handleCommand()` 的 `go-*`/`tj-*` 分支末尾必须 `stopMove(0)`。**不要**依赖 `handleGamepad()` 无手柄时每轮 `stopMove(10)` 的副作用——它只对“无按键”生效，且 `ps2_ready=false` 时已直接返回；一旦被删，AI 动作执行完电机会一直转（板级 README 踩坑 5）。
+- **PS2 手柄未接时必须跳过轮询**：`setup()` 里 `ps2_ready = (ps2x.config_gamepad(...) == 0)`，`handleGamepad()` 开头 `if (!ps2_ready) return;`。否则 `read_gamepad()` 每轮失败重试 5 次 + 每次 `reconfig_gamepad()`（`read_delay` 升至 10），**单次阻塞约 250ms**，loop 周期变 ~300ms，web/AI 指令全部延时（板级 README 踩坑 6）。
 - **烧录失败排查**：Windows + CH340 的 UNO 克隆板上传报 `cannot set com-state` 是 CH340 新版驱动（3.8+）在 Win11 的已知 bug，降级驱动到 3.5.2019.1 即可——详见板级 README「踩坑记录：CH340 新驱动导致 Arduino 上传失败」。

@@ -79,6 +79,7 @@ uint8_t servo1Zero = 82;                        // 舵机1 回正角度 (大于=
 uint8_t servo1Angle = 82;                       // 舵机1 当前角度
 uint8_t servo2Angle = 90;                       // 舵机2 当前角度
 bool     started = true;                        // 主循环开关
+bool     ps2_ready = false;                     // PS2 手柄是否就绪(config_gamepad 成功); 无手柄时跳过轮询
 
 // ---------------- web 驾驶模式(非阻塞连续控制遥感) ----------------
 // 由上位机 @drive-{action}-{speed} 驱动(类似手柄摇杆): 方向 + 速度;
@@ -377,6 +378,7 @@ void reportStat() {
 
 // 读取 PS2 手柄按键并执行对应动作; 无按键时自动停止。
 void handleGamepad() {
+    if (!ps2_ready) return;   // 无手柄: 跳过, 避免 read_gamepad 反复重试阻塞 loop
     ps2x.read_gamepad(false, 0);
     delay(30);
 
@@ -553,6 +555,10 @@ void handleCommand(char* p) {
                 moveRightBackward(t);
             }
 
+            // 动作执行完毕显式刹车: 旧实现依赖 loop 中 handleGamepad() 在"无手柄按键"时
+            // 每轮 stopMove(10) 的副作用来停车; ps2_ready 跳过手柄轮询后该副作用消失,
+            // @go-* 执行完电机会持续转动(表现为"AI 让前进后停不下来")。
+            stopMove(0);
             Serial.print("@done "); Serial.println(cmd_full);   // 上报动作完成(带动作名)
 
         } else if (strncmp(p, "servo-home-set", 14) == 0) {
@@ -610,6 +616,7 @@ void handleCommand(char* p) {
                 // 特技: 调头
                 turnLeft(900);
             }
+            stopMove(0);   // 特技结束刹车(同上, 不再依赖 handleGamepad 的隐式停车)
             Serial.print("@done "); Serial.println(p);   // 上报动作完成
 
         } else if (strncmp(p, "speed-", 6) == 0) {
@@ -682,7 +689,11 @@ void setup() {
     servo2Angle = 90;
     started = true;
 
-    ps2x.config_gamepad(13, 11, 10, 12, true, true);   // PS2 手柄引脚
+    // 记录 PS2 手柄初始化结果: 失败(通常=没接手柄)时 handleGamepad() 直接跳过。
+    // 否则 PS2X 的 read_gamepad() 会重试 5 次 + 每次 reconfig_gamepad(), 单次阻塞
+    // 约 300~400ms, 且 read_delay 动态增长 -> 非 web 驾驶时每轮 loop 都被拖慢,
+    // 表现为 web/AI 命令延时高且忽大忽小。
+    ps2_ready = (ps2x.config_gamepad(13, 11, 10, 12, true, true) == 0);   // PS2 手柄引脚
     delay(300);
 
     Serial.begin(115200);               // 与上位机 ESP32 通信波特率
