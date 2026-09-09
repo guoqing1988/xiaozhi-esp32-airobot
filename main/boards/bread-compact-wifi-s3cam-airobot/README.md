@@ -811,6 +811,28 @@ Select-String FATFS_API_ENCODING sdkconfig
 
 **修复**（`web/index.html`）：`servoHome()` / `homeStep()` 同步 `lastServoDeg`；三处舵机命令补 `.catch()` 并在失败时**回滚 `lastServoDeg`**（否则失败后拖回同一角度仍会被拦）并在页面 `#wslog` 提示“发送失败，请重试”。
 
+### 9. web 控制一会儿后彻底失联、AI 同时失效（fd 泄漏，已修复）
+
+**现象**：web 页面打开后摇杆/舵机**一开始灵敏**（延迟已修好），控制一会儿后**突然失联**，之后**任何控制都没反应**——包括小智 AI 语音控制。
+
+**根因**：注册 `httpd_config_t.close_fn` 后**没有关闭 socket**。IDF 的 `httpd_sess_delete()`（`components/esp_http_server/src/httpd_sess.c`）实现是：
+
+```c
+if (hd->config.close_fn) {
+    hd->config.close_fn(hd, session->fd);
+} else {
+    close(session->fd);          // ← 默认才关
+}
+```
+
+即 **`close_fn` 是“替代”默认的 `close(fd)`，而不是“关闭前的通知”**。回调只清了 WS 登记表，于是**每个 HTTP 请求都泄漏一个 fd**；累积到 `CONFIG_LWIP_MAX_SOCKETS`（本板 16）后 `socket()` 失败 → **web 页面与小智协议（同样需要 socket）一起失联**。
+
+**修复**：`OnWsSessionClosed()` 末尾补 `close(sockfd)`（并 `#include <unistd.h>`）。
+
+**回归防护**：`scripts/tests/test_http_close_fn.py` 断言 `OnWsSessionClosed` 函数体必须含 `close(sockfd)`、且 `WsUnregisterClient` 不重复 close（避免双重关闭）。
+
+**排查备忘**：“用着用着彻底没反应”的现象优先怀疑 **fd/socket 泄漏**（而非 WiFi 或内存）——可临时在 `lwip` 打印 socket 计数确认；`close_fn` 是 IDF 里少见的“替代式”回调，务必对照 `httpd_sess.c` 源码确认语义。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。

@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <strings.h>
+#include <unistd.h>   // close(): httpd close_fn 替代默认 close(fd), 必须自己关闭 socket
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -596,9 +597,16 @@ static void WsUnregisterClient(int fd) {
 // httpd 会话关闭回调: 兜底 CLOSE 帧丢失的情况(浏览器崩溃/网络中断/会话超时)。
 // 若不清理, fd 会残留在登记表里: 状态推送发向死连接, 且 web_control_active_ 永远为真
 // (WiFi 停在性能模式不再省电)。非 WS 会话的 fd 不在表中, 查找不到即空操作。
+//
+// ⚠ 必须自己 close(sockfd): IDF 的 httpd_sess_delete() 是
+//     `if (close_fn) close_fn(hd, fd); else close(fd);`
+//   —— close_fn 是"替代"默认关闭动作, 不是"通知"。漏掉 close() 会导致每个 HTTP
+//   请求泄漏一个 fd, 累积到 CONFIG_LWIP_MAX_SOCKETS 后新连接全部失败,
+//   表现为 web 页面与小智 AI 一起"失联"。
 static void OnWsSessionClosed(httpd_handle_t hd, int sockfd) {
     (void)hd;
     WsUnregisterClient(sockfd);
+    close(sockfd);
 }
 
 // httpd 会对每个到达的 WS 帧调用本 handler, 处理一帧后返回 ESP_OK; 收到 CLOSE 帧时清空会话。
