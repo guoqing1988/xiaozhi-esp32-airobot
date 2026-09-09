@@ -344,6 +344,8 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 
 - **入口与 IP**：待机时屏幕底部显示本机 IP，照输入浏览器即可；其他状态（说话中/聆听中等）自动隐藏。
 - 上传成功自动刷新歌曲列表，AI 立即能查到新歌；具体细节见对应章节。
+- **延迟与功耗**：页面打开（WS 已连接）期间，板级会把 WiFi 强制为**性能模式**，避免待机省电导致遥控几百毫秒延迟（详见踩坑 7）；关闭页面后自动恢复省电。
+- **一次性命令无重发**：舵机/回正等命令没有心跳重发，发送失败时页面顶部 `#wslog` 会提示“发送失败，请重试”（详见踩坑 8）。
 
 ## TF 卡本地歌曲播放（AI 控制）
 
@@ -583,7 +585,7 @@ main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot/MecanumRobot.i
 
 ### 硬件
 - Emakefun 电机驱动板（I2C 0x60）：4 个直流电机（麦克纳姆轮）+ **2 个舵机**（servo1 头部 / servo2）
-- PS2 手柄（`config_gamepad(13,11,10,12)`）
+- PS2 手柄（`config_gamepad(13,11,10,12)`）：**可选**。未接时 `setup()` 的 `config_gamepad()` 失败 → `ps2_ready=false`，`handleGamepad()` 每轮直接返回（**必须如此**，否则无手柄时 `read_gamepad()` 每轮阻塞约 300ms，见板级 README 踩坑 6）
 - 蜂鸣器（A0，NewTone）
 
 ### 与 ESP32 连接
@@ -682,6 +684,8 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 ### 指令执行模型与串口缓冲（重要）
 - **顺序执行**：Arduino 读一条执行一条（`runMotors` 内 `delay` 阻塞），先到先执行，**不会乱序**。
 - **RX 缓冲**：UNO 默认 HardwareSerial 接收缓冲仅 **64 字节（≈4-5 条指令）**。动作阻塞执行期间（如 `go-forward-15` 执行 1.5 秒）不读串口，后续指令积压在缓冲里，超出部分**溢出丢弃**（表现为“后面的指令跳过了”）。已通过编译期宏 `SERIAL_RX_BUFFER_SIZE=256`（≈17 条）加大——**注意该宏须在编译时传入**（见上文 arduino-cli `--build-property` / IDE `platform.local.txt`），.ino 内无法设置（`arduino:avr 1.8.8+` 无 `setRxBufferSize` API）；正常 AI 编排序列（3-10 条）不会丢；若实测超长序列仍丢，可再加大或让 ESP32 读 Arduino 回执（`Serial.println("F")` 等已存在）判断动作完成再发下一条。
+- **点动命令必须显式停车**：`moveForward()` 等只做 `runMotors(方向, t)` + `delay(t)`，**自身不停车**；`handleCommand()` 的 `go-*`/`tj-*` 分支末尾必须 `stopMove(0)`。**不要**依赖 `handleGamepad()` 无手柄时每轮 `stopMove(10)` 的副作用（`ps2_ready=false` 时它已直接返回，见踩坑 6），否则 AI 动作执行完电机停不下来（踩坑 5）。
+- **loop 周期**：未接 PS2 手柄时为亚毫秒级；接手柄时每轮有 `read_gamepad()` + `delay(30)`（约 35ms）。web 遥控驾驶分支（`web_drive_`）每轮 `drivePulse()` 的短脉冲为 `WEB_DRIVE_PULSE_MS`（30ms）。
 
 ## ⚠️ 踩坑记录
 
@@ -742,7 +746,7 @@ Select-String FATFS_API_ENCODING sdkconfig
 **修复**（ESP32 端三重机制，均在板级文件 `compact_wifi_board_s3cam_airobot.cc`）：
 1. **工具描述**明确“调用本工具一次即完成整个动作并自动停止，不要重复调用”——治本，实测 AI 不再重复（前进/后退/走 20 步/特技编排均只调用一次，组合动作正常）；
 2. `SendUartMessage` 返回**描述性文本**（`指令已发送: xxx` / `指令发送失败: xxx`）而非裸 `true/false`——AI 能确认执行结果；
-3. **指令防抖**：相同指令 1 秒内只发送一次（防抖命中返回“指令已发送(防抖): xxx”视为成功），AI 不听话也挡得住；不同指令（组合编排）不受影响。
+3. **指令防抖**：相同指令在窗口内只发送一次（防抖命中返回“指令已发送(防抖): xxx”视为成功），AI 不听话也挡得住；不同指令（组合编排）不受影响。**窗口按命令类型区分**：动作类（`go-*`/`tj-*`）3 秒（特技最长约 7.5 秒，窗口须大于服务端重试间隔），状态类（`servo-*`/`speed-*`）1 秒。**命中时刷新时间戳（续期）**——否则每 2 次调用就会放行 1 次，详见踩坑 5。
 **排查方法备忘**：在 `McpServer::ReplyResult` 临时加一行日志打印 payload，可确认设备端每次调用都发出结果；比较重复调用 id 递增（服务器独立请求）还是相同（重发）；对比不同工具（uno 重复 vs music 正常）即可定位是设备端还是服务器端。
 
 ### 3. Web 控制与 AI 控制互斥（AI 指令 & 头部舵机失效，已修复）
@@ -754,9 +758,58 @@ Select-String FATFS_API_ENCODING sdkconfig
 ### 4. `/uno` HTTP 接口慢（~1s，已修复）
 
 **现象**：web 摇杆按下后 `/uno` GET 每次约 1s、POST 几百 ms~1s；“网页多控制时延迟特别高”。
-**根因**：ESP32 侧 `InitializeEchoUart()` 里 `uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE*2, 0, ...)` 的 **`tx_buffer_size=0`**（仅 128B 硬件 FIFO）。web 摇杆 8Hz 心跳（`@drive-*`，走 `SendUartMessage(..., false)`，绕过防抖）+ AI 指令同时涌入时，`uart_write_bytes` 会因 TX FIFO 填满而**阻塞**。而 `/uno` 的 `HandleUnoGet`/`HandleUnoPost` 都运行在 **httpd 单任务** 里，一旦被阻塞，后续所有 `/uno` 请求（含 GET）**串行排队**，表现为每次调用 1s、多控制时延迟叠加。
+**根因**：ESP32 侧 `InitializeEchoUart()` 里 `uart_driver_install(ECHO_UART_PORT_NUM, BUF_SIZE*2, 0, ...)` 的 **`tx_buffer_size=0`**（仅 128B 硬件 FIFO）。web 摇杆约 4Hz（250ms）心跳（`@drive-*`，走 `SendUartMessage(..., false)`，绕过防抖）+ AI 指令同时涌入时，`uart_write_bytes` 会因 TX FIFO 填满而**阻塞**。而 `/uno` 的 `HandleUnoGet`/`HandleUnoPost` 都运行在 **httpd 单任务** 里，一旦被阻塞，后续所有 `/uno` 请求（含 GET）**串行排队**，表现为每次调用 1s、多控制时延迟叠加。
 **修复**：`uart_driver_install` 的 TX buffer 从 `0` 改为 `BUF_SIZE`（1024，软件环形缓冲），避免短时高频写阻塞 httpd。
-**备注**：该修复是降低阻塞概率；若 web 心跳频率仍过高（120ms），可考虑前端加大心跳间隔或在 ESP32 侧改为非阻塞/带超时写，需实测确认。
+**备注**：该修复是降低阻塞概率；若 web 心跳频率仍过高，可考虑前端加大心跳间隔或在 ESP32 侧改为非阻塞/带超时写，需实测确认。
+
+### 5. AI 重复调用时“一直摇头 / 一直前进停不下来”（已修复）
+
+**现象**：说一次“摇头”，机器人**一直摇**；说一次“前进”，AI 反复发 `@go-forward-*`，动作间隙电机也不停。
+
+**根因（两个独立缺陷叠加）**：
+1. **防抖不续期**（ESP32）：`SendUartMessage` 的防抖命中分支直接返回，**不刷新 `s_last_us`**，于是窗口语义变成“距上次**实际发送**的时间”。AI 每 0.9 秒重复调用一次时，每 2 次调用就放行 1 次 → **约每 1.8 秒下发一条**；而 `tj-yaotou` 本身要跑 3.5 秒、`tj-sxzw` 约 7.5 秒 → 缓冲里永远有下一条 → “一直摇”。
+2. **动作执行完不刹车**（Arduino）：`moveForward()` 等只做 `runMotors(方向, t)` + `delay(t)`，**本身不停车**；旧实现靠 `loop()` 里 `handleGamepad()` 在“无手柄按键”时每轮 `stopMove(10)` 的**副作用**停车。加入 `ps2_ready` 守卫（见踩坑 6）后该副作用消失 → `@go-*` 执行完电机持续转动。
+
+**修复**：
+- ESP32：防抖命中时**刷新时间戳（续期）**——只要 AI 持续重复调用同一指令就一直拦截，停止调用超过窗口后才允许再次触发；窗口按类型区分（动作类 3 秒 / 状态类 1 秒）。中间夹了别的命令（`forward`→`left`→`forward`）不受影响。
+- Arduino：`handleCommand()` 的 `go-*` 与 `tj-*` 分支末尾**显式 `stopMove(0)`**。注意**不能**加进 `moveForward()` 等函数内部——巡线的 `moveForward(0)` 和手柄的 `moveForward(10)` 都依赖“设置方向后不刹车”。
+
+**回归防护**：`scripts/tests/test_uno_debounce.py` 用 Python 复刻防抖判定并断言 `.ino` 源码里的 `stopMove(0)`，同时固化“旧逻辑每 1.8 秒放行一条”的证据。
+
+### 6. 无 PS2 手柄时 loop 每轮被阻塞 ≈300ms（延时根因，已修复）
+
+**现象**：web 摇杆按下后要等半秒以上才动；舵机点一下“经常没反应”。
+
+**根因**：`loop()` 的 `else` 分支每轮无条件调用 `handleGamepad()`，其中 `ps2x.read_gamepad()` 在**没有手柄**时会失败重试 5 次、每次失败都 `reconfig_gamepad()` + `delay(read_delay)`，而 `read_delay` 每次失败 +1（上限 10）。实测 `read_delay=10` 时单次约 250ms，加 `delay(30)` 与 `stopMove(10)` ≈ **每轮 loop 300ms**。
+
+**为什么首帧要 600ms+**：命令到达时 loop 正阻塞在 `handleGamepad()`（最多 300ms）；该轮结束进入下一轮时 `web_drive_` 仍为 false → 又走 `else` 分支**再执行一次** `handleGamepad()`（再 300ms）→ 第三轮才进入 `web_drive_` 分支开始驱动。
+
+**修复**（Arduino）：`setup()` 记录 `ps2_ready = (config_gamepad(...) == 0)`，`handleGamepad()` 开头 `if (!ps2_ready) return;`。
+**注意**：该守卫是“一次性判定”，若手柄接触不良导致 `config_gamepad` 失败，手柄会一直不可用（旧实现每轮重试可自愈）——如需两者兼顾，可改为“失败后每 2 秒重试一次”。
+
+### 7. 待机时 web 遥控有几百毫秒延迟（WiFi 省电，已修复）
+
+**现象**：web 摇杆/舵机**所有**命令都有几百毫秒延迟；**激活小智对话后延迟明显变小**。
+
+**根因**：设备待机时 WiFi 处于**最大省电**。链路：`application.cc` 的 `OnAudioChannelClosed` → `SetPowerSaveLevel(LOW_POWER)` → `wifi_board.cc` → `WifiManager` → `wifi_station.cc` 的 `esp_wifi_set_ps(WIFI_PS_MAX_MODEM)`。该模式下 station 大部分时间睡眠，AP 只能把 WS 帧缓存到下一个 DTIM beacon 才下发（beacon interval 100ms 量级）→ **几百毫秒**。对话中走 `OnAudioChannelOpened` → `PERFORMANCE`（`WIFI_PS_NONE`），所以激活后延迟变小。
+
+**修复**：web 控制页 WS 连接期间强制性能模式。
+- `UnoWebApi` 新增 `on_client_change(count)` 回调；`http_upload_server.cc` 在 WS 会话登记/注销时通知板级，并用 `cfg.close_fn` 兜底 CLOSE 帧丢失（浏览器崩溃/网络中断）的情况。
+- 板级 `override SetPowerSaveLevel()`：`web_control_active_` 为真时强制 `PERFORMANCE`。**必须用 override**——`Application` 在状态切换（如对话结束回 Idle）时会再把级别设回 `LOW_POWER`，只有在 override 里拦截才挡得住。
+
+**代价**：web 页面打开期间 WiFi 不省电（功耗略增），关闭页面后自动恢复。对需要实时遥控的机器人是必要取舍。
+
+**验证方法**：待机状态下摇杆延迟约几百毫秒 → 唤醒小智进入对话后再摇，延迟明显变小 → 即为此根因。
+
+### 8. 舵机“拖回原角度没反应 / 回正偶发失效”（已修复）
+
+**现象**：拖滑块到 120° → 点回正 → 再拖回 120°，舵机**完全不动**；偶尔点回正没反应且无任何提示。
+
+**根因（两个前端缺陷）**：
+1. **`lastServoDeg` 不同步**：`servoHome()` / `homeStep()` 改了滑块 UI 却没有更新拖动缓存 `lastServoDeg`，于是再拖回同一角度时 `onServoInput` 的“值未变不重复发送”判断成立 → 一条命令都不发。
+2. **一次性命令静默丢失**：舵机/回正是**没有心跳重发**的一次性命令，`wsSend` 在 WS 未就绪（页面刚加载、断线重连的 1 秒窗口、切后台回来）时直接 reject，而 `servoHome()` 没有 `.catch()` → 命令静默丢弃，用户毫无感知。摇杆因为有 250ms 心跳重发，丢一条下一条补上，所以只表现为卡顿。
+
+**修复**（`web/index.html`）：`servoHome()` / `homeStep()` 同步 `lastServoDeg`；三处舵机命令补 `.catch()` 并在失败时**回滚 `lastServoDeg`**（否则失败后拖回同一角度仍会被拦）并在页面 `#wslog` 提示“发送失败，请重试”。
 
 ## 与上游合并提示
 

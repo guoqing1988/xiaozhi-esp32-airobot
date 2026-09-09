@@ -571,17 +571,51 @@ static std::string WsHandleMessage(const char* body) {
 }
 
 // WebSocket handler(官方推荐写法, 参考 IDF ws_echo_server 示例)。
+// 通知板级当前 WS 连接数(仅在数量变化时通知, 避免每个 HTTP 短连接关闭都切一次 WiFi 模式)。
+static void NotifyWsClientCount(int count) {
+    static int s_last_count = -1;
+    if (s_last_count == count) return;
+    s_last_count = count;
+    if (s_uno_api.on_client_change) s_uno_api.on_client_change(count);
+}
+
+// 从 WS 会话登记表移除 fd 并通知板级(供 CLOSE 帧与 httpd close_fn 共用)。
+static void WsUnregisterClient(int fd) {
+    int count;
+    {
+        std::lock_guard<std::mutex> lk(s_ws_mtx);
+        for (int i = 0; i < s_ws_count; ++i) {
+            if (s_ws_fds[i] == fd) { s_ws_fds[i] = s_ws_fds[--s_ws_count]; break; }
+        }
+        if (s_ws_count == 0) s_ws_hd = nullptr;
+        count = s_ws_count;
+    }
+    NotifyWsClientCount(count);   // 锁外通知, 避免回调里再取锁造成嵌套
+}
+
+// httpd 会话关闭回调: 兜底 CLOSE 帧丢失的情况(浏览器崩溃/网络中断/会话超时)。
+// 若不清理, fd 会残留在登记表里: 状态推送发向死连接, 且 web_control_active_ 永远为真
+// (WiFi 停在性能模式不再省电)。非 WS 会话的 fd 不在表中, 查找不到即空操作。
+static void OnWsSessionClosed(httpd_handle_t hd, int sockfd) {
+    (void)hd;
+    WsUnregisterClient(sockfd);
+}
+
 // httpd 会对每个到达的 WS 帧调用本 handler, 处理一帧后返回 ESP_OK; 收到 CLOSE 帧时清空会话。
 static esp_err_t HandleWs(httpd_req_t* req) {
     // 登记会话(供服务端主动推送状态): 支持多客户端, 用互斥锁保护 fd 登记表。
     int fd = httpd_req_to_sockfd(req);
+    int client_count;
     {
         std::lock_guard<std::mutex> lk(s_ws_mtx);
         if (s_ws_count == 0) s_ws_hd = req->handle;  // handle 来自同一 server, 记一次即可
         int j = 0;
         for (; j < s_ws_count; ++j) if (s_ws_fds[j] == fd) break;
         if (j == s_ws_count && s_ws_count < MAX_WS_CLIENTS) s_ws_fds[s_ws_count++] = fd;
+        client_count = s_ws_count;
     }
+    // 连接数变化通知板级(锁外调用: 回调里可能再取其它锁, 避免嵌套死锁)
+    NotifyWsClientCount(client_count);
     httpd_ws_frame_t frame = {};
     memset(&frame, 0, sizeof(frame));
     frame.type = HTTPD_WS_TYPE_TEXT;
@@ -590,13 +624,7 @@ static esp_err_t HandleWs(httpd_req_t* req) {
     if (ret != ESP_OK) return ret;
     // CLOSE 帧: 浏览器断开, 从登记表移除该 fd 并回一个 CLOSE 确认
     if (frame.type == HTTPD_WS_TYPE_CLOSE) {
-        {
-            std::lock_guard<std::mutex> lk(s_ws_mtx);
-            for (int i = 0; i < s_ws_count; ++i) {
-                if (s_ws_fds[i] == fd) { s_ws_fds[i] = s_ws_fds[--s_ws_count]; break; }
-            }
-            if (s_ws_count == 0) s_ws_hd = nullptr;
-        }
+        WsUnregisterClient(fd);
         httpd_ws_frame_t out = {};
         out.type = HTTPD_WS_TYPE_CLOSE;
         httpd_ws_send_frame(req, &out);
@@ -706,6 +734,10 @@ static void StartHttpServer() {
     cfg.stack_size = 8192;  // 上传写 SD 卡需要较大栈(FATFS)，默认 4096 会栈溢出导致重启
     cfg.task_priority = 6;  // 低于音频输入任务(prio 8)，避免上传/访问时抢占 AI 音频
     cfg.max_uri_handlers = 20;  // CORS OPTIONS 预检也占用 handler 槽位, 调大预留
+#if CONFIG_HTTPD_WS_SUPPORT
+    // WS 异常断开时清理登记表 + 恢复 WiFi 省电(见 OnWsSessionClosed 注释)
+    cfg.close_fn = OnWsSessionClosed;
+#endif
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start http server (port 80 may be busy)");

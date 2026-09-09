@@ -108,6 +108,8 @@ private:
     std::atomic<int> uno_speed_{-1};          // 最新速度(@stat 上报, -1=未上报)
     std::atomic<int> uno_servo_{-1};          // 最新舵机1角度(@stat 上报, -1=未上报)
     TaskHandle_t uno_status_task_ = nullptr;  // UART0 RX 解析任务
+    // web 控制页是否有 WS 连接: 有连接期间强制 WiFi 性能模式(见 SetPowerSaveLevel override)
+    std::atomic<bool> web_control_active_{false};
 
     // ---- 待机全屏大时钟（AI 可控: self.clock.set(开关+主题合一) / self.clock.current, NVS 持久化）----
     bool clock_mode_ = false;                // 时钟显示开关
@@ -823,15 +825,24 @@ private:
     }
 
     // 发送 UART 指令并返回描述性结果(成功/失败), 避免 AI 看到 true/false 无法确认执行结果而重复调用
-    // debounce=true 时对相同指令 1 秒防抖(挡 AI 重复调用); web 遥感驾驶走 false(心跳可重复)。
+    // debounce=true 时对相同指令窗口内防抖(挡 AI 重复调用); web 遥感驾驶走 false(心跳可重复)。
     static std::string SendUartMessage(const char* command_str, bool debounce = true) {
         // 指令防抖：AI 无执行确认机制时可能反复调用相同工具(实测会重复调用几十次,
-        // 间隔约 700-900ms)。相同指令 1 秒内只发送一次，避免 Arduino 串口堆积重复指令。
+        // 间隔约 700-900ms)。相同指令在窗口内只发送一次，避免 Arduino 串口堆积重复指令。
         // 不同指令(动作切换/组合编排)不受影响，照常发送。
+        // 窗口按命令类型区分: 动作类(go-*/tj-*)执行耗时长(特技最长约 7.5 秒), 窗口须大于
+        // 服务端重试间隔; 状态类(servo-*/speed-*)瞬时生效, 1 秒足够。
         static char s_last_cmd[32] = {};
         static int64_t s_last_us = 0;
         int64_t now = esp_timer_get_time();
-        if (debounce && strcmp(s_last_cmd, command_str) == 0 && (now - s_last_us) < 1000000) {
+        const bool is_action = (strncmp(command_str, "go-", 3) == 0 ||
+                                strncmp(command_str, "tj-", 3) == 0);
+        const int64_t window_us = is_action ? 3000000 : 1000000;
+        if (debounce && strcmp(s_last_cmd, command_str) == 0 && (now - s_last_us) < window_us) {
+            // 命中时刷新时间戳(续期): 只要 AI 持续重复调用同一指令就一直拦截。
+            // 旧实现命中时不刷新, 窗口变成"距上次实际发送的时间", 导致每 2 次调用放行 1 次
+            // (实测每 1.8 秒下发一条), 特技/动作被反复触发(表现为"一直摇头/一直前进停不下来")。
+            s_last_us = now;
             return std::string("指令已发送(防抖): ") + command_str;  // 防抖丢弃, 视为成功
         }
         if (debounce) {
@@ -1030,6 +1041,14 @@ private:
             .get_status = [this]() { return UnoStatusJson(); },
             .set_servo_home = [this](int value) { return SetServoHome(value); },
             .get_servo_home = [this]() { return GetServoHome(); },
+            .on_client_change = [this](int count) {
+                // web 控制页 WS 连接数变化: 遥控期间保持 WiFi 性能模式。
+                // 待机态是 WIFI_PS_MAX_MODEM, WS 帧要等 DTIM beacon 才下发, 实测有几百毫秒延迟。
+                web_control_active_ = (count > 0);
+                // 连接建立后立即提升; 断开后主动降回省电(否则会一直停在性能模式)
+                SetPowerSaveLevel(web_control_active_ ? PowerSaveLevel::PERFORMANCE
+                                                      : PowerSaveLevel::LOW_POWER);
+            },
         });
         ApplyServoHome();   // 开机把 NVS 保存的回正角度下发给下位机
     }
@@ -1125,6 +1144,14 @@ public:
 
     virtual Display* GetDisplay() override {
         return display_;
+    }
+
+    // web 控制页连接期间强制 WiFi 性能模式, 避免待机态省电(MAX_MODEM)让 WS 帧等 DTIM beacon。
+    // 用 override 而不是在回调里直接调, 是因为 Application 在状态切换(如对话结束回 Idle)时
+    // 会再把级别设回 LOW_POWER, 只有 override 才挡得住。
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        if (web_control_active_) level = PowerSaveLevel::PERFORMANCE;
+        WifiBoard::SetPowerSaveLevel(level);
     }
 
     virtual Backlight* GetBacklight() override {

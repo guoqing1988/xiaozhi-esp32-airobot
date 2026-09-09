@@ -845,9 +845,18 @@
     function servoHome() {
       let v = +document.getElementById('servoHomeVal').value;
       if (isNaN(v)) v = 82; if (v < 0) v = 0; if (v > 180) v = 180;
-      wsSend({ action: 'uno_servo_home' });
+      // 失败必须提示: 回正是没有心跳重发的一次性命令, WS 未就绪时静默丢弃
+      // 会表现为"点了回正没反应"(摇杆心跳会自动补发, 所以只有舵机类命令会丢)
+      wsSend({ action: 'uno_servo_home' }).catch(function () {
+        // 发送失败时回滚拖动缓存: 否则滑块虽显示回正值, 舵机实际未回正,
+        // 用户再拖到同一角度会被"值未变"拦掉(看起来舵机失灵)
+        lastServoDeg = null;
+        logWs('回正发送失败，请重试');
+      });
       const r = document.getElementById('servoRange'), l = document.getElementById('servoLabel');
       if (r) r.value = v; if (l) l.textContent = v + '°';
+      // 同步拖动缓存: 否则回正后再拖回原角度会被 onServoInput 的"值未变"判断拦掉, 舵机不动
+      lastServoDeg = v;
     }
     // 回正值 − / + 调整: 实时生效(写入设备 NVS + 下发给下位机并回正), 无需保存按钮
     function homeStep(delta) {
@@ -860,8 +869,12 @@
         .then(j => {
           const r = document.getElementById('servoRange'), l = document.getElementById('servoLabel');
           if (r) r.value = v; if (l) l.textContent = v + '°';
+          lastServoDeg = v;   // 同 servoHome: 保持拖动缓存与 UI 一致
         })
-        .catch(() => { });
+        .catch(function () {
+          lastServoDeg = null;   // 失败时回滚, 避免拖回同一角度被"值未变"拦掉
+          logWs('回正值设置失败，请重试');
+        });
     }
     // 读取已保存的回正值(切换到控制页时)
     function loadServoHome() {
@@ -879,7 +892,11 @@
         servoTimer = null;
         if (v === lastServoDeg) return;   // 值未变不重复发送(减少请求)
         lastServoDeg = v;
-        wsSend({ action: 'uno_servo', degree: v });
+        wsSend({ action: 'uno_servo', degree: v }).catch(function () {
+          // 发送失败(如 WS 重连中)时回滚缓存, 否则拖回同一角度会被"值未变"拦掉
+          if (lastServoDeg === v) lastServoDeg = null;
+          logWs('舵机命令发送失败，请重试');
+        });
       }, 100);   // 节流: 拖动时 ~100ms 合并一次, 避免高频刷串口
     }
     function startUnoPolling() {
