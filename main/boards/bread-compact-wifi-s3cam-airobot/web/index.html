@@ -802,29 +802,29 @@
     document.addEventListener('visibilitychange', function () { if (document.hidden) unoStop(); });
     window.addEventListener('pagehide', function () { unoStop(); });
     // 原地旋转按钮: 按住持续转(心跳维持), 松手/取消即停; 复用摇杆方向指令 left/right。
-    // 旋转用较慢的固定速度(140), 避免 4 轮同向高速打滑/转过头; 摇杆平移才用 70-255 可变速度。
+    // 旋转用较慢的固定速度(TURN_SPEED), 避免 4 轮同向高速打滑/转过头; 摇杆平移才用 70-255 可变速度。
+    // 点一下的转弯幅度 ≈ 角速度(TURN_SPEED) × 时长(TURN_MIN_PRESS_MS), 嫌转太多就调小这两个。
     function bindTurnBtn(id, dir) {
       var b = document.getElementById(id);
       if (!b) return;
       var pressStart = 0, stopTimer = null, active = false;
-      // 点击(快速按下松开)时也至少让机器人动这么久, 否则 drive-stop 紧跟 drive 命令,
-      // 一个 30ms 脉冲都跑不完 -> 表现为"必须按住才动"。按住则松手即停。
-      var MIN_PRESS_MS = 400;
+      // 点击(快速按下松开)时也至少让机器人动 TURN_MIN_PRESS_MS: 否则 drive-stop 紧跟 drive
+      // 命令, 连续转动还没起步就刹车 -> 表现为"必须按住才动"。按住则松手即停。
       var start = function (e) {
         e.preventDefault();
         if (b.setPointerCapture && e.pointerId != null) b.setPointerCapture(e.pointerId);
         if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
         active = true;
         pressStart = Date.now();
-        unoSetDrive(dir, 140);
+        unoSetDrive(dir, TURN_SPEED);
       };
       var stop = function () {
         if (!active) return;   // pointerup 后 lostpointercapture 会再触发一次, 这里防重入
         active = false;
         if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
         var held = Date.now() - pressStart;
-        if (held < MIN_PRESS_MS) {
-          stopTimer = setTimeout(function () { stopTimer = null; unoStop(); }, MIN_PRESS_MS - held);
+        if (held < TURN_MIN_PRESS_MS) {
+          stopTimer = setTimeout(function () { stopTimer = null; unoStop(); }, TURN_MIN_PRESS_MS - held);
         } else {
           unoStop();
         }
