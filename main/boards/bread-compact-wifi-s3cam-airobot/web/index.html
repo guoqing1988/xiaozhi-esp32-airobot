@@ -119,6 +119,44 @@
       color: #d97706
     }
 
+    /* 上传文件列表: 每首一行(文件名 / 探测参数 / 处理方式 / 手动覆盖) */
+    .fitem {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 12.5px;
+      padding: 6px 8px;
+      border: 1px solid #eef1f6;
+      border-radius: 8px;
+      margin-bottom: 6px
+    }
+
+    .fname {
+      flex: 1 1 auto;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap
+    }
+
+    .finfo {
+      color: #8a93a3;
+      white-space: nowrap
+    }
+
+    .fmark {
+      color: #16a34a;
+      white-space: nowrap
+    }
+
+    .fmark.work {
+      color: #d97706
+    }
+
+    .fitem select {
+      padding: 4px 6px;
+      font-size: 12.5px
+    }
+
     .row {
       display: flex;
       gap: 8px;
@@ -423,12 +461,14 @@
           <h3>🎵 上传歌曲到 TF 卡</h3>
           <button class="modal-close" onclick="closeUpload()" title="关闭">×</button>
         </div>
-        <div class="hint">建议先用转码脚本处理（24000Hz 单声道低码率 MP3，歌词转 UTF-8）：<br>
-          <code>python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp32s3.py 源目录 输出目录</code>
+        <div class="hint">选好文件会自动检测参数：<b>单声道 + ≤24kHz + ≤128kbps</b> 的歌直接上传，
+          其余自动转码为 24000Hz 单声道 96kbps（避免设备端解码卡顿、唤醒失灵）；歌词自动转为 UTF-8。<br>
+          转码组件按需从 CDN 加载（首次需联网，之后走浏览器缓存；无网时仍可上传本来合格的文件）。
         </div>
         <div class="row">
-          <input type="file" id="f" accept=".mp3,.lrc" multiple>
+          <input type="file" id="f" accept=".mp3,.lrc" multiple onchange="onFilesPicked()">
         </div>
+        <div id="flist"></div>
         <div class="row">
           <button class="btn" onclick="up()">上传</button>
           <label class="check"><input type="checkbox" id="ov" checked> 同名文件覆盖</label>
@@ -563,30 +603,345 @@
       const m = document.getElementById('uploadModal');
       if (m) m.addEventListener('click', function (e) { if (e.target === this) closeUpload(); });
     })();
-    // ===== 上传 =====
-    function up() {
+    // ===== MP3 参数探测 BEGIN(host 测试按此标记提取, 改动时请保留标记) =====
+    // 纯前端探测: 只读文件头部十几 KB, 毫秒级返回, 不解码也不联网。
+    //
+    // 为什么不用 WebAudio 读参数: decodeAudioData() 会把音频统一重采样到
+    // AudioContext.sampleRate, 返回的 AudioBuffer.sampleRate 是"上下文的采样率",
+    // 不是文件原始采样率(用 new AudioContext({sampleRate:24000}) 更是把它抹掉)。
+    // 因此判断"这首本来就是 24kHz 单声道吗"只能直接解析 MPEG 帧头。
+    const MP3_PROBE_BYTES = 16384;          // 只读文件前 16KB(足够跳过 ID3 并找到帧头)
+    const TRANSCODE_RATE = 24000;           // 转码目标: 与设备 codec 输出采样率一致
+    const TRANSCODE_KBPS = 96;              // 转码目标码率
+    const SKIP_MAX_RATE = 24000;            // 可跳过转码的最高采样率
+    const SKIP_MAX_KBPS = 128;              // 可跳过转码的最高码率
+
+    const MP3_RATES = { 1: [44100, 48000, 32000], 2: [22050, 24000, 16000], 2.5: [11025, 12000, 8000] };
+    // Layer3 码率表(kbps), 末位 0 = 非法/自由格式
+    const MP3_KBPS_V1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+    const MP3_KBPS_V2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
+
+    // 解析 MP3(Layer3) 帧头。u8: 文件头部字节。返回 null = 无法识别(非 MP3/数据损坏)。
+    function mp3ProbeBytes(u8) {
+      const n = u8.length;
+      let vbr = false, tagSkipped = false;
+      for (let i = 0; i + 4 <= n; i++) {
+        if (u8[i] !== 0xFF || (u8[i + 1] & 0xE0) !== 0xE0) continue;      // 找帧同步字
+        const vBits = (u8[i + 1] >> 3) & 0x03;                           // 0=MPEG2.5 2=MPEG2 3=MPEG1
+        const lBits = (u8[i + 1] >> 1) & 0x03;                           // 1=Layer3
+        const brIdx = (u8[i + 2] >> 4) & 0x0F;
+        const srIdx = (u8[i + 2] >> 2) & 0x03;
+        const pad = (u8[i + 2] >> 1) & 0x01;
+        const mode = (u8[i + 3] >> 6) & 0x03;                            // 3=单声道
+        if (vBits === 1 || lBits !== 1 || brIdx === 0 || brIdx === 15 || srIdx === 3) continue;
+        const version = vBits === 3 ? 1 : (vBits === 2 ? 2 : 2.5);
+        const isV1 = (version === 1);
+        const sampleRate = MP3_RATES[version][srIdx];
+        const bitrateKbps = (isV1 ? MP3_KBPS_V1 : MP3_KBPS_V2)[brIdx];
+        // 帧长: MPEG1 Layer3 用 144, MPEG2/2.5 Layer3 用 72; 据此二次校验下一帧同步字,
+        // 避免把随机字节当成帧头(误判会直接导致错误的转码决策)。
+        const frameLen = Math.floor((isV1 ? 144000 : 72000) * bitrateKbps / sampleRate) + pad;
+        if (i + frameLen + 1 < n) {
+          if (u8[i + frameLen] !== 0xFF || (u8[i + frameLen + 1] & 0xE0) !== 0xE0) continue;
+        }
+        // LAME 会在音频前插一个 Xing/Info 信息帧(LAME tag), 它的**码率字段不可信**:
+        // 实测 32kbps 的文件里写成 40kbps。因此遇到信息帧就跳过, 用下一帧的真实参数。
+        // Xing = VBR, Info = CBR(仅表示"首帧是信息帧", 不代表 VBR)。
+        let hasTag = false;
+        const end = Math.min(i + frameLen, n);
+        for (let j = i + 4; j + 4 <= end; j++) {
+          const t = String.fromCharCode(u8[j], u8[j + 1], u8[j + 2], u8[j + 3]);
+          if (t === 'Xing' || t === 'Info') { if (t === 'Xing') vbr = true; hasTag = true; break; }
+          if (t === 'VBRI') { vbr = true; hasTag = true; break; }
+        }
+        if (hasTag && !tagSkipped) {
+          tagSkipped = true;
+          i += frameLen - 1;   // 跳到下一帧(for 循环还会 +1), 取真实音频帧的参数
+          continue;
+        }
+        return { sampleRate: sampleRate, channels: mode === 3 ? 1 : 2, bitrateKbps: bitrateKbps,
+                 mpegVersion: version, layer: 3, vbr: vbr, frameOffset: i, frameLength: frameLen };
+      }
+      return null;
+    }
+
+    // 该文件是否需要转码? 单声道 + <=24000Hz + <=128kbps 才跳过。
+    // 解析失败或 VBR(码率不定)一律保守转码。
+    function mp3NeedsTranscode(info) {
+      if (!info) return true;
+      if (info.vbr) return true;
+      if (info.channels !== 1) return true;
+      if (info.sampleRate > SKIP_MAX_RATE) return true;
+      if (info.bitrateKbps > SKIP_MAX_KBPS) return true;
+      return false;
+    }
+
+    // 探测一个 File/Blob。先跳过 ID3v2(封面图可能几百 KB, 必须先跳到音频起始), 再解析帧头。
+    // 只用 File.slice + arrayBuffer: 不读整个文件, 不对大文件造成内存/耗时压力。
+    async function mp3ProbeFile(file) {
+      const head = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+      let offset = 0;
+      if (head.length >= 10 && head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33) {  // 'ID3'
+        // ID3v2 长度是 4 字节 syncsafe 整数(每字节仅低 7 位有效)
+        const size = (head[6] << 21) | (head[7] << 14) | (head[8] << 7) | head[9];
+        offset = 10 + size + ((head[5] & 0x10) ? 10 : 0);   // 0x10 = footer present
+      }
+      const buf = new Uint8Array(await file.slice(offset, offset + MP3_PROBE_BYTES).arrayBuffer());
+      const info = mp3ProbeBytes(buf);
+      if (info) info.audioOffset = offset;
+      return info;
+    }
+
+    // 探测结果的展示文本, 如 "44.1kHz 立体声 320kbps" / "24kHz 单声道 96kbps"
+    function mp3InfoText(info) {
+      if (!info) return '无法识别 MP3 参数(将保守转码)';
+      const khz = (info.sampleRate / 1000).toString().replace('.0', '');
+      const ch = info.channels === 1 ? '单声道' : '立体声';
+      return khz + 'kHz ' + ch + ' ' + info.bitrateKbps + 'kbps' + (info.vbr ? ' VBR' : '');
+    }
+    // ===== MP3 参数探测 END =====
+
+    // ===== 前端转码(按需从 CDN 加载 lamejs; 设备端零改动、固件零增长) =====
+    // 浏览器没有原生 MP3 编码器(MediaRecorder 只有 webm/opus 与 aac, WebCodecs 也不含 mp3),
+    // 必须用 JS 版 LAME。jsdelivr/unpkg 带 CORS(可校验 SRI), npmmirror 国内快但无 CORS 故不带 SRI。
+    const LAMEJS_VERSION = '1.2.1';
+    const LAMEJS_SHA384 = 'sha384-xuasJXVcyv3hZq0eYpelEkBC8l4yufatZXDsKuyCU2rqfhDCb+ftuE/mSfZAteiK';
+    const LAMEJS_SOURCES = [
+      { url: 'https://cdn.jsdelivr.net/npm/lamejs@' + LAMEJS_VERSION + '/lame.min.js', sri: LAMEJS_SHA384 },
+      { url: 'https://unpkg.com/lamejs@' + LAMEJS_VERSION + '/lame.min.js', sri: LAMEJS_SHA384 },
+      { url: 'https://registry.npmmirror.com/lamejs/' + LAMEJS_VERSION + '/files/lame.min.js', sri: '' },
+    ];
+    let lamejsPromise = null;
+
+    // 按需加载 lamejs: 依次尝试各 CDN; 全部失败则抛错, 由调用方回退为直接上传原文件。
+    function loadLamejs() {
+      if (window.lamejs) return Promise.resolve(window.lamejs);
+      if (lamejsPromise) return lamejsPromise;
+      lamejsPromise = new Promise(function (resolve, reject) {
+        let idx = 0;
+        function tryNext(lastErr) {
+          if (idx >= LAMEJS_SOURCES.length) {
+            lamejsPromise = null;   // 允许下次重试
+            reject(lastErr || new Error('转码组件加载失败'));
+            return;
+          }
+          const src = LAMEJS_SOURCES[idx++];
+          const s = document.createElement('script');
+          s.src = src.url;
+          s.async = true;
+          if (src.sri) { s.integrity = src.sri; s.crossOrigin = 'anonymous'; }
+          s.onload = function () {
+            if (window.lamejs) { resolve(window.lamejs); } else { tryNext(new Error('已加载但未暴露 lamejs')); }
+          };
+          s.onerror = function () { tryNext(new Error('无法加载 ' + src.url)); };
+          document.head.appendChild(s);
+        }
+        tryNext(null);
+      });
+      return lamejsPromise;
+    }
+
+    // 解码 + 下混 + 重采样到 24000Hz 单声道。优先让 AudioContext 一步完成(浏览器会在解码时
+    // 直接重采样)；若浏览器忽略自定义采样率, 再用 OfflineAudioContext 重采样。
+    async function decodeToMono24k(file) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      let ctx = null, audio = null;
+      try {
+        ctx = new AC({ sampleRate: TRANSCODE_RATE });
+        audio = await ctx.decodeAudioData(await file.arrayBuffer());
+      } finally {
+        if (ctx) { try { await ctx.close(); } catch (e) { /* 忽略 */ } }
+      }
+      if (audio.sampleRate !== TRANSCODE_RATE || audio.numberOfChannels !== 1) {
+        const frames = Math.ceil(audio.duration * TRANSCODE_RATE);
+        const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;   // 兼容老 Safari
+        const off = new OAC(1, frames, TRANSCODE_RATE);
+        const src = off.createBufferSource();
+        src.buffer = audio;
+        src.connect(off.destination);
+        src.start();
+        audio = await off.startRendering();   // 单声道 + 24000Hz
+      }
+      return audio.getChannelData(0);
+    }
+
+    // 转码一个文件为 24000Hz 单声道 96kbps MP3(解码 + 重采样 + 编码)。
+    async function transcodeMp3(file, onProgress) {
+      const lamejs = await loadLamejs();
+      const pcm = await decodeToMono24k(file);
+      return encodePcmToMp3(lamejs, pcm, onProgress);
+    }
+
+    // ===== PCM 编码 BEGIN(host 测试按此标记提取; 纯函数, 不依赖 DOM/WebAudio) =====
+    // Float32 PCM(单声道 24000Hz) -> 96kbps MP3 Blob。
+    // 分块编码: 每块 64 帧(约 3 秒音频), 每 4 块让出一次事件循环, 保证进度条能刷新。
+    async function encodePcmToMp3(lamejs, pcm, onProgress) {
+      const samples = new Int16Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) {
+        const v = Math.max(-1, Math.min(1, pcm[i]));   // 限幅, 防溢出嘶声
+        samples[i] = v < 0 ? v * 0x8000 : v * 0x7FFF;
+      }
+      const enc = new lamejs.Mp3Encoder(1, TRANSCODE_RATE, TRANSCODE_KBPS);
+      const CHUNK = 1152 * 64;
+      const parts = [];
+      for (let off = 0; off < samples.length; off += CHUNK) {
+        const buf = enc.encodeBuffer(samples.subarray(off, Math.min(off + CHUNK, samples.length)));
+        if (buf.length > 0) parts.push(buf);
+        if (onProgress) onProgress(Math.min(1, (off + CHUNK) / samples.length));
+        if ((off / CHUNK) % 4 === 3) await new Promise(function (r) { setTimeout(r, 0); });
+      }
+      const tail = enc.flush();
+      if (tail.length > 0) parts.push(tail);
+      return new Blob(parts, { type: 'audio/mpeg' });
+    }
+    // ===== PCM 编码 END =====
+
+    // ===== 歌词转码 BEGIN(host 测试按此标记提取; 不依赖 DOM) =====
+    // 歌词转 UTF-8: 先按严格 UTF-8 解, 失败再按 GBK(设备端没有 GBK 转换能力, 必须在这里转好)。
+    // 注: 国内下载的 .lrc 大量是 GBK, 而 TextDecoder('gbk') 浏览器与 node 均原生支持。
+    async function lrcToUtf8(file) {
+      const raw = await file.arrayBuffer();
+      let text;
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(raw); }
+      catch (e) { text = new TextDecoder('gbk').decode(raw); }
+      return new Blob([text], { type: 'text/plain; charset=utf-8' });
+    }
+    // ===== 歌词转码 END =====
+
+    // ===== 上传列表(探测结果 + 逐首处理方式) =====
+    let uploadItems = [];     // [{file, kind:'mp3'|'lrc', info, mode:'auto'|'transcode'|'skip'}]
+    let uploading = false;
+
+    function escHtml(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
+    // 最终是否转码: 手动选择优先, auto 时按探测结果(解析失败/VBR 保守转码)。
+    function willTranscode(it) {
+      if (it.kind !== 'mp3') return false;
+      if (it.mode === 'transcode') return true;
+      if (it.mode === 'skip') return false;
+      return mp3NeedsTranscode(it.info);
+    }
+
+    function setFileMode(idx, mode) { if (uploadItems[idx]) { uploadItems[idx].mode = mode; renderFileList(); } }
+
+    function renderFileList() {
+      const el = document.getElementById('flist');
+      if (!el) return;
+      if (!uploadItems.length) { el.innerHTML = ''; return; }
+      let html = '';
+      uploadItems.forEach(function (it, idx) {
+        const will = willTranscode(it);
+        const mark = it.kind === 'lrc' ? '歌词 → 转 UTF-8'
+          : (will ? '将转码 → 24kHz 单声道 96kbps' : '无需转码，直接上传');
+        html += '<div class="fitem">'
+              + '<span class="fname">' + escHtml(it.file.name) + '</span>'
+              + '<span class="finfo">' + escHtml(it.kind === 'lrc' ? '' : mp3InfoText(it.info)) + '</span>'
+              + '<span class="fmark' + (will ? ' work' : '') + '">' + mark + '</span>';
+        if (it.kind === 'mp3') {
+          html += '<select onchange="setFileMode(' + idx + ', this.value)">'
+                + '<option value="auto"' + (it.mode === 'auto' ? ' selected' : '') + '>自动</option>'
+                + '<option value="transcode"' + (it.mode === 'transcode' ? ' selected' : '') + '>强制转码</option>'
+                + '<option value="skip"' + (it.mode === 'skip' ? ' selected' : '') + '>不转码</option>'
+                + '</select>';
+        }
+        html += '</div>';
+      });
+      el.innerHTML = html;
+    }
+
+    // 选完文件立刻探测(只读文件头, 毫秒级; 不解码、不联网)
+    async function onFilesPicked() {
       const files = document.getElementById('f').files;
       const log = document.getElementById('log');
-      const bar = document.getElementById('bar');
-      if (!files.length) { log.innerHTML = '<div>请先选择文件</div>'; return; }
-      let i = 0;
-      function next() {
-        if (i >= files.length) { log.innerHTML += '<div><b>全部完成</b></div>'; bar.style.width = '0%'; bar.textContent = '0%'; loadSongs(); return; }
-        const f = files[i++];
-        log.innerHTML += '<div>⏳ 上传 ' + f.name + ' (' + (f.size / 1024 / 1024).toFixed(1) + 'MB) ...</div>';
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/upload?name=' + encodeURIComponent(f.name) + '&overwrite=' + (document.getElementById('ov').checked ? 1 : 0));
-        xhr.upload.onprogress = function (e) { if (e.lengthComputable) { const p = Math.round(e.loaded / e.total * 100); bar.style.width = p + '%'; bar.textContent = p + '%'; } };
-        xhr.onload = function () {
-          if (xhr.status >= 200 && xhr.status < 300) { log.innerHTML += '<div>✅ 成功 ' + f.name + '</div>'; }
-          else if (xhr.status === 403) { log.innerHTML += '<div>⚠️ 同名已存在，跳过 ' + f.name + '</div>'; }
-          else { log.innerHTML += '<div>❌ 失败(' + xhr.status + ') ' + f.name + ' ' + xhr.responseText + '</div>'; }
-          next();
-        };
-        xhr.onerror = function () { log.innerHTML += '<div>❌ 网络错误 ' + f.name + '</div>'; next(); };
-        xhr.send(f);
+      uploadItems = [];
+      renderFileList();
+      if (!files.length) return;
+      log.innerHTML = '<div>⏳ 正在检测文件参数 ...</div>';
+      for (const f of files) {
+        const isLrc = /\.lrc$/i.test(f.name);
+        if (!isLrc && !/\.mp3$/i.test(f.name)) {
+          log.innerHTML += '<div>⚠️ 跳过不支持的文件：' + escHtml(f.name) + '</div>';
+          continue;
+        }
+        let info = null;
+        if (!isLrc) { try { info = await mp3ProbeFile(f); } catch (e) { info = null; } }
+        uploadItems.push({ file: f, kind: isLrc ? 'lrc' : 'mp3', info: info, mode: 'auto' });
       }
-      next();
+      log.innerHTML = '<div>已选 ' + uploadItems.length + ' 个文件，确认处理方式后点「上传」</div>';
+      renderFileList();
+    }
+
+    // 上传一个 Blob/File 到设备端 /upload
+    function uploadOne(name, blob) {
+      const bar = document.getElementById('bar');
+      return new Promise(function (resolve, reject) {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/upload?name=' + encodeURIComponent(name) +
+                        '&overwrite=' + (document.getElementById('ov').checked ? 1 : 0));
+        xhr.upload.onprogress = function (e) {
+          if (e.lengthComputable) { const p = Math.round(e.loaded / e.total * 100); bar.style.width = p + '%'; bar.textContent = p + '%'; }
+        };
+        xhr.onload = function () { resolve({ status: xhr.status, text: xhr.responseText }); };
+        xhr.onerror = function () { reject(new Error('网络错误')); };
+        xhr.send(blob);
+      });
+    }
+
+    // ===== 上传 =====
+    async function up() {
+      const log = document.getElementById('log');
+      const bar = document.getElementById('bar');
+      if (uploading) return;
+      if (!uploadItems.length) { log.innerHTML = '<div>请先选择文件</div>'; return; }
+      uploading = true;
+      let ok = 0, fail = 0;
+      try {
+        for (const it of uploadItems) {
+          const name = it.file.name;
+          let blob = it.file, note = '';
+          try {
+            if (it.kind === 'lrc') {
+              blob = await lrcToUtf8(it.file);
+              note = '（歌词转 UTF-8）';
+            } else if (willTranscode(it)) {
+              log.innerHTML += '<div>⏳ 转码 ' + escHtml(name) + ' ...</div>';
+              blob = await transcodeMp3(it.file, function (p) {
+                bar.style.width = Math.round(p * 100) + '%';
+                bar.textContent = '转码 ' + Math.round(p * 100) + '%';
+              });
+              note = '（已转码 24kHz 单声道 96kbps）';
+            } else {
+              note = '（无需转码）';
+            }
+          } catch (e) {
+            // 转码组件加载失败(通常是无网络)时回退为直接上传原文件, 不阻断整个流程
+            log.innerHTML += '<div>⚠️ 转码失败（' + escHtml(e && e.message ? e.message : e) +
+                             '），改为直接上传原文件（设备端可能卡顿）</div>';
+            blob = it.file;
+            note = '（未转码）';
+          }
+          log.innerHTML += '<div>⏳ 上传 ' + escHtml(name) + ' ' + note + ' ...</div>';
+          try {
+            const r = await uploadOne(name, blob);
+            if (r.status >= 200 && r.status < 300) { log.innerHTML += '<div>✅ 成功 ' + escHtml(name) + '</div>'; ok++; }
+            else if (r.status === 403) { log.innerHTML += '<div>⚠️ 同名已存在，跳过 ' + escHtml(name) + '</div>'; ok++; }
+            else { log.innerHTML += '<div>❌ 失败(' + r.status + ') ' + escHtml(name) + ' ' + escHtml(r.text || '') + '</div>'; fail++; }
+          } catch (e) {
+            log.innerHTML += '<div>❌ 网络错误 ' + escHtml(name) + '</div>';
+            fail++;
+          }
+          bar.style.width = '0%'; bar.textContent = '0%';
+        }
+        log.innerHTML += '<div><b>全部完成</b>：成功 ' + ok + '，失败 ' + fail + '</div>';
+        loadSongs();
+      } finally {
+        uploading = false;
+        bar.style.width = '0%'; bar.textContent = '0%';
+      }
     }
     // ===== 歌曲管理 =====
     function fmtSize(b) {
