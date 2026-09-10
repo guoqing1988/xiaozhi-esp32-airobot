@@ -22,7 +22,7 @@
 //       action 同 go-* : forward back left right leftmove rightmove leftup rightup leftdown rightdown
 //       web 驾驶为遥感轮询(类似手柄): 上位机按住期间周期性重发心跳, 无心跳超时自动停
 //
-// 【双向回执】(Arduino -> ESP32, 供 self.uno.get_status 查询)
+// 【双向回执】(Arduino -> ESP32, 供 ESP32 侧状态接口(web /uno) 查询)
 //   @busy {动作} / @done {动作}   耗时动作开始/完成(go-*, tj-*, line-follow)
 //   @stat s{速度} v{舵机1角度}    速度/舵机变化时上报最新快照(事件驱动, 非常驻周期)
 //
@@ -363,7 +363,7 @@ void setServo1(int angle) {
 }
 
 // 状态上报: 速度/舵机1角度变化时上报最新快照(事件驱动, 不做周期轮询)。
-// ESP32 侧维护最新一帧, self.uno.get_status 直接返回, 无需下位机实时应答。
+// ESP32 侧维护最新一帧, 状态接口直接返回, 无需下位机实时应答。
 // 后续扩充: 在此追加字段即可(如 ToF 距离: " d{cm}"), 解析端按可选字段处理。
 void reportStat() {
     Serial.print("@stat s");

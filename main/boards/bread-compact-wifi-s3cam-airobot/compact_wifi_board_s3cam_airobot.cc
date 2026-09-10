@@ -760,7 +760,7 @@ private:
         // 内部上拉稳定电平; 接 Arduino 时上拉不影响正常通信
         gpio_set_pull_mode(UART_ECHO_RXD, GPIO_PULLUP_ONLY);
         SendUartMessage("w2");
-        // 启动 UART0 RX 解析任务, 读取 Arduino 回执(@busy/@done), 供 self.uno.get_status 查询
+        // 启动 UART0 RX 解析任务, 读取 Arduino 回执(@busy/@done), 供 web /uno 接口查询下位机状态
         xTaskCreate(UnoStatusTask, "uno_status", 4096, this, 3, &uno_status_task_);
     }
 
@@ -896,7 +896,7 @@ private:
         ESP_LOGI(TAG, "Servo home applied: %d", v);
     }
 
-    // 汇总下位机状态为 JSON(mode/action/speed/servo), 供 self.uno.get_status 与 web /uno 接口复用。
+    // 汇总下位机状态为 JSON(mode/action/speed/servo), 供 web /uno 接口读取下位机状态。
     std::string UnoStatusJson() {
         std::string mode, action;
         {
@@ -1007,17 +1007,6 @@ private:
                 char cmd[16];
                 snprintf(cmd, sizeof(cmd), "speed-%d", speed);
                 return SendUartMessage(cmd);
-            });
-
-        mcp_server.AddTool(
-            "self.uno.get_status",
-            "获取 Arduino 下位机(麦克纳姆轮机器人)的状态。返回 JSON: mode(idle=空闲/moving=正在执行动作/"
-            "line_follow=巡线中), action(当前或最近动作名), speed(电机速度, null=下位机未上报), "
-            "servo(头部舵机角度, null=下位机未上报)。仅当用户询问状态/速度/舵机/在干什么时使用；"
-            "发送控制指令后动作会自动完成并停止, 无需查询状态确认。",
-            PropertyList(),
-            [this](const PropertyList&) -> ReturnValue {
-                return UnoStatusJson();
             });
 
         mcp_server.AddTool(

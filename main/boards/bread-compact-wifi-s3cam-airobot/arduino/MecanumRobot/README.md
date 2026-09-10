@@ -117,7 +117,7 @@ arduino-cli upload -v -p COM5 --fqbn arduino:avr:uno main/boards/bread-compact-w
 | `@drive-{action}-{speed}` | web 摇杆驾驶模式（非阻塞连续控制，需上位机周期心跳保活，1500ms 无心跳自动停）|
 | `@drive-stop` | 退出 web 驾驶模式并停止 |
 
-**双向回执（Arduino → ESP32）**：耗时动作（`go-*` / `tj-*` / 巡线）开始执行时回传 `@busy`，执行完毕回传 `@done`；ESP32 的 UART0 RX 解析任务维护状态，AI 可通过 `self.uno.get_status` 查询。
+**双向回执（Arduino → ESP32）**：耗时动作（`go-*` / `tj-*` / 巡线）开始执行时回传 `@busy`，执行完毕回传 `@done`；ESP32 的 UART0 RX 解析任务维护状态，供 web 页面 `/uno` 接口读取（不暴露给 AI，避免每次动作后多一轮云端工具调用）。
 
 > 巡线功能参数（基础速度 / 转向强度 / 丢线判定等）与传感器接线详见板级 README「巡线（4 路循迹传感器）」一节。
 
