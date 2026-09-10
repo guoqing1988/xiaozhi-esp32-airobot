@@ -700,12 +700,22 @@
         .catch(() => { document.getElementById('alarmlog').innerHTML = '<div>❌ 添加失败（接口不可用）</div>'; });
     }
     function delAlarm(id) {
-      wsSend({ action: 'alarm_remove', id: id })
-        .then(() => loadAlarms())
+      // 注意: 业务字段不能叫 id —— wsSend 会用“请求序号”覆盖顶层 id(见 wsSend 实现),
+      // 否则服务端收到的是请求序号而不是闹钟编号, 表现为删除无效(或误删其它闹钟)。
+      wsSend({ action: 'alarm_remove', alarm_id: id })
+        .then(j => {
+          if (j && j.ok) { loadAlarms(); return; }   // 成功: 列表刷新即为反馈
+          // 失败: 不刷新列表, 保留错误提示(loadAlarms 成功时会清空 alarmlog)
+          document.getElementById('alarmlog').innerHTML =
+            '<div>❌ 删除失败：未找到编号 ' + id + ' 的闹钟</div>';
+        })
         .catch(() => { document.getElementById('alarmlog').innerHTML = '<div>❌ 删除失败（接口不可用）</div>'; });
     }
     // ===== 机器人控制(遥感摇杆) =====
-    const JOY_R = 72, JOY_DEAD = 0.14;
+    // 手感参数集中在此处便于微调(改完需重新编译固件 + 浏览器强刷 Ctrl+F5)
+    const JOY_R = 72, JOY_DEAD = 0.14;         // 摇杆半径(px) / 回中死区
+    const TURN_SPEED = 110;                    // 「左转/右转」按钮的固定转速(PWM 70-255)
+    const TURN_MIN_PRESS_MS = 250;             // 「左转/右转」点一下的最短转动时长(ms)
     const JOY_SECTORS = ['forward', 'rightup', 'rightmove', 'rightdown', 'back', 'leftdown', 'leftmove', 'leftup'];
     const JOY_NAMES = { forward: '前进', back: '后退', left: '左转', right: '右转', leftmove: '左移', rightmove: '右移', leftup: '左前', rightup: '右前', leftdown: '左后', rightdown: '右后' };
     let unoInterval = null, unoPollTimer = null, unoCurDir = '', unoCurSpeed = 0;

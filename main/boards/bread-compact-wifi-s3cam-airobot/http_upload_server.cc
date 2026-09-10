@@ -537,8 +537,14 @@ static std::string WsHandleMessage(const char* body) {
         const char* sg = (c_song && c_song->valuestring) ? c_song->valuestring : "";
         if (s_alarm_api.add_alarm) resp = std::string("{\"id\":") + std::to_string(s_alarm_api.add_alarm(ty, val, lb, sg)) + "}";
     } else if (strcmp(action, "alarm_remove") == 0) {
-        cJSON* c_id = cJSON_GetObjectItem(root, "id");
-        int id = c_id ? c_id->valueint : -1;
+        // 闹钟编号必须走 alarm_id: 前端 wsSend 会用"请求序号"覆盖顶层 id 字段(见 web/index.html),
+        // 因此用 id 取到的是请求序号而非闹钟编号, 会删不掉或误删别的闹钟。
+        // id 仅作兼容回退(HTTP /alarm 的 {"action":"remove","id":N} 与旧页面缓存)。
+        cJSON* c_alarm_id = cJSON_GetObjectItem(root, "alarm_id");
+        cJSON* c_legacy_id = cJSON_GetObjectItem(root, "id");
+        cJSON* c_target = c_alarm_id ? c_alarm_id : c_legacy_id;
+        int id = c_target ? c_target->valueint : -1;
+        // 不在此处打日志: 日志与下位机控制指令共用 UART0, 会干扰指令下发。
         if (s_alarm_api.remove_alarm) resp = s_alarm_api.remove_alarm(id) ? "{\"ok\":true}" : "{\"ok\":false}";
     }
     cJSON_Delete(root);

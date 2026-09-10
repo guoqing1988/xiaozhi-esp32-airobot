@@ -835,6 +835,25 @@ if (hd->config.close_fn) {
 
 **排查备忘**：“用着用着彻底没反应”的现象优先怀疑 **fd/socket 泄漏**（而非 WiFi 或内存）——可临时在 `lwip` 打印 socket 计数确认；`close_fn` 是 IDF 里少见的“替代式”回调，务必对照 `httpd_sess.c` 源码确认语义。
 
+### 10. web 页面删除闹钟无效（已修复）
+
+**现象**：网页「⏰ 闹钟提醒」里点「删除」，列表原样不动；偶尔又能删掉，但删掉的并不是点的那一条。
+**根因**：前端 `wsSend()` 用**请求序号覆盖了消息体的 `id` 字段**：
+
+```js
+const id = wsId++;                                            // 请求序号, 1,2,3...
+ws.send(JSON.stringify(Object.assign({}, obj, { id: id })));  // ← 覆盖调用方传入的 id
+```
+
+而删除闹钟恰好用 `id` 传闹钟编号（`wsSend({ action: 'alarm_remove', id: id })`）→ 服务端 `alarm_remove` 拿到的是**请求序号**而非闹钟编号：序号与编号不符时 `AlarmManager::Remove()` 查不到 → `{"ok":false}`；旧前端又不检查 `ok`、照旧刷新列表 → 表现为「删除无效且毫无提示」。若序号碰巧等于某个闹钟编号，则会**误删另一个闹钟**。
+> 其它功能不受影响的原因：`music_delete` 用 `name`、`alarm_add` 无业务 id，都不与 `wsSend` 的序号字段冲突——这也是问题只出现在「删除闹钟」的原因。
+
+**修复**：业务字段改用不与序号冲突的 `alarm_id`（前端 `delAlarm`），服务端 `alarm_remove` 优先取 `alarm_id`、回退 `id`（兼容 HTTP `/alarm` 的 `{"action":"remove","id":N}` 与旧页面缓存）；前端失败时不再静默刷新，而是提示「未找到编号 N 的闹钟」（**不在服务端加日志**：板级日志与下位机控制指令共用 UART0，打日志会干扰指令下发）。
+
+**回归防护**：`scripts/tests/test_alarm_remove_wire.py` —— 复刻 `Object.assign` 覆盖语义 + 服务端取值逻辑，固化根因（旧字段必然取到序号）；并静态断言 `delAlarm` 使用 `alarm_id`、检查 `ok`，C++ 分支优先 `alarm_id`、且该分支**不含日志调用**。
+
+**排查备忘**：`wsSend` 的协议是「请求序号与业务字段共用同一个 JSON 对象」，**任何业务字段都不要叫 `id`**，否则会被序号覆盖（不读 `wsSend` 实现几乎无法从现象推断）。另：`web/index.html` 经 `EMBED_FILES` 嵌入固件，改完**必须重新编译**才生效；浏览器若缓存了旧页面，删除仍会失败（旧 JS 依旧发 `id`），需强制刷新（Ctrl+F5）。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。
