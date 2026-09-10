@@ -32,6 +32,7 @@ Read the closest existing implementation before adding a new one. Prefer the nar
 - Change runtime state through `Application::SetDeviceState()` and the state machine.
 - Callbacks may run outside the main task. Schedule application mutations with `Application::Schedule()` or event bits.
 - Do not block the main event loop or audio tasks. Avoid unbounded queues and repeated large allocations in audio paths.
+- Do not add `ESP_LOG*`/`printf`/`Serial.print` diagnostics casually. The log console shares a UART with board peripherals and, on boards driving a subordinate MCU, with the command link (e.g. `bread-compact-wifi-s3cam-airobot` sends `@`-prefixed commands over UART0), so log output delays or interleaves control commands. Report failures through return values, MCP results, or HTTP/WS responses; remove any temporary log added while debugging before finishing.
 - Keep shared message semantics in `Protocol`; verify both transports when changing its contract.
 - Validate network input and preserve `cJSON` ownership. NVS keys are persistent API and require migration when changed.
 - Guard target-specific features with Kconfig/component rules. Do not assume every target has PSRAM or S3/P4 resources.
