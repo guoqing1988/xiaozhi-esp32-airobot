@@ -886,6 +886,21 @@ ws.send(JSON.stringify(Object.assign({}, obj, { id: id })));  // ← 覆盖调�
 
 **排查备忘**：`wsSend` 的协议是「请求序号与业务字段共用同一个 JSON 对象」，**任何业务字段都不要叫 `id`**，否则会被序号覆盖（不读 `wsSend` 实现几乎无法从现象推断）。另：`web/index.html` 经 `EMBED_FILES` 嵌入固件，改完**必须重新编译**才生效；浏览器若缓存了旧页面，删除仍会失败（旧 JS 依旧发 `id`），需强制刷新（Ctrl+F5）。
 
+### 11. web 页面首屏歌曲列表为空（已修复）
+
+**现象**：首次打开网页（默认「歌曲管理」）列表空白，点「刷新列表」才出来——加载入口只有 tab 点击，初始化路径上没有任何加载调用。
+**修复**：`ws.onopen` 首次连上时调 `loadActivePanel()`，按当前可见面板分发（`wsFirstOpen` 保证只补一次）。
+**坑**：不能写 `window.onload -> loadSongs()`——那时 `ws.readyState` 还是 `CONNECTING`，`wsSend` 直接 reject，表格会显示「接口不可用」。
+
+### 12. web 页面头部舵机滑块不好用 / 回正值输入框点不动（已修复）
+
+**现象**：滑块在手机上 1px≈1°、手指还挡住角度值，没法微调；`#servoHomeVal` 带 `readonly`，只能一点点调。
+**修复**：滑块保留做粗调，两侧加「− / +」（每次 5°），三者共用 `setServoDeg()` 同步显示与去重下发（设备上报的 `servo` 也回填到这里）；`#servoHomeVal` 去 readonly + `onchange` 手动输入（空值/非数字回退）。
+**两个坑**：
+1. 滑块 `oninput` 只更新显示，`onchange`（松手）才下发——拖动时事件可达数十 Hz，每条都发会灌爆设备 httpd。
+2. 发送失败**不能回滚角度基准**：`servoDeg = null` 会让下一次 `null + 5 = 5`，表现为「点一下变 5° 后卡住」（没连设备 / WS 重连窗口必现）。0 是合法角度，兜底也不能用 `||`。
+**回归防护**：`scripts/tests/test_web_servo_step.py`（含 wsSend 失败路径）。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。
