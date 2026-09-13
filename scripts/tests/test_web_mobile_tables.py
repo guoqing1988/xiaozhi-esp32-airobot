@@ -128,12 +128,18 @@ class TestNoLongPressCopy(_PageBase):
     + selectstart 拦截；图方便改成只设 body 会在部分国产内核上失效。
     """
 
-    def test_root_disables_selection(self):
-        m = re.search(r"html,\s*\n\s*body\s*\{(.*?)\}", self.html, re.S)
-        self.assertIsNotNone(m, "未找到 html, body 规则（部分内核只认根元素上的 user-select）")
+    def test_selection_killed_with_important(self):
+        """必须写在 * 上且带 !important。
+
+        实测：靠 body 继承 + 普通权重的 user-select: none，在部分 Android 浏览器上
+        长按文案/按钮依旧弹「复制」，所以改成通配符 + !important 直接压过 UA 样式。
+        """
+        m = re.search(r"\n    \* \{(.*?)\n    \}", self.html, re.S)
+        self.assertIsNotNone(m, "未找到 * 通配规则")
         block = m.group(1)
-        self.assertIn("user-select: none", block)
-        self.assertIn("-webkit-touch-callout: none", block)
+        self.assertIn("user-select: none !important", block)
+        self.assertIn("-webkit-touch-callout: none !important", block)
+        self.assertIn("-webkit-user-select: none !important", block)
         self.assertIn("-webkit-user-drag: none", block)
 
     def test_selectstart_is_blocked(self):
@@ -142,15 +148,23 @@ class TestNoLongPressCopy(_PageBase):
         self.assertIsNotNone(m, "未找到 selectstart 拦截")
         self.assertIn("contextmenu", self.html, "原来的 contextmenu 拦截应保留")
 
-    def test_inputs_and_log_stay_copyable(self):
-        """输入框要能粘贴、日志区要能拷，否则页面没法用。"""
-        m = re.search(r"addEventListener\('selectstart'.*?\n    \}\);", self.html, re.S)
-        self.assertIsNotNone(m)
-        body = m.group(0)
+    def test_form_controls_stay_copyable(self):
+        """表单控件要能选/粘贴；这里的 !important 是必要的，否则被 * 上那条压掉。"""
+        m = re.search(r"\n    input,\s*\n    select,\s*\n    textarea\s*\{(.*?)\n    \}", self.html, re.S)
+        self.assertIsNotNone(m, "未找到表单控件规则")
+        self.assertIn("user-select: text !important", m.group(1))
+        m2 = re.search(r"addEventListener\('selectstart'.*?\n    \}\);", self.html, re.S)
+        body = m2.group(0)
         self.assertIn("'INPUT'", body)
         self.assertIn("'TEXTAREA'", body)
-        self.assertIn("closest('pre')", body)
-        self.assertRegex(self.html, r"\n    pre\s*\{[^}]*user-select: text")
+
+    def test_log_copy_uses_button(self):
+        """日志不再靠长按复制（全局已禁），改用「📋 复制」按钮，功能不倒退。"""
+        self.assertIn("function copyPre(", self.html)
+        self.assertIn("copyPre('logView', this)", self.html)
+        self.assertIn("copyPre('unoCmdView', this)", self.html)
+        # 本页是 http:// — 非安全上下文下 navigator.clipboard 不可用，只能走 execCommand
+        self.assertIn("execCommand('copy')", self.html)
 
 
 if __name__ == "__main__":

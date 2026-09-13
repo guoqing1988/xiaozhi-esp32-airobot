@@ -6,25 +6,24 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>小智 AI 机器人</title>
   <style>
+    /* 长按禁止「选择/复制」菜单。写在 * 上且带 !important 而不是靠 body 继承：
+       个别内核会给某些元素（按钮、代码块、表单）套 UA 的 user-select: auto，
+       不用 !important 根本压不住；继承则连命中都算不上。 */
     * {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
       -webkit-tap-highlight-color: transparent;
-      -webkit-touch-callout: none
+      -webkit-touch-callout: none !important;
+      -webkit-user-drag: none;
+      -webkit-user-select: none !important;
+      -moz-user-select: none !important;
+      -ms-user-select: none !important;
+      user-select: none !important
     }
 
     /* 长按禁止「选择/复制」菜单。iOS 靠 -webkit-touch-callout（私有属性，Android 无效），
-       Android 靠 user-select；部分国产内核只认根元素上的 user-select，所以 html/body 都写。 */
-    html,
-    body {
-      -webkit-touch-callout: none;
-      -webkit-user-select: none;
-      -moz-user-select: none;
-      -ms-user-select: none;
-      user-select: none;
-      -webkit-user-drag: none
-    }
+       Android 靠 user-select；user-select 已在 * 上带 !important 统一设死，这里不再重复。 */
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -35,19 +34,13 @@
       touch-action: manipulation
     }
 
-    /* 输入/选择控件恢复可编辑，避免被全局 user-select:none 禁用 */
+    /* 唯一例外：表单控件。要输入、要粘贴，禁了页面没法用。
+       这里的 !important 是必要的 —— 上面 * 上的也是 !important，同权重下后写的才赢。 */
     input,
     select,
     textarea {
-      -webkit-user-select: text;
-      user-select: text
-    }
-
-    /* 日志/指令记录区放行长按复制：排查故障就是要拷日志，不能一刀切禁掉 */
-    pre {
-      -webkit-touch-callout: default;
-      -webkit-user-select: text;
-      user-select: text
+      -webkit-user-select: text !important;
+      user-select: text !important
     }
 
     button {
@@ -749,6 +742,10 @@
         排查「页面/语音控制没反应」时看这里：有 <code>&gt;</code> 无 <code>&lt;</code> = 指令发出了但 Arduino 没执行；
         只有 <code>!</code> = 被防抖挡了；什么都没有 = 指令没走到发送环节。
       </div> -->
+      <div class="row" style="align-items:center">
+        <span style="font-size:12.5px;color:#6b7280;flex:1;line-height:1.4">下位机指令记录（<code>&gt;</code> 已发出 · <code>!</code> 被防抖拦截 · <code>×</code> 发送失败 · <code>&lt;</code> 下位机回执）</span>
+        <button class="btn" onclick="copyPre('unoCmdView', this)">📋 复制</button>
+      </div>
       <pre id="unoCmdView"></pre>
 
       <!-- 系统日志（折叠）：原顶部「🐞 调试日志」tab 的内容搬到这里，
@@ -772,6 +769,7 @@
         <div class="row">
           <button class="btn" onclick="clearLogView()">🧹 清空显示</button>
           <button class="btn" id="logPauseBtn" onclick="toggleLogPause()">⏸ 暂停</button>
+          <button class="btn" onclick="copyPre('logView', this)">📋 复制</button>
         </div>
         <pre id="logView"></pre>
       </details>
@@ -906,6 +904,26 @@
     function syncLogPauseBtn() {
       const b = document.getElementById('logPauseBtn');
       if (b) b.textContent = logPaused ? '▶ 继续' : '⏸ 暂停';
+    }
+    // 全局长按已禁用（手机长按弹「复制/全选」菜单很恼人），日志改由按钮导出。
+    // 不能用 navigator.clipboard —— 本页是 http://，非安全上下文下该 API 不可用，
+    // 只能用老的 execCommand('copy')（复制的是当前选区，所以先程序化 select()）。
+    function copyPre(id, btn) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const ta = document.createElement('textarea');
+      ta.value = el.textContent || '';
+      ta.setAttribute('readonly', '');          // 只读, 不弹键盘
+      ta.style.cssText = 'position:fixed;top:-1000px;left:0;opacity:0';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      if (!btn) return;
+      const old = btn.textContent;
+      btn.textContent = ok ? '✅ 已复制' : '❌ 复制失败';
+      setTimeout(function () { btn.textContent = old; }, 1500);
     }
     function setLogLevel() {
       const lv = parseInt(document.getElementById('logLevel').value, 10);
@@ -1591,12 +1609,11 @@
     document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     // Android 上 -webkit-touch-callout 无效，部分内核(国产浏览器/X5)长按也不派发
     // contextmenu，而是直接进原生选择模式、只认 selectstart，这里再拦一道。
-    // 输入框与 <pre> 日志区放行：要粘贴、要拷日志，一刀切会让页面没法用。
+    // 只放行表单控件（输入/粘贴是刚需）；日志改由「📋 复制」按钮导出，见 copyPre。
     document.addEventListener('selectstart', function (e) {
       const t = e.target;
       if (!t || !t.tagName) return;
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
-        (t.closest && t.closest('pre'))) return;
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') return;
       e.preventDefault();
     });
     // 下位机状态推送：页面已不再显示状态文本(改由「下位机指令记录」体现)，

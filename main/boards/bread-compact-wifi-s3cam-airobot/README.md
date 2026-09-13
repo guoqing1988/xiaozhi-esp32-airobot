@@ -520,7 +520,9 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 待机状态屏幕底部显示 IP（如 `192.168.31.74`），浏览器打开 `http://<设备IP>/`。
 - 页面「⏰ 闹钟提醒」区：点「➕ 新建闹钟」弹出对话框（与上传歌曲同一套弹窗样式），填类型/触发值/内容/铃声后「添加」；列表列出所有闹钟，每张卡片可「删除」。
 - **移动端**：屏宽 ≤620px 时，歌曲与闹钟表格自动变成**卡片列表**（每行一张卡，左侧显示列名，列名来自各 `<td>` 的 `data-label`；删除按钮独占一行方便点按），不再需要横向滚动。新增 `<td>` 时记得带 `data-label`，否则手机上看不到该列名字。
-- **长按不弹「复制」菜单**：页面全局禁用了文本选择与长按菜单。iOS 靠 `-webkit-touch-callout`，**Android 不认这个属性**，只能靠 `user-select: none` 加拦 `selectstart`（部分国产内核长按连 `contextmenu` 都不派发）；`user-select` 同时写在 `html` 与 `body` 上，因为部分内核只认根元素。**例外**：输入框可正常粘贴，日志/指令记录区（`<pre>`）可长按复制 —— 排查故障就是要拷日志，所以特意放行。
+- **长按不弹「复制」菜单**：`user-select: none !important` 写在 `*` 上（**不是靠 `body` 继承** —— 实测普通权重压不住 UA 样式，按钮/文案长按照样弹菜单），再拦 `contextmenu` 与 `selectstart`（Android 不认 `-webkit-touch-callout`，那是 iOS 私有属性；部分国产内核长按连 `contextmenu` 都不派发）。**例外**：表单控件保留 `user-select: text !important` —— 要输入、要粘贴。
+  - **日志/指令记录区不再支持长按复制**，改用「📋 复制」按钮（`copyPre()`）。本页是 http，非安全上下文下 `navigator.clipboard` 不可用，所以走 `document.execCommand('copy')`。
+  - ⚠️ 若某些浏览器自带长按菜单（国产 X5 / UC / QQ 内核常见，不遵网页 CSS），网页层拦不住，需要在浏览器设置里关掉「长按菜单 / 快捷操作」，或换 Chrome。
 - 页面通过 `/alarm?action=list`（GET）与 `/alarm`（POST `add` / `remove`）读写闹钟，与 AI 语音共用同一份数据。
 
 ### 持久化与数据结构
