@@ -14,17 +14,24 @@
       -webkit-touch-callout: none
     }
 
+    /* 长按禁止「选择/复制」菜单。iOS 靠 -webkit-touch-callout（私有属性，Android 无效），
+       Android 靠 user-select；部分国产内核只认根元素上的 user-select，所以 html/body 都写。 */
+    html,
+    body {
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      -ms-user-select: none;
+      user-select: none;
+      -webkit-user-drag: none
+    }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
       background: #f5f6f8;
       color: #333;
       line-height: 1.6;
       padding: 16px;
-      -webkit-touch-callout: none;
-      -webkit-user-select: none;
-      -moz-user-select: none;
-      -ms-user-select: none;
-      user-select: none;
       touch-action: manipulation
     }
 
@@ -32,6 +39,13 @@
     input,
     select,
     textarea {
+      -webkit-user-select: text;
+      user-select: text
+    }
+
+    /* 日志/指令记录区放行长按复制：排查故障就是要拷日志，不能一刀切禁掉 */
+    pre {
+      -webkit-touch-callout: default;
       -webkit-user-select: text;
       user-select: text
     }
@@ -275,6 +289,66 @@
       text-align: right
     }
 
+    /* 移动端：表格 -> 卡片列表。小屏下表格普遍需要横向滚动，实在难用；
+       这里把每行变成一张卡、每格左侧显示列名（列名取自各 <td> 的 data-label，
+       见 loadSongs/loadAlarms 渲染处）。没带 data-label 的占位行（如“暂无歌曲”
+       的 colspan 单元格）不显示列名，自然退化为普通文本。 */
+    @media (max-width: 620px) {
+      .card-table thead {
+        display: none
+      }
+
+      .card-table,
+      .card-table tbody,
+      .card-table tr,
+      .card-table td {
+        display: block;
+        width: 100%
+      }
+
+      .card-table {
+        font-size: 14px
+      }
+
+      .card-table tr {
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        margin-bottom: 10px;
+        padding: 8px 12px;
+        background: #fff
+      }
+
+      .card-table td {
+        border: none;
+        padding: 5px 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        text-align: right;
+        word-break: break-all
+      }
+
+      .card-table td[data-label]::before {
+        content: attr(data-label);
+        color: #6b7280;
+        font-size: 12.5px;
+        flex-shrink: 0;
+        text-align: left
+      }
+
+      /* 操作列（删除按钮）单独占一行、撑满，手指好点 */
+      .card-table td[data-label="操作"] {
+        display: block;
+        text-align: right;
+        padding-top: 8px
+      }
+
+      .card-table td[data-label="操作"]::before {
+        display: none
+      }
+    }
+
     #alarmlog {
       font-size: 13px;
       color: #374151;
@@ -331,6 +405,27 @@
 
     .modal-close:hover {
       color: #333
+    }
+
+    /* 弹窗表单行：左侧固定宽度列名 + 右侧拉满的控件（移动端不拥挤） */
+    .frow {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px
+    }
+
+    .frow > label {
+      font-size: 13px;
+      color: #6b7280;
+      width: 42px;
+      flex-shrink: 0
+    }
+
+    .frow > select,
+    .frow > input {
+      flex: 1;
+      min-width: 0
     }
 
     /* 机器人控制遥杆 */
@@ -505,7 +600,7 @@
         <button class="btn" onclick="openUpload()">⬆️ 上传歌曲</button>
         <button class="btn" onclick="loadSongs()">🔄 刷新列表</button>
       </div>
-      <table>
+      <table class="card-table">
         <thead>
           <tr>
             <th>歌曲名</th>
@@ -550,18 +645,10 @@
       <!-- <h3>⏰ AI 闹钟提醒</h3> -->
       <div class="hint">创建后到点自动播报与屏幕提醒；也支持语音「30分钟后提醒我喝水」。</div>
       <div class="row">
-        <select id="atype">
-          <option value="relative">N 分钟后（一次性）</option>
-          <option value="absolute">每天 HH:MM</option>
-        </select>
-        <input id="avalue" placeholder="分钟数 或 HH:MM" size="10">
-        <input id="alabel" placeholder="提醒内容(可选)">
-        <select id="asong" title="选择铃声">
-          <option value="">🎲 随机选歌</option>
-        </select>
+        <button class="btn" onclick="openAlarm()">➕ 新建闹钟</button>
+        <button class="btn" onclick="loadAlarms()">🔄 刷新列表</button>
       </div>
-      <div class="row"><button class="btn" onclick="addAlarm()">添加闹钟</button></div>
-      <table>
+      <table class="card-table">
         <thead>
           <tr>
             <th>ID</th>
@@ -576,6 +663,42 @@
         <tbody></tbody>
       </table>
       <div id="alarmlog"></div>
+    </div>
+
+    <!-- 新建闹钟弹窗 -->
+    <div class="modal" id="alarmModal">
+      <div class="modal-box">
+        <div class="modal-head">
+          <h3>⏰ 新建闹钟</h3>
+          <button class="modal-close" onclick="closeAlarm()" title="关闭">×</button>
+        </div>
+        <div class="hint">到点自动播报与屏幕提醒。「N 分钟后」是一次性的，「每天 HH:MM」每天重复。</div>
+        <div class="frow">
+          <label>类型</label>
+          <select id="atype">
+            <option value="relative">N 分钟后（一次性）</option>
+            <option value="absolute">每天 HH:MM</option>
+          </select>
+        </div>
+        <div class="frow">
+          <label>触发</label>
+          <input id="avalue" placeholder="分钟数 或 HH:MM">
+        </div>
+        <div class="frow">
+          <label>内容</label>
+          <input id="alabel" placeholder="提醒内容（可选）">
+        </div>
+        <div class="frow">
+          <label>铃声</label>
+          <select id="asong" title="选择铃声">
+            <option value="">🎲 随机选歌</option>
+          </select>
+        </div>
+        <div class="row">
+          <button class="btn" onclick="addAlarm()">添加</button>
+          <button class="btn" onclick="closeAlarm()">取消</button>
+        </div>
+      </div>
     </div>
 
     <!-- 机器人控制 -->
@@ -822,6 +945,19 @@
     (function () {
       const m = document.getElementById('uploadModal');
       if (m) m.addEventListener('click', function (e) { if (e.target === this) closeUpload(); });
+    })();
+    // ===== 新建闹钟弹窗 =====
+    function openAlarm() {
+      // 每次都清空上次填的内容, 避免误提交陈旧值
+      document.getElementById('avalue').value = '';
+      document.getElementById('alabel').value = '';
+      loadSongOptions();   // 打开时才拉铃声列表: 保证能选到刚上传的歌
+      document.getElementById('alarmModal').classList.add('show');
+    }
+    function closeAlarm() { document.getElementById('alarmModal').classList.remove('show'); }
+    (function () {
+      const m = document.getElementById('alarmModal');
+      if (m) m.addEventListener('click', function (e) { if (e.target === this) closeAlarm(); });
     })();
     // ===== MP3 参数探测 BEGIN(host 测试按此标记提取, 改动时请保留标记) =====
     // 纯前端探测: 只读文件头部十几 KB, 毫秒级返回, 不解码也不联网。
@@ -1228,12 +1364,16 @@
           arr.forEach(function (song) {
             const tr = document.createElement('tr');
             const tdName = document.createElement('td');
+            tdName.setAttribute('data-label', '歌曲名');
             tdName.textContent = song.name;
             const tdSize = document.createElement('td');
+            tdSize.setAttribute('data-label', '大小');
             tdSize.textContent = fmtSize(song.size || 0);
             const tdTime = document.createElement('td');
+            tdTime.setAttribute('data-label', '上传时间');
             tdTime.textContent = fmtTime(song.mtime || 0);
             const tdOp = document.createElement('td');
+            tdOp.setAttribute('data-label', '操作');
             const btn = document.createElement('button');
             btn.className = 'btn btn-danger';
             btn.textContent = '删除';
@@ -1275,7 +1415,6 @@
         .catch(() => { });
     }
     function loadAlarms() {
-      loadSongOptions();
       const tb = document.querySelector('#panel-alarm tbody');
       const log = document.getElementById('alarmlog');
       const empty = '<tr><td colspan="7">暂无闹钟</td></tr>';
@@ -1291,7 +1430,8 @@
             const isAbs = a.type === 'absolute';
             const trigger = isAbs ? ('每天 ' + fmtSec(a.trigger_sec)) : (a.trigger_sec + ' 秒(约' + (a.trigger_sec / 60).toFixed(0) + '分钟)');
             const tr = document.createElement('tr');
-            tr.innerHTML = '<td>' + a.id + '</td><td>' + (isAbs ? '每天' : '相对') + '</td><td>' + trigger + '</td><td>' + (a.label || '') + '</td><td>' + (a.song || '🎲 随机') + '</td><td>' + (a.enabled ? '启用' : '停用') + '</td><td><button class="btn btn-danger" onclick="delAlarm(' + a.id + ')">删除</button></td>';
+            // data-label 供移动端卡片列表显示列名（见 .card-table 样式）
+            tr.innerHTML = '<td data-label="ID">' + a.id + '</td><td data-label="类型">' + (isAbs ? '每天' : '相对') + '</td><td data-label="触发">' + trigger + '</td><td data-label="内容">' + (a.label || '') + '</td><td data-label="铃声">' + (a.song || '🎲 随机') + '</td><td data-label="状态">' + (a.enabled ? '启用' : '停用') + '</td><td data-label="操作"><button class="btn btn-danger" onclick="delAlarm(' + a.id + ')">删除</button></td>';
             tb.appendChild(tr);
           });
         })
@@ -1306,6 +1446,10 @@
       let sec;
       if (type === 'relative') { sec = Math.round(parseFloat(value) * 60); }
       else { const p = value.split(':'); sec = (+p[0]) * 3600 + (+p[1] || 0) * 60; }
+      // 注意: 相对时间必须是有效数字, 否则会提交 NaN(后端解析失败但页面无提示)
+      if (!isFinite(sec)) { document.getElementById('alarmlog').innerHTML = '<div>触发值格式不对</div>'; return; }
+      // 闹钟弹窗打开时是盖住列表的, 所以先关弹窗再提示, 否则提示被遮住看不见
+      closeAlarm();
       wsSend({ action: 'alarm_add', type: type, value: sec, label: label, song: song })
         .then(() => { loadAlarms(); document.getElementById('alarmlog').innerHTML = '<div>✅ 已添加</div>'; })
         .catch(() => { document.getElementById('alarmlog').innerHTML = '<div>❌ 添加失败（接口不可用）</div>'; });
@@ -1445,6 +1589,16 @@
     bindTurnBtn('btnTurnRight', 'right');
     // 全局禁止长按弹出系统菜单/文本选择(移动端)
     document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    // Android 上 -webkit-touch-callout 无效，部分内核(国产浏览器/X5)长按也不派发
+    // contextmenu，而是直接进原生选择模式、只认 selectstart，这里再拦一道。
+    // 输入框与 <pre> 日志区放行：要粘贴、要拷日志，一刀切会让页面没法用。
+    document.addEventListener('selectstart', function (e) {
+      const t = e.target;
+      if (!t || !t.tagName) return;
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+        (t.closest && t.closest('pre'))) return;
+      e.preventDefault();
+    });
     // 下位机状态推送：页面已不再显示状态文本(改由「下位机指令记录」体现)，
     // 但舵机角度必须保留——Arduino 侧 SELECT/START 微调、AI 指令改角度都靠它同步到滑块。
     function renderUnoStatus(j) {
