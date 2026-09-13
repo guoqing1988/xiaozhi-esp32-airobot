@@ -451,7 +451,7 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 说「切换时钟模式 / 打开时钟 / 关闭时钟」→ `self.clock.set`（`mode`: `1`=开启, `0`=关闭, `-1`=切换开关）。
 - 说「切换时钟颜色/主题」→ **同一工具 `self.clock.set`**（`theme`: `0`=黑底白字, `1`=白底黑字, `-1`=切下一个）。`mode` 与 `theme` 可只传其一，未传的参数保持当前不变；两者都传则同时生效。设置写入 NVS（`clock/theme`）+ `clock/mode`）。
 - 说「现在是什么时钟主题/时钟开没开」→ `self.clock.current`，返回当前主题名称与是否开启（AI 可读回状态）。
-- 开启后，**待机**状态下**整个屏幕**显示**粗壮高瘦数字大时钟**（`HH:MM`，24 小时制，不带秒），上方一行小字日期（`YYYY-MM-DD`）；时钟显示时状态栏/字幕条/表情区全部隐藏、屏幕底色换成时钟主题色，只留“日期+时间”，像真实电子钟。对话/聆听/播放时自动隐藏时钟、恢复原 UI，不干扰字幕。
+- 开启后，**待机**状态下**整个屏幕**显示**粗壮高瘦数字大时钟**（`HH:MM`，24 小时制，不带秒，**垂直居中**）；时钟显示时状态栏/字幕条/表情区全部隐藏、屏幕底色换成时钟主题色，只留时间，像真实电子钟。对话/聆听/播放时自动隐藏时钟、恢复原 UI，不干扰字幕。（时间上方的**日期小字已隐藏**：`date_label_` 仍创建并更新文本、只是不显示，理由见踩坑 14。）
 - **主题（2 套高对比）**：经典黑底白字 / 白底黑字，切换立即生效并入 NVS，断电重启保留。（仅保留两种高对比经典模式，其余 Catppuccin 系均为纯颜色变化、无实际意义，已移除。）
 - **多屏自适应（字号按屏幕自动选档）**：三档内嵌 Bebas Neue 字体（48/60/130px，**数字等宽**），`SetupUI` 时按编译期屏幕宽度 `DISPLAY_WIDTH` 从最大往下选能放下 `HH:MM` 的档——覆盖 240×240 / 240×320（→130px，两侧仅余 4px、几乎占满全屏、字高约 93px 高瘦占满）/ 128×160 横屏（→48px）。因数字等宽，任何时间 HH:MM 宽度恒定，不会因窄数字增大两侧留白，"始终占满两边"。
 - 时间来自联网后同步的系统时钟（与绝对闹钟同源）；未同步前不显示。
@@ -460,7 +460,7 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 
 ### 真机验证要点
 
-1. 说「打开时钟」→ 待机时屏幕出现大号 `HH:MM` 时间（分钟正常跳动）+ 上方日期，状态栏/字幕条隐藏。
+1. 说「打开时钟」→ 待机时屏幕出现大号 `HH:MM` 时间（分钟正常跳动、垂直居中），**不再显示日期**，状态栏/字幕条隐藏。
 2. 说「切换时钟颜色/主题」→ 黑底白字 ↔ 白底黑字 两个经典主题循环切换，立即生效。
 3. 说「切换时钟模式」→ 时钟消失、原 UI 恢复；再说一次 → 恢复。
 4. 开启时钟后唤醒对话/播放音乐 → 时钟隐藏，结束后回到待机自动恢复显示。
@@ -917,6 +917,13 @@ ws.send(JSON.stringify(Object.assign({}, obj, { id: id })));  // ← 覆盖调�
 **根因**：`esp_http_server` 的 `httpd_req_recv()` 在**对端提前断开**时返回 `0`，与「body 已读满」的返回值相同；旧代码只判 `ret < 0`，截断文件于是被当成上传成功保留。
 **修复**：循环结束后以 `req->content_len` 为准复核实收字节数，不一致则 `remove(path)` 并回 500 `receive interrupted`；`content_len == 0`（无 body/无长度信息，如 chunked）时只保留 `ret < 0` 判断，避免误杀正常上传。
 **回归防护**：`scripts/tests/test_upload_truncation_guard.py`（固化「旧逻辑保留截断文件」+「新逻辑不误杀正常上传」）。
+
+### 14. 删掉时钟日期小字导致开机无限重启（LVGL 对象野指针，已修复）
+
+**现象**：为「去掉时钟上方的日期小字」，把 `date_label_` 的创建、`clock_date_text_` 成员、`LV_FONT_DECLARE(clock_bebas_date)` 声明一并删除（时间对齐偏移同时归零）。编译烧录后**开机即无限重启**：`Guru Meditation Error: LoadProhibited`，`EXCVADDR: 0x25`，崩在 `is_transformed`（`lv_obj_pos.c:1347`）。
+**根因**：`addr2line` 定位到崩溃链为 LVGL 内部——`update_layout_completed_cb`（`lv_label.c:1076`）→ `lv_label_refr_text(obj)` → `lv_obj_update_layout` → `lv_obj_refr_size` → `lv_obj_invalidate` → `obj_invalidate_area_internal` → `lv_obj_tree_walk(blur_walk_cb)` → `is_transformed`。其中 `update_layout_completed_cb` 是 LVGL 挂在 **display** 上、以 label 为 `user_data` 的回调（`lv_label_set_text` 后注册，用于重启 `SCROLL_CIRCULAR` 滚动），**不随对象删除而清理**；删掉一个 label 改变了对象数量与堆分配序列，就使这个上游弱点现形（A2=`0x1d`，即 `obj->spec_attr->layer_type` 读到非法地址）。注意整条崩溃链**没有任何本板代码**，极易误判为“跟我改的无关”。
+**修复**：**不删对象**——保留 `date_label_` 的创建与每分钟的文本更新（对象数量、堆分配、display 级回调注册与历史版本逐一一致），只在 `UpdateClock` 的显示分支**不再 `lv_obj_remove_flag(date_label_, LV_OBJ_FLAG_HIDDEN)`**，让它永远停在 `SetupUI` 设的 HIDDEN 状态；`clock_label_` 对齐偏移由“给日期腾位”的 `+14px` 改为 `0`，实现真正的垂直居中（纯坐标改动）。
+**教训**：**本板去掉 UI 元素只改可见性（`LV_OBJ_FLAG_HIDDEN`）或坐标，不要删除 LVGL 对象的创建。** 对象数量一变，堆布局随之变化，很容易触发上游 label 回调的野指针问题——表现却是与本板代码毫无关系的 LVGL 内部崩溃。定位手段：`xtensa-esp32s3-elf-addr2line -pfiaC -e build/xiaozhi.elf <地址>`，并用 `sha256sum build/xiaozhi.elf` 与日志的 `ELF file SHA256` 比对，确认抓到的就是设备上那份固件。
 
 ## 与上游合并提示
 

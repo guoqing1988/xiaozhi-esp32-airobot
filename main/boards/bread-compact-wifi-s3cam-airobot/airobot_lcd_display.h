@@ -117,7 +117,8 @@ public:
         lv_obj_set_style_text_align(clock_label_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_width(clock_label_, lv_obj_get_width(screen));  // 撑满横向
         const int time_lh = clock_font_->line_height;
-        lv_obj_align(clock_label_, LV_ALIGN_CENTER, 0, (clock_bebas_date.line_height + gap) / 2);
+        // 日期已隐藏(见 UpdateClock 的说明)，时间改为垂直居中。只改坐标、不动对象树/内存分配。
+        lv_obj_align(clock_label_, LV_ALIGN_CENTER, 0, 0);
         lv_obj_add_flag(clock_label_, LV_OBJ_FLAG_HIDDEN);  // 默认隐藏
 
         // 日期小字：时间正上方
@@ -172,7 +173,13 @@ public:
                 lv_label_set_text(date_label_, date_text);
             }
             lv_obj_remove_flag(clock_label_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(date_label_, LV_OBJ_FLAG_HIDDEN);
+            // 注意：**不要**在这里 remove_flag(date_label_)——日期小字按要求不显示。
+            // 保留 date_label_ 的创建与文本更新(保持 LVGL 对象数量/堆分配/display 级
+            // layout 回调注册与历史版本完全一致)，仅让它始终停留在 SetupUI 设的 HIDDEN 状态。
+            // 教训：曾试图改删掉 date_label_ 对象来去日期，改变了对象树与堆布局，
+            // 触发 LVGL 上游 label 的 display 级回调(update_layout_completed_cb,
+            // lv_label.c:1076)对非法对象的 lv_label_refr_text 而 无限重启(LoadProhibited,
+            // 崩在 is_transformed/lv_obj_pos.c:1347)。去 UI 元素请只改可见性/坐标，勿删对象。
         } else {
             if (clock_shown_) {
                 if (emoji_box_ != nullptr) {
