@@ -166,5 +166,70 @@ class TestArduinoExplicitStop(unittest.TestCase):
             self.assertNotIn("stopMove", m.group(1), f"{fn} 内部不应调用 stopMove")
 
 
+BOARD_SRC = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..",
+    "main", "boards", "bread-compact-wifi-s3cam-airobot",
+    "compact_wifi_board_s3cam_airobot.cc",
+)
+
+
+class TestAiRetryLoopFix(unittest.TestCase):
+    """源码断言：防抖命中必须回"已完成"语义，否则 AI 会陷入重试死循环。
+
+    真机复现（日志实证）：AI 先 action(左转) 再 action(停止)，返回
+    "动作约500毫秒后自动停止"让 AI 以为动作尚未完成，于是每 0.7~1 秒重复调用一次；
+    防抖命中后返回的 "指令已发送(防抖): xxx" 又被 AI 读成"没发出去"，而续期逻辑让窗口
+    永不失效 -> 工具调用死循环刷 40+ 次、对话卡在 speaking 达 30 秒才退出。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(BOARD_SRC, encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_debounce_returns_completed_semantics(self):
+        """命中防抖不能再回"防抖/失败"语义 —— 那是 AI 重试的直接诱因。"""
+        # 先剥掉注释：修复说明的注释里故意保留了旧文案作为反面例子
+        code = re.sub(r"//[^\n]*", "", self.src)
+        self.assertNotIn("指令已发送(防抖)", code, "不能再用‘防抖’字样回复 AI")
+        self.assertIn("本次重复调用已忽略", self.src)
+        self.assertIn("毫秒前执行完成", self.src)
+
+    def test_debounce_reports_time_since_real_send(self):
+        """ago_ms 必须基于"上次真正发出"的时间，且在续期之前算，否则恒为 0。"""
+        self.assertIn("s_last_sent_us", self.src, "需要单独记录真正发出的时间")
+        self.assertGreater(
+            self.src.index("s_last_sent_us = now;"),
+            self.src.index("uart_write_bytes"),
+            "s_last_sent_us 只能在真正写出 UART 之后更新",
+        )
+        m = re.search(r"命中时刷新时间戳.*?s_last_us = now;", self.src, re.S)
+        self.assertIsNotNone(m, "未找到防抖命中分支")
+        self.assertIn("ago_ms", m.group(0), "ago_ms 要在 s_last_us = now 之前算出来")
+
+    def test_stop_forces_zero_steps(self):
+        """停止发 go-stop-0：下位机 stopMove 立即刹车，后面的 delay(t) 纯属白等。
+
+        同时确认 stop 切到独立分支，不再回"动作约500毫秒后自动停止"
+        （那句等于告诉 AI 动作还没完成，是重试循环的诱因之一）。
+        """
+        self.assertRegex(self.src, r"if \(is_stop\) \{\s*steps = 0;")
+        self.assertIn("机器人已停止，无需再次调用确认", self.src)
+        stop_branch = re.search(
+            r"if \(is_stop\) \{.*?result \+= \"，机器人已停止，无需再次调用确认\";\s*\} else \{",
+            self.src,
+            re.S,
+        )
+        self.assertIsNotNone(stop_branch, "stop 必须走独立分支，不能在 else 里算 t_ms")
+
+    def test_turn_has_minimum_steps(self):
+        """左/右转每步仅 10ms，AI 常用的默认 10 步只有 100ms，几乎看不出转动。"""
+        self.assertRegex(self.src, r"if \(is_turn && steps < 25\) \{\s*steps = 25;")
+
+    def test_result_tells_ai_not_to_repeat(self):
+        """返回值要明确请 AI 别再来确认，这是打断重试循环的最后一道提示。"""
+        self.assertIn("无需再次调用确认", self.src)
+
+
 if __name__ == "__main__":
     unittest.main()

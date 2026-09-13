@@ -14,7 +14,9 @@ namespace {
 // 环形缓冲刻意放**静态内部 RAM**：临界区内访问 PSRAM 会长时间持锁，
 // 可能让等锁的中断超时（见 sdkconfig.defaults 关于中断看门狗的说明），
 // 因此这里不用 PSRAM，也不做动态分配。
-constexpr size_t kRingSize = 8192;
+// 4KB：够存约 30~40 行日志；本板内部 RAM 很紧(实测 free sram 仅 20~25KB)，
+// 日志功能静态占用要克制。需要更长的历史再调大。
+constexpr size_t kRingSize = 4096;
 // 单行格式化缓冲放在栈上：日志可能来自小栈任务(WiFi/定时器回调)，
 // 限制单行长度避免把调用方栈打爆；超长行截断（末尾保留换行由格式串自带）。
 constexpr size_t kLineMax = 160;
@@ -28,10 +30,17 @@ std::atomic<bool> s_uart_mirror{false};
 
 // 写环形缓冲（临界区）。钩子与 LogCaptureAppend 共用。
 // 可能在任何任务甚至中断上下文被调用，只能用临界区（不可用 mutex/动态分配）。
+// 临界区内分两段 memcpy（非逐字节循环）：持锁时间直接决定 WiFi/音频中断被推迟多久，
+// 日志级别开到“调试”时这条路径每秒会走很多次，不能用 O(len) 的字节循环。
 void RingWrite(const char* data, size_t len) {
+    if (len == 0) {
+        return;
+    }
     portENTER_CRITICAL(&s_mux);
-    for (size_t i = 0; i < len; ++i) {
-        s_ring[(s_head + i) % kRingSize] = data[i];
+    const size_t first = (len < kRingSize - s_head) ? len : kRingSize - s_head;
+    memcpy(s_ring + s_head, data, first);
+    if (len > first) {
+        memcpy(s_ring, data + first, len - first);
     }
     s_head = (s_head + len) % kRingSize;
     s_total += static_cast<uint32_t>(len);

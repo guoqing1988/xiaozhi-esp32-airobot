@@ -603,8 +603,8 @@ static std::string WsHandleMessage(const char* body) {
                              ? static_cast<uint32_t>(c_since->valuedouble)
                              : 0;
         // buf 用静态缓冲：不占 httpd 栈(上传大文件也用这个任务)；WS 帧由 httpd
-        // 单任务串行处理，不存在并发。
-        static char pull_buf[2048];
+        // 单任务串行处理，不存在并发。1KB 是为了省内部 RAM(见 log_capture.cc 说明)。
+        static char pull_buf[1024];
         size_t len = 0;
         uint32_t next_seq = 0;
         LogCapturePull(since, pull_buf, sizeof(pull_buf), len, next_seq);

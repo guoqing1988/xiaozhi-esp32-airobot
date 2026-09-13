@@ -837,7 +837,8 @@ private:
         // 窗口按命令类型区分: 动作类(go-*/tj-*)执行耗时长(特技最长约 7.5 秒), 窗口须大于
         // 服务端重试间隔; 状态类(servo-*/speed-*)瞬时生效, 1 秒足够。
         static char s_last_cmd[32] = {};
-        static int64_t s_last_us = 0;
+        static int64_t s_last_us = 0;       // 上次调用(含被拦截)的时间, 用于续期窗口
+        static int64_t s_last_sent_us = 0;  // 上次**真正发出**的时间, 用于告诉 AI“多久前已执行”
         int64_t now = esp_timer_get_time();
         const bool is_action = (strncmp(command_str, "go-", 3) == 0 ||
                                 strncmp(command_str, "tj-", 3) == 0);
@@ -846,10 +847,17 @@ private:
             // 命中时刷新时间戳(续期): 只要 AI 持续重复调用同一指令就一直拦截。
             // 旧实现命中时不刷新, 窗口变成"距上次实际发送的时间", 导致每 2 次调用放行 1 次
             // (实测每 1.8 秒下发一条), 特技/动作被反复触发(表现为"一直摇头/一直前进停不下来")。
+            int64_t ago_ms = (s_last_sent_us > 0) ? (now - s_last_sent_us) / 1000 : 0;
             s_last_us = now;
             // 记到网页调试面板: 否则“AI 反复调用但什么都没发生”时分不清是被防抖挡了还是没发出去
-            LogCaptureAppend("[UNO] ! @%s （防抖丢弃）\n", command_str);
-            return std::string("指令已发送(防抖): ") + command_str;  // 防抖丢弃, 视为成功
+            LogCaptureAppend("[UNO] ! @%s （重复调用已忽略，%lld 毫秒前已执行）\n", command_str,
+                             static_cast<long long>(ago_ms));
+            // 必须返回“已完成”语义: 曾返回"指令已发送(防抖): xxx", AI 把“防抖”读成“没发出去”从而
+            // 无限重试(实测每 0.7~1 秒一次刷几十遍), 而续期逻辑又让窗口永不失效 -> 工具调用死循环
+            // -> 对话永久卡在 speaking。这里给出确定性答复 + “多久前已执行”的时间证据, AI 才会停手。
+            return std::string("该指令已于 ") + std::to_string(ago_ms) +
+                   " 毫秒前执行完成（" + command_str +
+                   "），本次重复调用已忽略，动作会自动完成并停止，无需再次调用";
         }
         if (debounce) {
             snprintf(s_last_cmd, sizeof(s_last_cmd), "%s", command_str);
@@ -869,6 +877,7 @@ private:
             LogCaptureAppend("[UNO] x @%s （UART 写入失败）\n", command_str);
             return std::string("指令发送失败: ") + command_str;
         }
+        s_last_sent_us = now;
         LogCaptureAppend("[UNO] > @%s\n", command_str);
         return std::string("指令已发送: ") + command_str;
     }
@@ -942,7 +951,7 @@ private:
 
         mcp_server.AddTool(
             "self.uno.action",
-            "麦克纳姆轮机器人控制。调用本工具一次即完成整个动作并自动停止，不要重复调用。action: 0=停止,1=前进,2=后退,3=左转,4=右转,5=左移,6=右移,7=左上斜移,8=右上斜移,9=左下斜移,10=右下斜移; steps: 动作执行步数(1-100, 越大动作时间越长)",
+            "麦克纳姆轮机器人控制。调用本工具一次即完成整个动作并自动停止，返回即代表已执行完毕，不要重复调用、也不要再调用本工具确认。action: 0=停止(瞬时完成),1=前进,2=后退,3=左转,4=右转,5=左移,6=右移,7=左上斜移,8=右上斜移,9=左下斜移,10=右下斜移; steps: 动作执行步数(5-100, 越大动作时间越长; 左转/右转每步 0.01 秒, 其它动作每步 0.1 秒)",
             PropertyList({Property("action", kPropertyTypeInteger, 0),
                           Property("steps", kPropertyTypeInteger, 10, 5, 100)}),
             [this](const PropertyList& properties) -> ReturnValue {
@@ -963,17 +972,37 @@ private:
                     case 10: action_str = "rightdown"; break;
                     default: action_str = "stop"; break;
                 }
+                const bool is_stop = (strcmp(action_str, "stop") == 0);
+                const bool is_turn =
+                    (strcmp(action_str, "left") == 0 || strcmp(action_str, "right") == 0);
+                // 停止是瞬时的(下位机 stopMove 立即刹车, 后面的 delay(t) 只是白等): 强制 steps=0,
+                // 下位机 stopMove(0) 立即刹停并立即回 @done，不让 Arduino 白阻塞 steps*100ms。
+                if (is_stop) {
+                    steps = 0;
+                }
+                // 左/右转在下位机侧是每步 10ms(其它动作 100ms)，而 AI 常用默认 steps=10 -> 实际
+                // 只转 100ms，短到几乎看不出转动，也容易让 AI 误判"没执行"而反复调用确认。
+                // 与网页端左转的最小有效时长(250ms)对齐: 低于 25 步按 25 步执行。
+                if (is_turn && steps < 25) {
+                    steps = 25;
+                }
                 char cmd[32];
                 snprintf(cmd, sizeof(cmd), "go-%s-%d", action_str, steps);
                 std::string result = SendUartMessage(cmd);
-                // 附上确定性的动作时长, 让 AI 知道动作会自动完成停止, 无需查状态确认
-                int t_ms = (strcmp(action_str, "left") == 0 || strcmp(action_str, "right") == 0)
-                               ? steps * 10
-                               : steps * 100;
-                if (t_ms % 1000 == 0) {
-                    result += "，动作约" + std::to_string(t_ms / 1000) + "秒后自动停止";
+                if (is_stop) {
+                    // 不能回"动作约500毫秒后自动停止": 那等于告诉 AI "动作还没完成"，它会等
+                    // 一会儿再调一次确认，正是"狂发 stop + 卡在 speaking"的诱因之一。
+                    result += "，机器人已停止，无需再次调用确认";
                 } else {
-                    result += "，动作约" + std::to_string(t_ms) + "毫秒后自动停止";
+                    // 附上确定性的动作时长，让 AI 知道动作会自动完成停止，无需查状态确认
+                    int t_ms = is_turn ? steps * 10 : steps * 100;
+                    if (t_ms % 1000 == 0) {
+                        result += "，动作约" + std::to_string(t_ms / 1000) +
+                                  "秒后自动停止，无需再次调用确认";
+                    } else {
+                        result += "，动作约" + std::to_string(t_ms) +
+                                  "毫秒后自动停止，无需再次调用确认";
+                    }
                 }
                 return result;
             });
