@@ -951,9 +951,9 @@ private:
 
         mcp_server.AddTool(
             "self.uno.action",
-            "麦克纳姆轮机器人控制。调用本工具一次即完成整个动作并自动停止，返回即代表已执行完毕，不要重复调用、也不要再调用本工具确认。action: 0=停止(瞬时完成),1=前进,2=后退,3=左转,4=右转,5=左移,6=右移,7=左上斜移,8=右上斜移,9=左下斜移,10=右下斜移; steps: 动作执行步数(5-100, 越大动作时间越长; 左转/右转每步 0.01 秒, 其它动作每步 0.1 秒)",
+            "麦克纳姆轮机器人控制。调用本工具一次即完成整个动作并自动停止，返回即代表已执行完毕，不要重复调用、也不要再调用本工具确认。action: 0=停止(瞬时完成),1=前进,2=后退,3=左转,4=右转,5=左移,6=右移,7=左上斜移,8=右上斜移,9=左下斜移,10=右下斜移; steps: 动作执行步数(1-100, 越大动作时间越长; 左转/右转每步 0.01 秒, 其它动作每步 0.1 秒)",
             PropertyList({Property("action", kPropertyTypeInteger, 0),
-                          Property("steps", kPropertyTypeInteger, 10, 5, 100)}),
+                          Property("steps", kPropertyTypeInteger, 10, 1, 100)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 int action_type = properties["action"].value<int>();
                 int steps = properties["steps"].value<int>();
