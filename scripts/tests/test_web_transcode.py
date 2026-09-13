@@ -98,6 +98,19 @@ class TestWebPageStaticChecks(unittest.TestCase):
         missing = sorted(refs - ids - known_missing)
         self.assertFalse(missing, f"以下元素在页面 HTML 中不存在: {missing}")
 
+    def test_utf8_lrc_upload_path_skips_reencode(self):
+        """已是 UTF-8 的歌词必须走"原样上传"分支（blob 保持原 File），只有 GBK/BOM 才调 lrcToUtf8。
+
+        回归防护：此前 up() 对任何 .lrc 都无条件转一遍，页面也恒显示"歌词 → 转 UTF-8"，
+        用户以为已转好的歌词又被改写了。
+        """
+        html = self.page_html()
+        self.assertIn("if (it.lrcEnc === 'utf-8')", html, "up() 缺少已是 UTF-8 的分支")
+        self.assertIn("（已是 UTF-8，原样上传）", html, "缺少原样上传的提示文案")
+        self.assertIn("lrcEnc = await lrcProbe(f)", html, "选文件时必须探测歌词编码")
+        for enc in ("'utf-8'", "'utf-8-bom'", "'gbk'"):
+            self.assertIn(enc + ":", html, f"LRC_MARK 缺少 {enc} 的处理方式提示")
+
 
 @unittest.skipUnless(FFMPEG and FFPROBE and NODE, "需要 ffmpeg/ffprobe/node")
 class TestWebTranscode(unittest.TestCase):
@@ -143,15 +156,17 @@ class TestWebTranscode(unittest.TestCase):
                 "console.log(JSON.stringify({ bytes: blob.size, samples: pcm.length }));\n"
             )
 
-        # 歌词转 UTF-8 驱动
+        # 歌词转 UTF-8 驱动(同时输出探测器结论, 供断言"已是 UTF-8 不转码")
         cls.lrc_driver = os.path.join(d, "lrc.mjs")
         with open(cls.lrc_driver, "w", encoding="utf-8", newline="\n") as f:
             f.write("import fs from 'node:fs';\n")
             f.write(extract_block(LRC_BEGIN, LRC_END))
             f.write(
                 "\nconst file = new File([fs.readFileSync(process.argv[2])], 'x.lrc');\n"
+                "const enc = await lrcProbe(file);\n"
                 "const blob = await lrcToUtf8(file);\n"
                 "fs.writeFileSync(process.argv[3], Buffer.from(await blob.arrayBuffer()));\n"
+                "console.log(JSON.stringify({ enc: enc }));\n"
             )
 
     @classmethod
@@ -259,7 +274,8 @@ class TestWebTranscode(unittest.TestCase):
 
     # ---------- 4. 歌词转 UTF-8 ----------
 
-    def lrc_roundtrip(self, src_bytes: bytes, name: str) -> bytes:
+    def lrc_roundtrip(self, src_bytes: bytes, name: str):
+        """跑页面真实 lrcProbe() + lrcToUtf8()，返回 (探测到的编码, 转换后字节)。"""
         src = os.path.join(self.tmp.name, name)
         out = os.path.join(self.tmp.name, name + ".out")
         with open(src, "wb") as f:
@@ -267,8 +283,9 @@ class TestWebTranscode(unittest.TestCase):
         r = subprocess.run([NODE, self.lrc_driver, src, out], capture_output=True,
                            text=True, encoding="utf-8", errors="replace")
         self.assertEqual(r.returncode, 0, f"歌词转换失败: {r.stderr}")
+        enc = json.loads(r.stdout.strip().splitlines()[-1])["enc"]
         with open(out, "rb") as f:
-            return f.read()
+            return enc, f.read()
 
     def test_gbk_lrc_is_converted_to_utf8(self):
         """GBK 歌词必须转成 UTF-8（设备端没有 GBK 转换能力，否则屏幕显示乱码）。
@@ -276,23 +293,37 @@ class TestWebTranscode(unittest.TestCase):
         国内下载的 .lrc 大量是 GBK，实测《三拜红尘凉.lrc》就是 GBK。
         """
         text = "[00:00.15]三拜红尘凉 - 黄龄\n[00:02.88]民乐录制：星舟爱乐乐团\n"
-        out = self.lrc_roundtrip(text.encode("gbk"), "gbk.lrc")
+        enc, out = self.lrc_roundtrip(text.encode("gbk"), "gbk.lrc")
+        self.assertEqual(enc, "gbk", "GBK 歌词必须被探测为 gbk（需转码）")
         self.assertEqual(out.decode("utf-8"), text, "必须是合法 UTF-8 且内容一致")
 
     def test_utf8_lrc_kept_unchanged(self):
         text = "[00:00.15]已经 UTF-8 的歌词\n[00:01.00]abc 123\n"
-        out = self.lrc_roundtrip(text.encode("utf-8"), "utf8.lrc")
-        self.assertEqual(out.decode("utf-8"), text)
+        enc, out = self.lrc_roundtrip(text.encode("utf-8"), "utf8.lrc")
+        self.assertEqual(enc, "utf-8", "已是 UTF-8 的歌词应被探测为 utf-8，页面不再做无谓转码")
+        self.assertEqual(out, text.encode("utf-8"), "已是 UTF-8 必须逐字节原样输出")
 
     def test_utf8_bom_is_stripped(self):
         """带 BOM 的歌词要去掉 BOM，否则设备端首行会多一个不可见字符（可能影响首行时间标签）。"""
-        out = self.lrc_roundtrip(b"\xef\xbb\xbf[00:00.15]BOM \xe6\xad\x8c\xe8\xaf\x8d\n", "bom.lrc")
+        enc, out = self.lrc_roundtrip(b"\xef\xbb\xbf[00:00.15]BOM \xe6\xad\x8c\xe8\xaf\x8d\n", "bom.lrc")
+        self.assertEqual(enc, "utf-8-bom", "带 BOM 应由探测器单独标出（只有 BOM 需要处理）")
         self.assertFalse(out.startswith(b"\xef\xbb\xbf"), "输出不应保留 BOM")
         self.assertTrue(out.decode("utf-8").startswith("[00:00.15]"))
 
     def test_ascii_lrc_unchanged(self):
-        out = self.lrc_roundtrip(b"[00:00.15]plain ascii only\n", "ascii.lrc")
+        enc, out = self.lrc_roundtrip(b"[00:00.15]plain ascii only\n", "ascii.lrc")
+        self.assertEqual(enc, "utf-8")
         self.assertEqual(out, b"[00:00.15]plain ascii only\n")
+
+    def test_mixed_encoding_probe_is_conservative(self):
+        """混合编码/UTF-16 等非法 UTF-8 一律探测为 gbk（保守转码），与 py 脚本"无法识别就不转"不同:
+        设备端整篇不显示比转出乱码更难排查，故这里必须先能转出来。"""
+        mixed = "[00:00.15]歌词甲\n".encode("utf-8") + "丙".encode("gbk")
+        enc, _ = self.lrc_roundtrip(mixed, "mixed.lrc")
+        self.assertEqual(enc, "gbk")
+        utf16 = "\ufeff[00:00.15]歌词甲\n".encode("utf-16-le")
+        enc16, _ = self.lrc_roundtrip(utf16, "utf16.lrc")
+        self.assertEqual(enc16, "gbk")
 
     def test_empty_and_tiny_input_do_not_crash(self):
         """空/极短输入不应抛异常（用户可能拖入损坏或极短文件）。"""

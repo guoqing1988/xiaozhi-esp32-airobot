@@ -817,6 +817,20 @@
     // ===== PCM 编码 END =====
 
     // ===== 歌词转码 BEGIN(host 测试按此标记提取; 不依赖 DOM) =====
+    // 探测歌词编码(LRC 通常几十 KB, 全读毫秒级): 'utf-8' | 'utf-8-bom' | 'gbk'。
+    // 已经是 UTF-8 的歌词不该再"转"一遍——内容不会变, 但用户看到"歌词 → 转 UTF-8"会以为
+    // 被改写过; 只有 GBK(设备端无转换能力)与带 BOM(首行多一个不可见字符)才需要处理。
+    async function lrcProbe(file) {
+      const raw = new Uint8Array(await file.arrayBuffer());
+      try {
+        new TextDecoder('utf-8', { fatal: true }).decode(raw);
+      } catch (e) {
+        return 'gbk';   // 全文非合法 UTF-8: 只能是 GBK 系, 必须转码
+      }
+      const bom = raw.length >= 3 && raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF;
+      return bom ? 'utf-8-bom' : 'utf-8';
+    }
+
     // 歌词转 UTF-8: 先按严格 UTF-8 解, 失败再按 GBK(设备端没有 GBK 转换能力, 必须在这里转好)。
     // 注: 国内下载的 .lrc 大量是 GBK, 而 TextDecoder('gbk') 浏览器与 node 均原生支持。
     async function lrcToUtf8(file) {
@@ -848,6 +862,14 @@
 
     function setFileMode(idx, mode) { if (uploadItems[idx]) { uploadItems[idx].mode = mode; renderFileList(); } }
 
+    // 歌词处理方式提示(与 up() 的实际行为一一对应; 未知编码按保守转码显示)
+    const LRC_MARK = {
+      'utf-8': '已是 UTF-8，直接上传',
+      'utf-8-bom': '去 BOM 后上传',
+      'gbk': 'GBK → 转 UTF-8'
+    };
+    function lrcMarkText(enc) { return LRC_MARK[enc] || LRC_MARK['gbk']; }
+
     function renderFileList() {
       const el = document.getElementById('flist');
       if (!el) return;
@@ -855,7 +877,7 @@
       let html = '';
       uploadItems.forEach(function (it, idx) {
         const will = willTranscode(it);
-        const mark = it.kind === 'lrc' ? '歌词 → 转 UTF-8'
+        const mark = it.kind === 'lrc' ? lrcMarkText(it.lrcEnc)
           : (will ? '将转码 → 24kHz 单声道 96kbps' : '无需转码，直接上传');
         html += '<div class="fitem">'
               + '<span class="fname">' + escHtml(it.file.name) + '</span>'
@@ -887,9 +909,15 @@
           log.innerHTML += '<div>⚠️ 跳过不支持的文件：' + escHtml(f.name) + '</div>';
           continue;
         }
-        let info = null;
-        if (!isLrc) { try { info = await mp3ProbeFile(f); } catch (e) { info = null; } }
-        uploadItems.push({ file: f, kind: isLrc ? 'lrc' : 'mp3', info: info, mode: 'auto' });
+        let info = null, lrcEnc = null;
+        if (isLrc) {
+          // 探测失败按 gbk 处理(保守: 转一遍总比设备端整篇不显示好)
+          try { lrcEnc = await lrcProbe(f); } catch (e) { lrcEnc = 'gbk'; }
+        } else {
+          try { info = await mp3ProbeFile(f); } catch (e) { info = null; }
+        }
+        uploadItems.push({ file: f, kind: isLrc ? 'lrc' : 'mp3', info: info, mode: 'auto',
+                           lrcEnc: lrcEnc });
       }
       log.innerHTML = '<div>已选 ' + uploadItems.length + ' 个文件，确认处理方式后点「上传」</div>';
       renderFileList();
@@ -925,8 +953,12 @@
           let blob = it.file, note = '';
           try {
             if (it.kind === 'lrc') {
-              blob = await lrcToUtf8(it.file);
-              note = '（歌词转 UTF-8）';
+              if (it.lrcEnc === 'utf-8') {
+                note = '（已是 UTF-8，原样上传）';   // 一个字节都不改, 直接传原文件
+              } else {
+                blob = await lrcToUtf8(it.file);
+                note = it.lrcEnc === 'gbk' ? '（歌词 GBK → UTF-8）' : '（歌词去 BOM）';
+              }
             } else if (willTranscode(it)) {
               log.innerHTML += '<div>⏳ 转码 ' + escHtml(name) + ' ...</div>';
               blob = await transcodeMp3(it.file, function (p) {

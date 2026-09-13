@@ -211,9 +211,14 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     free(buf);
     fclose(f);
 
-    if (ret < 0) {
+    // 完整性校验：httpd_req_recv 在对端提前断开时同样返回 0，与“body 已读满”的返回值相同，
+    // 因此只判 ret < 0 会把**截断的文件当成功留在 TF 卡上**（表现：歌曲提前结束、歌词只显示前半段，
+    // 而页面提示上传成功，极难排查）。这里以 Content-Length 为准复核实收字节数。
+    // content_len == 0 表示无 body/无长度信息（如 chunked），此时只保留 ret < 0 判断，避免误杀。
+    if (ret < 0 || (req->content_len > 0 && static_cast<size_t>(total) != req->content_len)) {
         remove(path);
-        ESP_LOGE(TAG, "Upload: recv interrupted ret=%d after %d bytes", ret, total);
+        ESP_LOGE(TAG, "Upload: incomplete recv ret=%d total=%d expected=%u", ret, total,
+                 static_cast<unsigned>(req->content_len));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "receive interrupted");
         return ESP_OK;  // 响应已通过 send_err 发送，返回 OK 避免 httpd 直接关闭 socket
     }
