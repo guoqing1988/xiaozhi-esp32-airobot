@@ -259,6 +259,19 @@ idf.py build flash
 
 > ⚠️ 用此方式构建时，还需在 `menuconfig` 开启 **WebSocket 支持**：`Component config → ESP HTTP server → HTTPD WS Support`（即 `CONFIG_HTTPD_WS_SUPPORT=y`）。否则本板 `/ws` 网页控制代码（`httpd_ws_*`）在未开启时未声明，会**编译失败**。
 
+### 方式三：一键编译 + 烧应用 + 监视（日常迭代推荐）
+
+```bash
+idf.py build app-flash monitor
+```
+
+> 等价于“编译 → 只写 app 分区 → 开串口监视”，一条命令走完，日常改代码验证最快。
+>
+> - 用「方式一」的 `scripts/build.py` 构建过一次后，也可以直接用这条命令编译+烧录（同一个 `build/` 目录，配置已就绪）；但**改了 `config.json` 的 `sdkconfig_append` 或板子选项时，仍要走 `scripts/build.py`** 重新配置。
+> - **`app-flash` 只写 app 分区**（本板网页页面、字体等嵌入式资源都编在 app 里，所以改网页/改代码只需它），比 `flash` 快，不动 bootloader / 分区表。**但改了 `partitions.csv` 或 bootloader 相关配置（如 console）时，必须改用 `idf.py build flash` 全量烧**，否则改动不生效。
+> - 有多个串口设备时显式指定端口：`idf.py -p COM3 build app-flash monitor`（macOS：`-p /dev/cu.usbserial-XXXX`）。**退出 monitor：`Ctrl+]`**。
+> - ⚠️ **本板 monitor 里看不到 `ESP_LOGx`**：日志默认写内存环形缓冲，请用网页「🐞 调试日志」面板看（详见「实时日志与下位机指令」）。串口只剩上电早期的 ROM/bootloader 输出。
+
 ### 查看编译日志与运行日志
 
 - `idf.py build` / `scripts/build.py` 都会把编译进度**打印到终端**，报错也会完整输出。若想留存日志：
@@ -273,6 +286,11 @@ idf.py build 2>&1 | tee build.log
 ```bash
 idf.py -p /dev/cu.usbserial-XXXX flash monitor
 ```
+
+> ⚠️ **本板的运行日志默认不在串口输出**：ESP32 的 console 与 Arduino 下位机控制指令**共用 UART0(GPIO43/44)**，日志走串口会污染指令流（表现为控制失灵/延迟）。
+> 因此运行日志改为写入**内存环形缓冲**，用**网页「🐞 调试日志」面板**查看（无需断线、无需串口）。
+> 串口 monitor 只能看到上电早期的 ROM/bootloader 输出，看不到 `ESP_LOGx`。
+> 要临时恢复串口日志：网页日志面板勾选「同时输出到串口」，或对 AI 说「打开串口日志」（会干扰 Arduino，用完记得关）。详见「实时日志与下位机指令」。
 
 ### 📦 打包合并固件（Flash 下载工具直接烧录）
 
@@ -341,6 +359,7 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 | 🎵 歌曲上传 | 多选上传 .mp3/.lrc、实时进度条、同名覆盖开关 | 「TF 卡本地歌曲播放」|
 | ⏰ AI 闹钟 | 查看/新增/删除闹钟 | 「AI 闹钟提醒」|
 | 🕹️ 机器人摇杆 | 麦克纳姆轮方向/速度控制 + 头部舵机 | 「Arduino 下位机」|
+| 🐞 调试日志 | 设备实时日志 + 下位机指令收发记录（**不落串口**，不干扰 Arduino）| 「实时日志与下位机指令」|
 
 - **入口与 IP**：待机时屏幕底部显示本机 IP，照输入浏览器即可；其他状态（说话中/聆听中等）自动隐藏。
 - 上传成功自动刷新歌曲列表，AI 立即能查到新歌；具体细节见对应章节。
@@ -657,6 +676,34 @@ ESP32 的 UART0 RX 解析任务维护状态（含 30 秒 busy 看门狗，防 `@
 
 > **不提供 AI 查询下位机状态的 MCP 工具**（原 `self.uno.get_status` 已移除）：动作执行完自动停止、无需确认，而 AI 每次动作后额外查询会多一轮云端工具调用往返，明显拖慢响应。
 
+### 实时日志与下位机指令（网页查看）
+
+**需求**：ESP32 的 console 与 Arduino 控制指令共用 UART0(GPIO43/44)，一旦把日志级别调高就会污染指令流（控制失灵/延迟）；而接线又一直连着 Arduino，串口 monitor 根本看不了日志。
+
+**做法**：用 `esp_log_set_vprintf()` 接管 `ESP_LOGx`，把日志写进**内存环形缓冲**（`log_capture.cc/h`），网页通过 WebSocket 按序号增量拉取。**默认不再写 UART0**，所以日志级别开到信息/调试也不会干扰 Arduino。
+
+- **入口**：网页「🐞 调试日志」面板（设备 IP 页顶部 tab）。
+  - **级别**：无 / 错误 / 警告 / 信息 / 调试。默认 `错误`（`ERROR`）；排查完请调回「错误」（级别调高会增加 CPU 与内存环写入量）。
+  - **同时输出到串口**：逃生开关。勾上后日志除进网页外**也照旧写 UART0**（会干扰 Arduino，仅网页打不开或需要接 USB-TTL 抓日志时用）。
+  - **清空显示 / 暂停**：只影响浏览器画面，不影响设备缓冲。
+- **下位机指令记录**：「🎮 机器人控制」面板底部（同一份数据，已按 `[UNO]` 前缀自动筛出）。看懂它就基本能定位控制问题：
+
+| 标记 | 含义 |
+|------|------|
+| `[UNO] > @go-forward-10` | ESP32 **确实发出了**该指令 |
+| `[UNO] ! @go-forward-10 （防抖丢弃）` | 命中防抖窗口，**没有发出**（AI 重复调用时常见，属正常拦截）|
+| `[UNO] x @... （指令过长 / UART 写入失败）` | 发送失败 |
+| `[UNO] < @busy go-forward-10` | Arduino 回执：**开始执行**（`@done` 为执行完毕，`@stat` 为速度/舵机快照）|
+
+  排查经验：**有 `>` 无 `<`** = 指令发出了但 Arduino 没执行或回执没回来（看接线/供电）；**只有 `!`** = 被防抖挡了；**什么都没有** = 指令没走到发送环节（问题在上层/MCP 调用）。
+- **AI 侧逃生与调试工具**（网页打不开时用语音）：
+  - `self.debug.log_to_serial(on)`：0=关闭（默认，日志只在网页）、1=打开串口日志（会干扰 Arduino）。
+  - `self.debug.set_log_level(level)`：0~4 切换日志级别。
+- **内存开销**（静态内部 RAM，不占 PSRAM）：环形缓冲 8KB + 网页拉取缓冲 2KB ≈ **10KB**；指令记录与系统日志**共用**同一个缓冲，因此指令功能不额外占内存。
+  - 嫌大：把 `log_capture.cc` 的 `kRingSize` 改为 `4096`、`http_upload_server.cc` 的 `pull_buf[2048]` 改为 `1024`，可降到约 5KB。
+  - 为何不放 PSRAM：临界区内访问 PSRAM 可能长时间持锁，会让等锁的中断超时（见 `sdkconfig.defaults` 关于中断看门狗的说明）。
+- **注意**：日志级别默认 `ERROR`，正常运行时网页日志面板几乎是空的，**只有下位机指令行**——这正是想要的（指令不被系统日志冲掉）。
+
 ### 巡线（4 路循迹传感器）
 - **接线**：传感器 `S1→D7, S2→D4, S3→D3, S4→D2`（`S1..S4` 从左到右），`GND→GND`，`5V→5V`（VCC）。
 - **原理**：4 路数字输出读线位置（加权 -1.5/-0.5/+0.5/+1.5）→ 比例差速（`LINE_KP`）控制左右轮保持沿黑线前进。
@@ -721,7 +768,7 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 3. 选择板型（Arduino UNO）和端口，编译烧录。
 
 ### 使用注意
-- **看日志/烧录 ESP32 时，请先断开 Arduino 与 ESP32 的接线**（因为 ESP32 的 GPIO43/44（板载 USB-UART）与 Arduino 共用，插电脑会产生干扰）。
+- **看日志不再需要断开 Arduino 接线**：ESP32 运行日志已改写到内存环形缓冲，用网页「🐞 调试日志」面板查看（详见「实时日志与下位机指令」）。仅**烧录**（USB 接电脑）时仍需断开 Arduino 接线，避免串口冲突。
 - ESP32 默认日志已降到 **`ERROR`**，且命令带 **`@` 前缀**（Arduino 只认 `@` 开头的行），日志乱码会被忽略，命令更稳定。
 - Arduino 程序用**固定 `char` 缓冲**解析命令（不用 `String`），适合 UNO 的 2KB SRAM，抗内存碎片。
 

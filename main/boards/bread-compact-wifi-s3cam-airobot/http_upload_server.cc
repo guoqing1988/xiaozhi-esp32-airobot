@@ -1,10 +1,12 @@
 #include "http_upload_server.h"
+#include "log_capture.h"
 
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_timer.h>
 #include <cJSON.h>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -57,6 +59,48 @@ static void UrlDecode(char* out, size_t out_size, const char* in) {
         }
     }
     out[o] = '\0';
+}
+
+// 把日志文本清洗成合法 UTF-8，再交给 cJSON 转义（cJSON 对高位字节原样输出，
+// 日志里若混入二进制会让前端 JSON.parse 整批失败）。裸 NUL 也一并替换：
+// c_str() 遇到 NUL 会截断，文本会莫名变短。
+static void SanitizeLogText(std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c == 0 || c < 0x80) {
+            out += (c == 0) ? '?' : static_cast<char>(c);
+            ++i;
+            continue;
+        }
+        // 高位字节：按 UTF-8 序列长度校验，非法则替换为 '?'
+        size_t seq = 0;
+        if ((c & 0xE0) == 0xC0) {
+            seq = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            seq = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            seq = 4;
+        }
+        bool ok = (seq > 0) && (i + seq <= s.size());
+        if (ok) {
+            for (size_t k = 1; k < seq; ++k) {
+                if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if (ok) {
+            out.append(s, i, seq);
+            i += seq;
+        } else {
+            out += '?';
+            ++i;
+        }
+    }
+    s.swap(out);
 }
 
 // 文件名安全化：去除路径分隔符，防止路径穿越；仅保留基础文件名
@@ -551,6 +595,51 @@ static std::string WsHandleMessage(const char* body) {
         int id = c_target ? c_target->valueint : -1;
         // 不在此处打日志: 日志与下位机控制指令共用 UART0, 会干扰指令下发。
         if (s_alarm_api.remove_alarm) resp = s_alarm_api.remove_alarm(id) ? "{\"ok\":true}" : "{\"ok\":false}";
+    } else if (strcmp(action, "log_pull") == 0) {
+        // 实时日志增量拉取(供网页「调试日志」面板)。日志已改写到内存环形缓冲、
+        // 不落 UART0，所以即使把级别开到 INFO 也不会污染 Arduino 指令流。
+        cJSON* c_since = cJSON_GetObjectItem(root, "since");
+        uint32_t since = (c_since != nullptr && cJSON_IsNumber(c_since))
+                             ? static_cast<uint32_t>(c_since->valuedouble)
+                             : 0;
+        // buf 用静态缓冲：不占 httpd 栈(上传大文件也用这个任务)；WS 帧由 httpd
+        // 单任务串行处理，不存在并发。
+        static char pull_buf[2048];
+        size_t len = 0;
+        uint32_t next_seq = 0;
+        LogCapturePull(since, pull_buf, sizeof(pull_buf), len, next_seq);
+        std::string text(pull_buf, len);
+        SanitizeLogText(text);
+        cJSON* j = cJSON_CreateObject();
+        if (j != nullptr) {
+            cJSON_AddNumberToObject(j, "seq", static_cast<double>(next_seq));
+            cJSON_AddStringToObject(j, "text", text.c_str());
+            cJSON_AddNumberToObject(j, "mirror", LogCaptureGetUartMirror() ? 1 : 0);
+            cJSON_AddNumberToObject(j, "level", static_cast<int>(esp_log_level_get("*")));
+            // 缓冲装满说明可能还有积压，前端据此立即再拉一次追平（首次进入时常见）
+            cJSON_AddNumberToObject(j, "more", (len == sizeof(pull_buf)) ? 1 : 0);
+            char* s = cJSON_PrintUnformatted(j);
+            if (s != nullptr) {
+                resp = s;
+                free(s);
+            }
+            cJSON_Delete(j);
+        }
+    } else if (strcmp(action, "log_level") == 0) {
+        // 网页直接切日志级别，等价于 AI 工具 self.debug.set_log_level：0无 1错误 2警告 3信息 4调试
+        cJSON* c_level = cJSON_GetObjectItem(root, "level");
+        int lv = c_level != nullptr ? c_level->valueint : 1;
+        if (lv < 0) lv = 0;
+        if (lv > 4) lv = 4;
+        esp_log_level_set("*", static_cast<esp_log_level_t>(lv));
+        resp = std::string("{\"ok\":true,\"level\":") + std::to_string(lv) + "}";
+    } else if (strcmp(action, "log_mirror") == 0) {
+        // 逃生开关：恢复传统串口日志(会干扰 Arduino)。网页打不开时可用 AI 工具
+        // self.debug.log_to_serial 打开。
+        cJSON* c_on = cJSON_GetObjectItem(root, "on");
+        bool on = (c_on != nullptr) && (cJSON_IsBool(c_on) ? cJSON_IsTrue(c_on) : c_on->valueint != 0);
+        LogCaptureSetUartMirror(on);
+        resp = std::string("{\"ok\":true,\"mirror\":") + (on ? "1" : "0") + "}";
     }
     cJSON_Delete(root);
     // 若请求带 id, 将 id 注入到响应 JSON 中, 便于前端精确匹配请求-回执。

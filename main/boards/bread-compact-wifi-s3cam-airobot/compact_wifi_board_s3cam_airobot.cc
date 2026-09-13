@@ -7,6 +7,7 @@
 #include "application.h"
 #include "button.h"
 #include "config.h"
+#include "log_capture.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
 #include "led/single_led.h"
@@ -798,6 +799,7 @@ private:
                         uno_last_action_ = tok + 6;
                     }
                     status_changed = true;
+                    LogCaptureAppend("[UNO] < %s\n", tok);
                 } else if (strncmp(tok, "@stat ", 6) == 0) {
                     // 事件驱动的状态快照(速度/舵机变化时上报), 后续在此追加可选字段
                     int s = -1, v = -1;
@@ -805,6 +807,7 @@ private:
                         uno_speed_ = s;
                         uno_servo_ = v;
                         status_changed = true;
+                        LogCaptureAppend("[UNO] < %s\n", tok);
                     }
                 } else if (strncmp(tok, "@done", 5) == 0) {
                     uno_busy_ = false;
@@ -814,6 +817,7 @@ private:
                         uno_last_action_ = tok + 6;
                     }
                     status_changed = true;
+                    LogCaptureAppend("[UNO] < %s\n", tok);
                 }
                 tok = strtok(nullptr, "\r\n");
             }
@@ -843,6 +847,8 @@ private:
             // 旧实现命中时不刷新, 窗口变成"距上次实际发送的时间", 导致每 2 次调用放行 1 次
             // (实测每 1.8 秒下发一条), 特技/动作被反复触发(表现为"一直摇头/一直前进停不下来")。
             s_last_us = now;
+            // 记到网页调试面板: 否则“AI 反复调用但什么都没发生”时分不清是被防抖挡了还是没发出去
+            LogCaptureAppend("[UNO] ! @%s （防抖丢弃）\n", command_str);
             return std::string("指令已发送(防抖): ") + command_str;  // 防抖丢弃, 视为成功
         }
         if (debounce) {
@@ -854,9 +860,16 @@ private:
         // 其 readBytesUntil('\n') 默认超时 1000ms 会干等 -> web 控制出现约 1 秒延迟。
         char frame[80];
         int flen = snprintf(frame, sizeof(frame), "@%s\n", command_str);
-        if (flen <= 0 || flen >= (int)sizeof(frame)) return std::string("指令发送失败: ") + command_str;
+        if (flen <= 0 || flen >= (int)sizeof(frame)) {
+            LogCaptureAppend("[UNO] x @%s （指令过长）\n", command_str);
+            return std::string("指令发送失败: ") + command_str;
+        }
         int written = uart_write_bytes(ECHO_UART_PORT_NUM, frame, flen);
-        if (written < 0) return std::string("指令发送失败: ") + command_str;
+        if (written < 0) {
+            LogCaptureAppend("[UNO] x @%s （UART 写入失败）\n", command_str);
+            return std::string("指令发送失败: ") + command_str;
+        }
+        LogCaptureAppend("[UNO] > @%s\n", command_str);
         return std::string("指令已发送: ") + command_str;
     }
 
@@ -1071,23 +1084,39 @@ private:
             });
     }
 
-    // 调试工具: 临时切换系统日志级别(避免 GPIO43 日志污染 Arduino)
+    // 调试工具: 切换系统日志级别 + 串口日志逃生开关(日志默认只进网页, 避免 GPIO43 污染 Arduino)
     void InitializeDebugTools() {
         auto& mcp_server = McpServer::GetInstance();
         mcp_server.AddTool(
             "self.debug.set_log_level",
-            "临时切换系统日志级别(调试用). level: 0=无日志,1=错误,2=警告,3=信息,4=调试",
+            "临时切换系统日志级别(调试用). level: 0=无日志,1=错误,2=警告,3=信息,4=调试。"
+            "日志默认只在网页「调试日志」面板可见(不落串口, 不会干扰 Arduino 控制)",
             PropertyList({Property("level", kPropertyTypeInteger, 3, 0, 4)}),
             [](const PropertyList& properties) -> ReturnValue {
                 int lv = properties["level"].value<int>();
                 esp_log_level_set("*", (esp_log_level_t)lv);
                 return true;
             });
+        // 逃生开关: 网页打不开时可以喊 AI 恢复传统串口日志(会干扰 Arduino, 用完关掉)
+        mcp_server.AddTool(
+            "self.debug.log_to_serial",
+            "调试用: 是否把系统日志同时输出到串口(GPIO43)。默认关闭——本板串口与 Arduino "
+            "下位机控制指令共用, 打开会干扰机器人控制。0=关闭(默认, 日志只在网页看), 1=打开",
+            PropertyList({Property("on", kPropertyTypeInteger, 1, 0, 1)}),
+            [](const PropertyList& properties) -> ReturnValue {
+                bool on = properties["on"].value<int>() != 0;
+                LogCaptureSetUartMirror(on);
+                return on ? "已打开串口日志(会干扰 Arduino 控制, 用完请喊我关掉)"
+                          : "已关闭串口日志(日志仅在网页「调试日志」可见)";
+            });
     }
 
 public:
     CompactWifiBoardS3CamAirobot() :
         boot_button_(BOOT_BUTTON_GPIO) {
+        // 第一件事就接管日志: 本板 console 与 Arduino 控制指令共用 UART0, 日志不落串口
+        // 才不会污染下位机指令流(详见 log_capture.h)。越早装, 能留下的启动日志越全。
+        LogCaptureInit();
         InitializeSpi();
         InitializeLcdDisplay();
         InitializeButtons();
