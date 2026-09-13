@@ -174,9 +174,20 @@ class TestLogWebApi(unittest.TestCase):
         self.assertIn("startLogPolling()", body, "切入日志面板要启动轮询")
         self.assertIn("stopLogPolling()", body, "切走要停止轮询，避免无谓流量")
 
-    def test_web_has_log_tab(self):
-        self.assertIn("panel-log", self.web)
-        self.assertIn("showTab('log'", self.web)
+    def test_web_log_lives_in_uno_panel(self):
+        """日志区不能再占顶部 tab，要挂在「机器人控制」面板里（折叠展示）。"""
+        self.assertNotIn('id="panel-log"', self.web, "顶部不应再有独立的日志面板")
+        self.assertNotIn("showTab('log'", self.web, "顶部不应再有日志 tab 按钮")
+        for el in ('id="logView"', 'id="logLevel"', 'id="logMirror"', 'id="logPauseBtn"'):
+            self.assertIn(el, self.web, f"日志控件 {el} 必须保留（只是换了位置）")
+        # 位置校验：日志区必须排在 panel-uno 之后（即在该面板内部）
+        self.assertGreater(
+            self.web.index('id="logView"'),
+            self.web.index('id="panel-uno"'),
+            "日志区应在「机器人控制」面板内部",
+        )
+        # 默认收起，否则机器人面板会变得很长
+        self.assertIn('<details class="logbox">', self.web)
 
 
 class TestUnoCommandTrace(unittest.TestCase):
@@ -222,11 +233,11 @@ class TestUnoCommandTrace(unittest.TestCase):
         self.assertIn("l.indexOf('[UNO]') === 0", self.web)
 
     def test_uno_panel_starts_log_polling(self):
-        """机器人在页也需要这份数据，否则指令区永远是空的。"""
+        """日志轮询要跟着「机器人控制」面板的显隐启停，否则第一次进去指令区是空的。"""
         m = re.search(r"function showTab\(id, btn\)\s*\{(.*?)\n    \}", self.web, re.S)
         self.assertIsNotNone(m, "未找到 showTab 定义")
         body = m.group(1)
-        self.assertIn("id === 'log' || id === 'uno'", body)
+        self.assertIn("if (id === 'uno') startLogPolling();", body)
 
     def test_clear_clears_both(self):
         m = re.search(r"function clearLogView\(\)\s*\{(.*?)\n    \}", self.web, re.S)
