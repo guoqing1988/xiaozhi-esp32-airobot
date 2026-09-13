@@ -385,14 +385,30 @@
       color: #6b7280
     }
 
-    #unoStatus {
+    /* WebSocket 连接状态(常驻)：圆点 + 文字；临时提示几秒后自动回到连接状态 */
+    .wsbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
       font-size: 12.5px;
-      color: #374151;
-      background: #f8f9fb;
-      border-radius: 8px;
-      padding: 8px 10px;
-      margin: 8px 0;
-      text-align: center
+      color: #6b7280;
+      padding: 0 2px 8px
+    }
+
+    .wsdot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #9ca3af
+    }
+
+    .wsdot.on {
+      background: #22c55e
+    }
+
+    .wsdot.off {
+      background: #ef4444
     }
 
     /* 移动端长按禁用: 摇杆/方向标签/按钮 不弹出选择复制文本或系统菜单 */
@@ -454,6 +470,12 @@
 <body>
   <div class="wrap">
     <!-- <div class="app-title">小智 AI 机器人<small>设备管理 · 歌曲 & 闹钟 & 机器人控制</small></div> -->
+
+    <!-- WebSocket 连接状态(常驻)：上传/遥控/日志都走这条长连接，连不上时一眼能看到 -->
+    <div class="wsbar">
+      <span id="wsdot" class="wsdot off"></span>
+      <span id="wslog">连接中…</span>
+    </div>
 
     <div class="tabs">
       <button class="tab active" onclick="showTab('upload',this)">🎵 歌曲管理</button>
@@ -547,7 +569,6 @@
     <div class="panel" id="panel-uno">
       <!-- <h3>🎮 机器人控制</h3> -->
       <!-- <div class="hint">拖动摇杆控制麦克纳姆轮机器人：前后左右及斜向均为平移（左右=横向挪移），推得越远速度越快，松手回中即停止；原地转圈请用下方「左转/右转」按钮。</div> -->
-      <div id="unoStatus">状态加载中…</div>
       <div class="joy-wrap">
         <div class="joystick" id="joyBase">
           <span class="dir-label" style="left:50%;top:7px;transform:translateX(-50%)">前进</span>
@@ -627,12 +648,12 @@
     function wsConnect() {
       ws = new WebSocket('ws://' + location.host + '/ws');
       ws.onopen = function () {
-        wsOk = true; logWs('已连接');
+        wsOk = true; setWsStatus('已连接', true);
         // 首屏数据必须等 WS 就绪后再拉: 页面加载瞬间 readyState 还是 CONNECTING,
         // 那时发请求会被 wsSend 直接拒掉(表格显示"接口不可用"), 与就绪时序存在竞态。
         if (wsFirstOpen) { wsFirstOpen = false; loadActivePanel(); }
       };
-      ws.onclose = function () { wsOk = false; logWs('断开，重连中…'); setTimeout(wsConnect, 1000); };
+      ws.onclose = function () { wsOk = false; setWsStatus('断开，重连中…', false); setTimeout(wsConnect, 1000); };
       ws.onerror = function () { ws.close(); };
       ws.onmessage = function (ev) {
         let j = null; try { j = JSON.parse(ev.data); } catch (e) { return; }
@@ -653,7 +674,22 @@
         setTimeout(function () { if (wsPending.has(id)) { wsPending.delete(id); reject(new Error('timeout')); } }, timeout);
       });
     }
-    function logWs(t) { const el = document.getElementById('wslog'); if (el) el.textContent = t; }
+    // 页首连接状态(常驻)：wsStatusText 保存当前状态，一次性提示(如发送失败)几秒后自动恢复。
+    let wsStatusText = '连接中…', wsStatusTimer = null;
+    function renderWs(t) { const el = document.getElementById('wslog'); if (el) el.textContent = t; }
+    function setWsStatus(t, ok) {
+      wsStatusText = t;
+      clearTimeout(wsStatusTimer);
+      const dot = document.getElementById('wsdot');
+      if (dot) dot.className = 'wsdot ' + (ok ? 'on' : 'off');
+      renderWs(t);
+    }
+    // 一次性提示：只覆写文字，不动连接状态圆点，2.5 秒后回到连接状态
+    function logWs(t) {
+      renderWs(t);
+      clearTimeout(wsStatusTimer);
+      wsStatusTimer = setTimeout(function () { renderWs(wsStatusText); }, 2500);
+    }
     // ===== 调试日志（实时） =====
     // 设备把日志与下位机指令写进内存环形缓冲（不落串口，见 log_capture.h），这里按 seq 增量拉取。
     // 只在需要它的面板可见时轮询，切走即停，避免无谓的 WS 流量。
@@ -761,7 +797,7 @@
       if (!p) return;
       if (p.id === 'panel-upload') loadSongs();
       else if (p.id === 'panel-alarm') loadAlarms();
-      else if (p.id === 'panel-uno') { loadUnoStatus(); loadServoHome(); startLogPolling(); }
+      else if (p.id === 'panel-uno') { loadServoHome(); startLogPolling(); }
       else if (p.id === 'panel-log') startLogPolling();
     }
     // ===== 上传弹窗 =====
@@ -1305,8 +1341,6 @@
         } else {
           unoQueueDrive();
         }
-        // 本地乐观更新状态显示(按住即动): 摇杆由前端直接驱动, 不依赖服务器推送
-        renderUnoStatus({ mode: 'moving', action: dir, speed: speed });
       }
       if (!unoInterval) { unoInterval = setInterval(unoSendDrive, 250); }  // 心跳保活(约4Hz, 仍在 Arduino 1500ms 看门狗窗口内)
     }
@@ -1315,8 +1349,6 @@
       if (unoInterval) { clearInterval(unoInterval); unoInterval = null; }
       if (unoPendTimer) { clearTimeout(unoPendTimer); unoPendTimer = null; }   // 停止时丢弃待补发的 drive
       wsSend({ action: 'uno_stop' }).catch(() => {});
-      // 本地乐观更新: 松手/回中 -> 状态回空闲(web 驾驶不触发服务器推送, 故前端直接改显示值)
-      renderUnoStatus({ mode: 'idle', action: '', speed: null });
       document.getElementById('joyLabel').textContent = '松手回中';
       document.getElementById('joySpeed').textContent = '速度 0';
       const knob = document.getElementById('joyKnob'); if (knob) knob.style.transform = 'translate(-50%,-50%)';
@@ -1394,20 +1426,12 @@
     bindTurnBtn('btnTurnRight', 'right');
     // 全局禁止长按弹出系统菜单/文本选择(移动端)
     document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    // 下位机状态推送：页面已不再显示状态文本(改由「下位机指令记录」体现)，
+    // 但舵机角度必须保留——Arduino 侧 SELECT/START 微调、AI 指令改角度都靠它同步到滑块。
     function renderUnoStatus(j) {
-      const el = document.getElementById('unoStatus');
-      if (!el) return;
-      const nmap = { moving: '运动中', idle: '空闲', line_follow: '巡线中' };
-      el.textContent = '状态: ' + (nmap[j.mode] || j.mode || '?') + ' | 动作: ' + (j.action || '-') + ' | 速度: ' + (j.speed != null ? j.speed : '-');
-      // 设备上报了真实舵机角度时以设备为准(Arduino 侧 SELECT/START 微调、AI 指令改角度都能同步过来)
-      if (j.servo != null) setServoDeg(j.servo, false);
+      if (j && j.servo != null) setServoDeg(j.servo, false);
     }
     function updateUnoStatus(j) { renderUnoStatus(j); }   // WS 主动推送调用
-    function loadUnoStatus() {
-      wsSend({ action: 'uno_status' })
-        .then(renderUnoStatus)
-        .catch(() => { const el = document.getElementById('unoStatus'); if (el) el.textContent = '状态不可用'; });
-    }
     // ===== 头部舵机控制 BEGIN(host 测试按此标记提取, 改动时请保留标记) =====
     // 滑块粗调 + 「− / +」微调(每次 SERVO_STEP 度), 两者共用同一角度状态。
     const SERVO_STEP = 5;         // 「− / +」每次步进角度
@@ -1479,9 +1503,8 @@
     }
     // ===== 头部舵机控制 END =====
     function startUnoPolling() {
-      loadUnoStatus();
       loadServoHome();
-      // 状态由 WS 主动推送更新(替代旧的 1500ms 轮询), 此处只需初始化一次
+      // 下位机状态由 WS 主动推送(见 renderUnoStatus)，这里只需取一次舵机回正值
     }
     function stopUnoPolling() {
       // WS 常驻, 无需停止; 仅在离开面板时由 showTab 触发 unoStop()

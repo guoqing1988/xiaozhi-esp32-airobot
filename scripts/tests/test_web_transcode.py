@@ -91,10 +91,9 @@ class TestWebPageStaticChecks(unittest.TestCase):
         html = self.page_html()
         ids = set(re.findall(r"id=\"([A-Za-z0-9_-]+)\"", html))
         refs = set(re.findall(r"getElementById\(['\"]([A-Za-z0-9_-]+)['\"]\)", html))
-        # 已知例外(既有问题，非本次引入)：wslog —— logWs() 内部做了 if (el) 判空所以无副作用，
-        # 但板级 README 提到“页面顶部 #wslog 会提示发送失败”，因元素不存在实际不会显示。
-        # 登记在此以免掩盖新引入的缺失引用；待后续决定是补元素还是改文档。
-        known_missing = {"wslog"}
+        # 已无已知例外：原先 #wslog 元素缺失（logWs() 靠 if (el) 判空静默失效，踩坑 8 声称的
+        # “页面顶部 #wslog 会提示发送失败”实际从不显示），已在页首补上该元素。
+        known_missing = set()
         missing = sorted(refs - ids - known_missing)
         self.assertFalse(missing, f"以下元素在页面 HTML 中不存在: {missing}")
 
