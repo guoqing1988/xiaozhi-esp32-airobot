@@ -408,15 +408,15 @@
       margin-bottom: 10px
     }
 
-    .frow > label {
+    .frow>label {
       font-size: 13px;
       color: #6b7280;
       width: 42px;
       flex-shrink: 0
     }
 
-    .frow > select,
-    .frow > input {
+    .frow>select,
+    .frow>input {
       flex: 1;
       min-width: 0
     }
@@ -516,8 +516,38 @@
 
     .turn-btn {
       touch-action: none;
-      font-size: 14px;
-      padding: 9px 18px
+      /* 与摇杆同行，宽度不再写死：flex 平分剩余空间(窄屏也不溢出)，
+         字号/内边距同时收小，避免把 190px 的摇杆挤变形 */
+      flex: 1 1 0;
+      min-width: 0;
+      font-size: 13px;
+      padding: 9px 4px;
+      white-space: nowrap
+    }
+
+    /* 摇杆与「左转/右转」所在行。同时也是急停按钮的定位基准：急停贴在本行
+       左上角，和摇杆顶部的「前进」标签同一水平线，不额外占一行。 */
+    .joy-line {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%
+    }
+
+    /* 紧急停止：浮在摇杆行的左上角。行高由 190px 的摇杆撑开，而「左转」按钮
+       只有 ~30px 高、垂直居中，所以贴顶的左侧是空着的，不会压到它（窄屏也不怕，
+       “左转”是垂直居中而不是靠顶）。内容只有 STOP 四个字母，尺寸靠内边距撑。 */
+    .stop-btn {
+      position: absolute;
+      top: 0;
+      left: 0;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .5px;
+      line-height: 1
     }
 
     .turn-btn:active {
@@ -544,7 +574,7 @@
       margin-top: 14px
     }
 
-    .logbox > summary {
+    .logbox>summary {
       cursor: pointer;
       font-size: 13px;
       color: #374151;
@@ -699,19 +729,25 @@
       <!-- <h3>🎮 机器人控制</h3> -->
       <!-- <div class="hint">拖动摇杆控制麦克纳姆轮机器人：前后左右及斜向均为平移（左右=横向挪移），推得越远速度越快，松手回中即停止；原地转圈请用下方「左转/右转」按钮。</div> -->
       <div class="joy-wrap">
-        <div class="joystick" id="joyBase">
-          <span class="dir-label" style="left:50%;top:7px;transform:translateX(-50%)">前进</span>
-          <span class="dir-label" style="left:50%;bottom:7px;transform:translateX(-50%)">后退</span>
-          <span class="dir-label" style="left:7px;top:50%;transform:translateY(-50%)">左移</span>
-          <span class="dir-label" style="right:7px;top:50%;transform:translateY(-50%)">右移</span>
-          <div class="joystick-knob" id="joyKnob"></div>
+        <!-- 左转/右转与摇杆同行：紧贴摇杆两侧，与摇杆内的「左移/右移」标签同高，
+             比原来单独占一行更紧凑（原来那行已删除） -->
+        <div class="joy-line">
+          <!-- 紧急停止浮在本行左上角（与摇杆顶部「前进」同一水平线），不单独占行。
+               绝对定位在这里是安全的：行高由摇杆撑开，「左转」垂直居中，贴顶的
+               左侧必然是空地；它也不在 #joyBase 内，不会跟摇杆抢 pointer 事件。 -->
+          <button class="btn btn-danger stop-btn" onclick="unoStop()" title="紧急停止" aria-label="紧急停止">停止</button>
+          <button class="btn turn-btn" id="btnTurnLeft">左转</button>
+          <div class="joystick" id="joyBase">
+            <span class="dir-label" style="left:50%;top:7px;transform:translateX(-50%)">前进</span>
+            <span class="dir-label" style="left:50%;bottom:7px;transform:translateX(-50%)">后退</span>
+            <span class="dir-label" style="left:7px;top:50%;transform:translateY(-50%)">左移</span>
+            <span class="dir-label" style="right:7px;top:50%;transform:translateY(-50%)">右移</span>
+            <div class="joystick-knob" id="joyKnob"></div>
+          </div>
+          <button class="btn turn-btn" id="btnTurnRight">右转</button>
         </div>
         <div id="joyLabel">松手回中</div>
         <div id="joySpeed">速度 0</div>
-        <div class="row" style="justify-content:center;margin-top:2px;gap:18px">
-          <button class="btn turn-btn" id="btnTurnLeft">⟲ 左转</button>
-          <button class="btn turn-btn" id="btnTurnRight">⟳ 右转</button>
-        </div>
       </div>
       <div class="row" style="align-items:center;margin-top:6px;flex-wrap:nowrap">
         <span style="font-size:13px;color:#6b7280;min-width:60px">🔧 头部舵机</span>
@@ -734,16 +770,14 @@
       </div>
       <!-- <div class="hint">头部舵机：拖动滑块或点 − / + 微调（每次 5°），「回正」转到下方回正值。<br>
         回正值即「回正」按钮让头部停靠的角度，可直接输入数字（回车/失焦生效）或点 − / +；实时写入设备(NVS)，断电保留。</div> -->
-      <div class="row" style="justify-content:center">
-        <button class="btn btn-danger" onclick="unoStop()">🛑 紧急停止</button>
-      </div>
       <!-- <div class="hint" style="margin-top:14px">
         下位机指令记录（<code>&gt;</code> 已发出 · <code>!</code> 被防抖拦截（未发出）· <code>×</code> 发送失败 · <code>&lt;</code> 下位机回执）：<br>
         排查「页面/语音控制没反应」时看这里：有 <code>&gt;</code> 无 <code>&lt;</code> = 指令发出了但 Arduino 没执行；
         只有 <code>!</code> = 被防抖挡了；什么都没有 = 指令没走到发送环节。
       </div> -->
       <div class="row" style="align-items:center">
-        <span style="font-size:12.5px;color:#6b7280;flex:1;line-height:1.4">下位机指令记录（<code>&gt;</code> 已发出 · <code>!</code> 被防抖拦截 · <code>×</code> 发送失败 · <code>&lt;</code> 下位机回执）</span>
+        <span style="font-size:12.5px;color:#6b7280;flex:1;line-height:1.4">下位机指令记录（<code>&gt;</code> 已发出 ·
+          <code>!</code> 被防抖拦截 · <code>×</code> 发送失败 · <code>&lt;</code> 下位机回执）</span>
         <button class="btn" onclick="copyPre('unoCmdView', this)">📋 复制</button>
       </div>
       <pre id="unoCmdView"></pre>
