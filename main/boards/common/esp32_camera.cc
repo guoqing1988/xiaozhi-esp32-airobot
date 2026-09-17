@@ -380,7 +380,29 @@ std::string Esp32Camera::Explain(const std::string &question) {
     });
 
     auto network = Board::GetInstance().GetNetwork();
-    auto http = network->CreateHttp(3);
+    // 上传解释用的 HTTP 客户端**刻意常驻复用**，不随每次拍照析构。
+    //
+    // 原因（2026-09 真机崩溃，backtrace 落在 http_client.cc 的 OnTcpDisconnected）：
+    //   本请求头是 `Connection: close`，服务器响应完就主动关连接，于是两条线程赛跑：
+    //     tcp_receive 任务：recv 返 0 → EspTcp::DoDisconnect(false) → 回调 OnTcpDisconnected()
+    //     主任务：ReadAll() 返 → Close()（connected_ 已 false，**直接 return，不等接收任务**）
+    //             → Explain 返回 → unique_ptr<Http> 析构 → **mutex_ 被销毁**
+    //   接收任务这时才 lock(mutex_) → pthread_mutex_lock 拿到已销毁的 sem
+    //     → assert(xQueueSemaphoreTake … (pxQueue)) → panic 重启。
+    //   窗口只有微秒级，所以表现为“偶发”，且任何打乱时序的操作（比如先网页拍一张）
+    //   都会改变命中概率 —— 那是躲开子弹，不是治病。
+    //
+    // 常驻后 mutex_ 一直有效，晚一步的回调不再致命；下一次拍照重建 TCP 连接时，
+    // 上一次的接收任务早已退出（间隔是“秒”，它只需“毫秒”）。
+    //
+    // ⚠ 这是对上游组件缺陷的**规避**而非根治：78/esp-ml307 到 main 分支的
+    //   ~HttpClient / EspTcp::Disconnect 仍是同样写法，上游修好后可改回每次新建。
+    // ⚠ Explain 由 MCP 工具串行调用，所以共用单个实例是安全的。
+    static std::unique_ptr<Http> explain_http;
+    if (explain_http == nullptr) {
+        explain_http = network->CreateHttp(3);
+    }
+    auto& http = explain_http;
     http->SetTimeout(15000);  // 上传+解释总超时 15s(默认 30s 太长, 失败会卡住设备流程)
     std::string boundary = "----ESP32_CAMERA_BOUNDARY";
 

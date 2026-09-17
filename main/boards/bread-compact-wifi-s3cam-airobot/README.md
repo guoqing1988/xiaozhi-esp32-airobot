@@ -520,8 +520,10 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - **相册里看不到刚拍的 AI 照片** → 先确认「AI 拍照也存卡」是勾上的；对 AI 说「打开 AI 拍照存卡」可恢复默认。
 - **照片颜色反了** → 编码源问题，见「网页拍照」排查（RGB565 字节序在 `Capture()` 里就已处理好，编码时**不要**再换一次）。
 - **张数超过 100** → 正常不会；若出现，是清理失败（如卡只读），删掉几张或检查卡。
-- **一让 AI 拍照就重启** → 编码线程栈溢出（**不是内存不够**），见踩坑 18：
-  网页拍照（httpd 栈 8KB）正常、AI 拍照（编码线程）崩，就是最典型的症状。
+- **一让 AI 拍照就重启** → 接串口看 backtrace，这是两种完全不同的死法（「共网拍照正常、
+  只有 AI 拍照崩」是它们共同的症状：AI 拍照多了「上传给大模型解释」这条 HTTP 路径）：
+  - `vApplicationStackOverflowHook` / `A stack overflow in task pthread` → 编码线程栈溢出，见踩坑 18；
+  - `xQueueSemaphoreTake` / `OnTcpDisconnected` → ml307 `HttpClient` 析构竞态，见踩坑 19。
 
 ## 待机全屏大时钟（AI 控制 + 多主题 + 本地持久化）
 
@@ -1182,6 +1184,71 @@ PSRAM（与 `local_music_player` 的播放线程同法），任务名从 `pthrea
 
 **教训**：本仓库 `std::thread` 的默认栈只有 3KB，**凡是带着重活（编解码、写卡、JSON、网络）
 的线程都必须显式放大栈**；尤其是往已有回调/线程里加新调用时，先问一句「这条线程的栈还剩多少」。
+
+> 后续：栈修好后 AI 拍照又露出了下一层问题（ml307 `HttpClient` 析构竞态）——见踩坑 19。
+> 两次崩溃的 backtrace 完全不同，不要混为一谈：栈那层看 `vApplicationStackOverflowHook`，
+> 下一层看 `xQueueSemaphoreTake` / `OnTcpDisconnected`。
+
+### 19. AI 拍照偶发重启（ml307 HttpClient 析构竞态，2026-09 规避）
+
+**现象**：栈溢出修好后，AI 拍照仍会重启，且“偶发”得很有规律（重启几次后又正常几次）。
+串口 backtrace **全部落在上游组件里**（本项目自己的代码一帧都没出现）：
+
+```
+assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))
+--- pthread_mutex_lock_internal → std::mutex::lock()
+--- HttpClient::OnTcpDisconnected()        http_client.cc:281
+--- HttpClient::Open(...)::{lambda()#1}    http_client.cc:213
+--- EspTcp::DoDisconnect → EspTcp::ReceiveTask
+```
+
+**根因**（组件生命周期竞态，不是内存问题）：`pthread_mutex_destroy()` 会把 mutex 的 sem 置空，
+断言 `pxQueue` 为空就说明 **mutex 已经被析构**；而调用它的却是 EspTcp 的 `tcp_receive` 任务
+—— 对象析构后回调才到：
+
+```
+tcp_receive 任务                    主任务（Explain）
+──────────────────────────────────  ─────────────────────────────────
+recv 返 0（服务器关连接）            ReadAll() 返回
+DoDisconnect(false)                 Close()   ← connected_ 已 false，直接 return，
+  connected_ = false                             **不等接收任务退出**
+  close(fd)                         Explain 返回 → unique_ptr<Http> 析构
+  回调 OnTcpDisconnected() ──┐              → **mutex_ 被销毁**
+                             └────→ 此刻才 lock(mutex_) → assert → 重启
+```
+
+触发条件是 `Connection: close`（`HttpClient::keep_alive_` 默认 false，`Explain()` 也没开它）：
+服务器响应完就主动关连接——也就是**几乎每次拍照都会走到这条路径**，只是窗口只有**微秒级**，
+命中与否取决于两条线程的相对速度。
+
+**为什么会“先网页拍一张，AI 拍照就正常”**：网页拍照会引入几百毫秒额外活动（抓帧 + 编码 +
+httpd 回图 + WS 推送），把时序错开，于是那一枪没打中。**那是躲开子弹，不是治病** —— 多试几次仍会崩。
+反过来，这也是判断“偶发重启是不是竞态”的一个实用信号：**任何打乱时序的操作都能改变命中概率**。
+
+**为什么升级组件也修不掉**：拉过 `78/esp-ml307` **main 分支**的两个文件，
+`~HttpClient()`（仍只做 Close + 删 event group）与 `EspTcp::Disconnect()`（仍 `if (!connected_) return;`）
+**一字未改**；上游 3.7.1/3.7.2 修的是 `ReadAll` 死锁与栈缓冲，不是这条竞态 —— 升级到 3.7.x 无效
+（还带 `NetworkResult` 的破坏性 API 变更）。
+
+**规避做法**（板级做不了：线程与对象都在共享的 `Esp32Camera::Explain()` 里）：把 Explain 的
+HttpClient 改成**常驻复用**（`static std::unique_ptr<Http> explain_http`，判空只建一次）：
+
+- 对象不析构 → `mutex_` 一直有效 → 晚一步的回调不再致命（最多一次无害的重复状态更新）；
+- 下一次拍照重建 TCP 时，上一次的接收任务早已退出（间隔是“秒”，它只需“毫秒”）；
+- `Close()` 一个都不能省：常驻的是**对象**不是**连接**，不关连接会占满 LWIP socket 池并把
+  小智的 UDP 音频通道挤掉（踩坑 9）。
+
+> ⚠ **这是规避，不是根治**。等上游把 `~HttpClient` / `EspTcp::Disconnect` 改成“析构前等待接收任务退出”
+> 后，可以改回每次新建（代码注释里已写明，单测也会拦住“顺手改回去”）。
+
+**排查手段**：这类崩溃的 backtrace 里看不到本项目源码 —— 只要看到 `http_client.cc` / `esp_tcp.cc`，
+就是组件的 HTTP 生命周期问题，不要去查摄像头或内存。
+
+**同类隐患（本次未动）**：`main/mcp_server.cc`（屏幕快照上传）与 `main/boards/common/esp_video.cc`
+也各自 `CreateHttp(3)` 用完即弃，同一条竞态路径；本板目前只有 AI 拍照会稳定触发。
+
+**回归防护**：`scripts/tests/test_airobot_camera_explain_http.py`（不得每次新建、常驻必须判空只建一次、
+Close/超时必须保留、注释必须写明是规避）。
 
 ## 与上游合并提示
 
