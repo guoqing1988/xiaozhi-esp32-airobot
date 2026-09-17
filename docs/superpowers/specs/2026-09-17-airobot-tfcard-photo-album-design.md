@@ -103,8 +103,10 @@ void SetJpegObserver(std::function<void(const uint8_t *jpeg, size_t len)> cb);
 if (jpeg_observer_) jpeg_observer_(static_cast<const uint8_t*>(data), len);
 ```
 
-- 线程：观察者在**编码线程**运行；实现里必须只做「memcpy 到 PSRAM + 写卡」，且**不 join、不阻塞上传**。
-- 时序：写卡与上传**并行**（上传线程已在从队列取数据），AI 响应只慢约 100~300ms（SD 写盘）。
+- 线程：观察者在**编码线程**运行，回调内**同步写卡**（`fwrite` 直接从 `data` 读，零额外缓冲）。
+  - 为什么不能只记下指针稍后写：`index==0` 的 `data` 只在该次回调期间有效（编码器内部缓冲会被复用），回调返回后不得再用，因此必须在回调内写完（或自己 memcpy 一份）。
+  - 代价：写卡期间占用编码线程 100~300ms，但队列里已投递完整 JPEG，**上传线程不受阻**；只是 `Explain()` 末尾的 `encoder_thread_.join()` 要等它，AI 响应尾延 100~300ms（可接受）。
+  - 回退（若实测发现与 LCD 共用 SPI 总线导致刷屏卡顿）：改成先写进 `local_photo` 已分配的 128KB PSRAM 缓冲，再由 httpd 任务写卡。
 - 回调必须可重入安全：用板级 `std::mutex` 保护写卡（与 `local_photo` 的写卡共用一把锁）。
 - 清理：板级析构时 `SetJpegObserver(nullptr)`（或注入空 function）避免悬垂。
 
@@ -131,7 +133,7 @@ if (jpeg_observer_) jpeg_observer_(static_cast<const uint8_t*>(data), len);
 
 - 新增 Tab「📷 照片」（`showTab` 注册项 + 容器 div），与现有音乐/机器人控制 Tab 同级。
 - 相册：
-  - 默认加载**最近 12 张**，滚到底（或"加载更多"按钮）再拉下一批 12 张；
+  - 默认加载**最近 12 张**，滚到底（`IntersectionObserver`）自动加载下一批 12 张；底部同时给一个「加载更多（剩余 n 张）」按钮（两者共用同一个 `loadMore()`，按钮作为不能触发滚动/不支持 Observer 时的兼底）；
   - 网格用 `<img src="/photos/file?kind=web&name=..">`；点击放大（overlay，铺满视口，再点关闭）；
   - 每张右上角 `×` → `POST /photos {action:delete}` → 本地移除该 DOM；
   - 顶部工具行：kind 切换（网页/AI）、`n/100` 张数、占用（求和 size，前端算）、「AI 拍照也存卡」开关（`action:ai_save`）、「清空」（`action:clear`，**二次确认**）。
@@ -165,7 +167,7 @@ AI 语音拍照 →  mcp_server.cc: self.camera.take_photo → Esp32Camera::Expl
 | 用 **query 参数**而非 `/photos/<name>` | httpd 的 URI 通配符匹配默认关闭（全项目未启用 `CONFIG_HTTPD_URI_MATCH_WILDCARD`），`/photos/<name>` 需要额外开配置 |
 | 清理**只在写卡成功后**做 | 否则写失败还会误删旧照片 |
 | 进入照片 Tab **暂停日志轮询** | httpd 单线程：相册拉图与 WS 日志拉取会互相排队 |
-| 写卡不新增常驻缓冲 | JPEG 由调用方提供（网页路径来自 `local_photo` 的 PSRAM 缓冲；AI 路径由观察者 memcpy 到板级 PSRAM 缓冲后写卡并复用/释放） |
+| 写卡不新增常驻缓冲 | 网页路径直接用 `local_photo` 的 PSRAM 缓冲；AI 路径在编码回调内**同步写卡**（`fwrite` 直接读编码器缓冲，零拷贝、零额外分配） |
 | 相册功能不影响 `no-tfcard` 变体 | 该变体无 httpd、无 SD，`PhotoStore*` 不会被调用；前端按接口失败隐藏 Tab |
 
 ## 6. 错误处理
