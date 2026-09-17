@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -36,6 +38,18 @@ struct UnoWebApi {
 
 // 注入机器人控制回调；之后 /uno REST 接口（GET status / POST drive/stop/speed）即可控制下位机。
 void SetUnoWebApi(const UnoWebApi& api);
+
+// 网页拍照回调：由板级注入（实现见 local_photo.h）。
+// take_photo: 抓一帧并编码成 JPEG（阻塞约 200ms，在 httpd 任务里执行）
+// data/size: 最近一次成功的 JPEG（PSRAM 常驻，未拍过时返回 nullptr/0）
+struct CameraWebApi {
+    std::function<bool()> take_photo;
+    std::function<const uint8_t*()> data;
+    std::function<size_t()> size;
+};
+
+// 注入拍照回调；之后 GET /photo.jpg 取图、POST /photo/take 触发拍照。
+void SetCameraWebApi(const CameraWebApi& api);
 
 // 下位机状态变化时调用：把当前 uno 状态 JSON 经 WebSocket 推送给已连接的 web 前端。
 // 由板级在解析到 @busy/@done/@stat(状态变化)时调用；无 WS 连接时为安全的空操作。

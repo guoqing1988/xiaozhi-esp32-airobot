@@ -169,6 +169,78 @@ bool Esp32Camera::SetSwapBytes(bool enabled) {
     return true;
 }
 
+namespace {
+// image_to_jpeg_cb 的回调：一次性把整块 JPEG 拷进调用方缓冲（不做任何动态分配）。
+struct JpegSink {
+    uint8_t *buf;
+    size_t capacity;
+    size_t len;
+};
+
+size_t JpegSinkCb(void *arg, size_t index, const void *data, size_t len) {
+    auto *sink = static_cast<JpegSink *>(arg);
+    // index==0 携带完整 JPEG；后续调用为分块/哨兵，本用法忽略。
+    if (index == 0 && data != nullptr && len > 0 && len <= sink->capacity) {
+        memcpy(sink->buf, data, len);
+        sink->len = len;
+    }
+    return len;
+}
+}  // namespace
+
+bool Esp32Camera::EncodeCurrentFrameToJpeg(uint8_t *out, size_t out_capacity, size_t &out_len) {
+    out_len = 0;
+    if (current_fb_ == nullptr || out == nullptr || out_capacity == 0) {
+        return false;
+    }
+    // 源数据与 Explain() 保持一致：RGB565 必须用 Capture() 里**已换好字节序**的 encode_buf_，
+    // 若在此再换一次会导致网页照片红蓝互换；其余格式直接用原始帧。
+    uint8_t *src = current_fb_->buf;  // image_to_jpeg_cb 需要非 const 指针
+    size_t src_len = current_fb_->len;
+    v4l2_pix_fmt_t enc_fmt;
+    switch (current_fb_->format) {
+        case PIXFORMAT_RGB565: {
+            const size_t need = static_cast<size_t>(current_fb_->width) * current_fb_->height * 2;
+            if (encode_buf_ == nullptr || encode_buf_size_ < need) {
+                ESP_LOGE(TAG, "EncodeCurrentFrameToJpeg: encode buffer not ready");
+                return false;
+            }
+            src = encode_buf_;
+            src_len = encode_buf_size_;
+            enc_fmt = V4L2_PIX_FMT_RGB565;
+            break;
+        }
+        case PIXFORMAT_YUV422:
+            enc_fmt = V4L2_PIX_FMT_YUYV;  // YUV422 is actually YUYV format
+            break;
+        case PIXFORMAT_YUV420:
+            enc_fmt = V4L2_PIX_FMT_YUV420;
+            break;
+        case PIXFORMAT_GRAYSCALE:
+            enc_fmt = V4L2_PIX_FMT_GREY;
+            break;
+        case PIXFORMAT_JPEG:
+            enc_fmt = V4L2_PIX_FMT_JPEG;
+            break;
+        case PIXFORMAT_RGB888:
+            enc_fmt = V4L2_PIX_FMT_RGB24;
+            break;
+        default:
+            ESP_LOGE(TAG, "EncodeCurrentFrameToJpeg: unsupported format %d", current_fb_->format);
+            return false;
+    }
+
+    JpegSink sink = {out, out_capacity, 0};
+    if (!image_to_jpeg_cb(src, src_len, current_fb_->width, current_fb_->height, enc_fmt, 80,
+                          JpegSinkCb, &sink) ||
+        sink.len == 0) {
+        ESP_LOGE(TAG, "EncodeCurrentFrameToJpeg: JPEG encode failed");
+        return false;
+    }
+    out_len = sink.len;
+    return true;
+}
+
 std::string Esp32Camera::Explain(const std::string &question) {
     if (explain_url_.empty()) {
         throw std::runtime_error("Image explain URL or token is not set");

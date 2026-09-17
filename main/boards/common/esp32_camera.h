@@ -41,4 +41,11 @@ public:
     virtual bool SetVFlip(bool enabled) override;
     virtual bool SetSwapBytes(bool enabled) override;
     virtual std::string Explain(const std::string &question) override;
+
+    // 把**已捕获**的当前帧(RGB565)编码成 JPEG 写入 out（网页拍照用）。
+    // 为什么不另抓一帧：本板 fb_count=1，帧池只有一块；另开帧缓冲
+    // (fb_count=2) 会让 cam_hal 多占 ~30KB DMA **内部** RAM，本板内部 SRAM 扛不住。
+    // 前置条件：先调用 Capture() 成功。返回是否成功，成功时 out_len 为 JPEG 字节数。
+    // 复用与 Explain() 相同的字节序处理与编码参数；编码期间不可并发调用 Capture()。
+    bool EncodeCurrentFrameToJpeg(uint8_t *out, size_t out_capacity, size_t &out_len);
 };

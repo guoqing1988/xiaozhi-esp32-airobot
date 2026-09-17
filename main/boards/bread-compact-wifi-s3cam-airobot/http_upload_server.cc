@@ -30,11 +30,15 @@ static esp_timer_handle_t s_wifi_timer = nullptr;
 static AlarmWebApi s_alarm_api;
 // 机器人控制回调(由板级 SetUnoWebApi 注入)
 static UnoWebApi s_uno_api;
+// 网页拍照回调(由板级 SetCameraWebApi 注入)
+static CameraWebApi s_camera_api;
 
 // WebSocket 活动会话(供服务端主动推送状态)。
 // 支持多客户端: 用互斥锁保护 fd 登记表; 未启用 CONFIG_HTTPD_WS_SUPPORT 时不编译。
 #if CONFIG_HTTPD_WS_SUPPORT
-#define MAX_WS_CLIENTS 4
+// 本板内部 SRAM 紧张：每个 WS 会话都要占用 socket / 帧缓冲。
+// 实际使用只有一个浏览器标签页（「机器人控制」面板），留 2 个够用。
+#define MAX_WS_CLIENTS 2
 static std::mutex s_ws_mtx;
 static httpd_handle_t s_ws_hd = nullptr;
 static int s_ws_fds[MAX_WS_CLIENTS];
@@ -43,6 +47,7 @@ static int s_ws_count = 0;
 
 void SetAlarmWebApi(const AlarmWebApi& api) { s_alarm_api = api; }
 void SetUnoWebApi(const UnoWebApi& api) { s_uno_api = api; }
+void SetCameraWebApi(const CameraWebApi& api) { s_camera_api = api; }
 
 // URL 解码（%XX -> 字符，+ -> 空格），用于文件名
 static void UrlDecode(char* out, size_t out_size, const char* in) {
@@ -63,14 +68,18 @@ static void UrlDecode(char* out, size_t out_size, const char* in) {
 
 // 把日志文本清洗成合法 UTF-8，再交给 cJSON 转义（cJSON 对高位字节原样输出，
 // 日志里若混入二进制会让前端 JSON.parse 整批失败）。裸 NUL 也一并替换：
-// c_str() 遇到 NUL 会截断，文本会莫名变短。
-static void SanitizeLogText(std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size();) {
+// 文本遇到 NUL 会截断，日志会莫名变短。
+//
+// **原地改写**：旧版构造第二个 std::string 再 swap，每次拉取多一次 1KB 内部 RAM
+// 分配（本板内部 SRAM 只有几十 KB，且每秒都拉一次，这点抖动不值得）。
+// 只做缩减不扩张，写入位置 w 始终 <= 读取位置 i，所以对同一缓冲原地写是安全的。
+// 返回清洗后的长度（末尾已补 NUL）。
+static size_t SanitizeLogText(char* s, size_t len) {
+    size_t w = 0;
+    for (size_t i = 0; i < len;) {
         unsigned char c = static_cast<unsigned char>(s[i]);
         if (c == 0 || c < 0x80) {
-            out += (c == 0) ? '?' : static_cast<char>(c);
+            s[w++] = (c == 0) ? '?' : static_cast<char>(c);
             ++i;
             continue;
         }
@@ -83,7 +92,7 @@ static void SanitizeLogText(std::string& s) {
         } else if ((c & 0xF8) == 0xF0) {
             seq = 4;
         }
-        bool ok = (seq > 0) && (i + seq <= s.size());
+        bool ok = (seq > 0) && (i + seq <= len);
         if (ok) {
             for (size_t k = 1; k < seq; ++k) {
                 if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) {
@@ -93,14 +102,17 @@ static void SanitizeLogText(std::string& s) {
             }
         }
         if (ok) {
-            out.append(s, i, seq);
+            for (size_t k = 0; k < seq; ++k) {
+                s[w++] = s[i + k];
+            }
             i += seq;
         } else {
-            out += '?';
+            s[w++] = '?';
             ++i;
         }
     }
-    s.swap(out);
+    s[w] = '\0';
+    return w;
 }
 
 // 文件名安全化：去除路径分隔符，防止路径穿越；仅保留基础文件名
@@ -464,6 +476,51 @@ static esp_err_t HandleUnoPost(httpd_req_t* req) {
     return SendJson(req, resp);
 }
 
+// GET /photo.jpg：把最近一次拍摄的 JPEG 回给浏览器（同源，页面用 <img> 显示）。
+// 大响应由 httpd 分块发送，不做整块拷贝，因此不额外占用大块堆内存。
+static esp_err_t HandlePhotoJpeg(httpd_req_t* req) {
+    SetCors(req);
+    const uint8_t* data = s_camera_api.data ? s_camera_api.data() : nullptr;
+    const size_t len = s_camera_api.size ? s_camera_api.size() : 0;
+    if (data == nullptr || len == 0) {
+        httpd_resp_set_status(req, "404 Not Found");
+        return httpd_resp_sendstr(req, "no photo yet");
+    }
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");  // 每次都要最新那张
+    return httpd_resp_send(req, reinterpret_cast<const char*>(data), len);
+}
+
+// POST /photo/take：触发一次拍照。约 200ms 阻塞 httpd 任务(含 WS 推送延迟)，
+// 按钮是手动触发，可接受。
+static esp_err_t HandlePhotoTake(httpd_req_t* req) {
+    // 把可选 body 读掉：不读完会让 keep-alive 复用时残留，下一次请求解析出错
+    if (req->content_len > 0) {
+        char drain[64];
+        int remain = req->content_len;
+        while (remain > 0) {
+            int r = httpd_req_recv(req, drain, sizeof(drain));
+            if (r <= 0) {
+                break;
+            }
+            remain -= r;
+        }
+    }
+    SetCors(req);
+    if (!s_camera_api.take_photo) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "camera unavailable");
+        return ESP_FAIL;
+    }
+    if (!s_camera_api.take_photo()) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "capture failed");
+        return ESP_FAIL;
+    }
+    char body[64];
+    snprintf(body, sizeof(body), "{\"ok\":true,\"size\":%u}",
+             static_cast<unsigned>(s_camera_api.size ? s_camera_api.size() : 0));
+    return SendJson(req, body);
+}
+
 #if CONFIG_HTTPD_WS_SUPPORT
 // ==================================================================
 // WebSocket 控制通道 (/ws)
@@ -603,21 +660,22 @@ static std::string WsHandleMessage(const char* body) {
                              ? static_cast<uint32_t>(c_since->valuedouble)
                              : 0;
         // buf 用静态缓冲：不占 httpd 栈(上传大文件也用这个任务)；WS 帧由 httpd
-        // 单任务串行处理，不存在并发。1KB 是为了省内部 RAM(见 log_capture.cc 说明)。
-        static char pull_buf[1024];
+        // 单任务串行处理，不存在并发。512B 是为了压内部 RAM 占用与堆抖动
+        // (见 log_capture.cc 说明)：一次装不下时前端会按 seq 继续拉，不丢数据。
+        // 末字节留给 NUL，所以传给 LogCapturePull 的长度要 -1。
+        static char pull_buf[512];
         size_t len = 0;
         uint32_t next_seq = 0;
-        LogCapturePull(since, pull_buf, sizeof(pull_buf), len, next_seq);
-        std::string text(pull_buf, len);
-        SanitizeLogText(text);
+        LogCapturePull(since, pull_buf, sizeof(pull_buf) - 1, len, next_seq);
+        SanitizeLogText(pull_buf, len);  // 原地清洗；只会缩短，不会超过原长度
         cJSON* j = cJSON_CreateObject();
         if (j != nullptr) {
             cJSON_AddNumberToObject(j, "seq", static_cast<double>(next_seq));
-            cJSON_AddStringToObject(j, "text", text.c_str());
+            cJSON_AddStringToObject(j, "text", pull_buf);
             cJSON_AddNumberToObject(j, "mirror", LogCaptureGetUartMirror() ? 1 : 0);
             cJSON_AddNumberToObject(j, "level", static_cast<int>(esp_log_level_get("*")));
             // 缓冲装满说明可能还有积压，前端据此立即再拉一次追平（首次进入时常见）
-            cJSON_AddNumberToObject(j, "more", (len == sizeof(pull_buf)) ? 1 : 0);
+            cJSON_AddNumberToObject(j, "more", (len == sizeof(pull_buf) - 1) ? 1 : 0);
             char* s = cJSON_PrintUnformatted(j);
             if (s != nullptr) {
                 resp = s;
@@ -625,6 +683,10 @@ static std::string WsHandleMessage(const char* body) {
             }
             cJSON_Delete(j);
         }
+    } else if (strcmp(action, "log_clear") == 0) {
+        // 网页「🗑 清空设备缓冲」：清掉设备侧历史（浏览器画面由前端自己清）
+        LogCaptureClear();
+        resp = "{\"ok\":true}";
     } else if (strcmp(action, "log_level") == 0) {
         // 网页直接切日志级别，等价于 AI 工具 self.debug.set_log_level：0无 1错误 2警告 3信息 4调试
         cJSON* c_level = cJSON_GetObjectItem(root, "level");
@@ -876,6 +938,13 @@ static void StartHttpServer() {
     httpd_uri_t alarm_post_uri = {
         .uri = "/alarm", .method = HTTP_POST, .handler = HandleAlarmPost, .user_ctx = nullptr,
     };
+    // 网页拍照：POST 触发抓帧+编码，GET 取最近一次 JPEG
+    httpd_uri_t photo_jpeg_uri = {
+        .uri = "/photo.jpg", .method = HTTP_GET, .handler = HandlePhotoJpeg, .user_ctx = nullptr,
+    };
+    httpd_uri_t photo_take_uri = {
+        .uri = "/photo/take", .method = HTTP_POST, .handler = HandlePhotoTake, .user_ctx = nullptr,
+    };
     if (httpd_register_uri_handler(server, &index_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &upload_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &music_get_uri) != ESP_OK ||
@@ -883,7 +952,9 @@ static void StartHttpServer() {
         httpd_register_uri_handler(server, &uno_get_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &uno_post_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &alarm_get_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK) {
+        httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &photo_jpeg_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &photo_take_uri) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register uri handlers");
         return;
     }
@@ -894,6 +965,7 @@ static void StartHttpServer() {
         { .uri = "/music",  .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
         { .uri = "/uno",    .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
         { .uri = "/alarm",  .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
+        { .uri = "/photo/take", .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
     };
     for (size_t i = 0; i < sizeof(options_uris) / sizeof(options_uris[0]); ++i) {
         if (httpd_register_uri_handler(server, &options_uris[i]) != ESP_OK) {

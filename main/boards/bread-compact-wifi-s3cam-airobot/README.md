@@ -470,6 +470,22 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 设置写入 NVS（`camera/flip`），**断电重启自动恢复该设置**。
 - 实现：板级 `ApplyCameraFlip()` 开机应用 + `Esp32Camera::SetHMirror/SetVFlip`（官方 sensor 寄存器接口）。
 
+## 网页拍照（按钮 + 页面显示照片）
+
+「🎮 机器人控制」面板点 **📷 拍照** → 照片直接显示在按钮下方（同一张也会出现在 LCD 上，因为复用了带预览的抓帧路径）。
+
+- **接口**：`POST /photo/take` 触发抓帧+编码；`GET /photo.jpg` 取最近一次 JPEG。
+- **实现**：`LocalPhotoCapture()`（`local_photo.cc`）→ `Esp32Camera::Capture()` 抓帧 →
+  `EncodeCurrentFrameToJpeg()` 编码进 **PSRAM 常驻缓冲**（128KB 配额，VGA JPEG 通常 30~60KB）→ 页面用
+  `<img src="/photo.jpg?t=时间戳">` 拉取显示。全程**不占用内部 SRAM**（JPEG 与编码临时缓冲都在 PSRAM）。
+- **为什么不多开一块帧缓冲**：`cam_hal` 每帧需要 30720 字节 **DMA 内部 RAM**，`fb_count` 从 1 改成 2 会多占 ~30KB 内部 SRAM——本板本来就只有几十 KB，不能这么花。因此改为**复用已捕获的那一帧**做编码（为此在 `Esp32Camera` 上新增了一个纯增量方法 `EncodeCurrentFrameToJpeg()`，不改任何现有函数，其它用同一份 `esp32_camera.cc` 的板子行为不变）。
+- **与 AI 拍照的关系**：两条路复用同一个 camera 驱动，设备侧已加**带超时的互斥**（300ms）。同一时刻点按钮又喊 AI 拍照，可能有一次失败（按钮弹「拍照失败」/AI 回报网络问题），**不会重启**，重试即可。
+- **排查**：
+  - 点了按钮没反应 → 看网页系统日志（级别调到「信息」）有没有 `Esp32Camera: Captured frame`；没有则是 httpd/互斥超时。
+  - **颜色不对（红蓝互换）** → 编码源用错了：RGB565 的字节序在 `Capture()` 里已经换好并存进 `encode_buf_`，
+    `EncodeCurrentFrameToJpeg()` 必须复用它；若自己在编码时再换一次就会红蓝互换（改这块时务必与 `Explain()` 对齐）。
+  - 照片是上一张 → 浏览器缓存：`/photo.jpg` 已带 `Cache-Control: no-store`，前端也加了时间戳；若仍出现请检查代理缓存。
+
 ## 待机全屏大时钟（AI 控制 + 多主题 + 本地持久化）
 
 - 说「切换时钟模式 / 打开时钟 / 关闭时钟」→ `self.clock.set`（`mode`: `1`=开启, `0`=关闭, `-1`=切换开关）。
@@ -697,6 +713,8 @@ ESP32 的 UART0 RX 解析任务维护状态（含 30 秒 busy 看门狗，防 `@
   - **级别**：无 / 错误 / 警告 / 信息 / 调试。默认 `错误`（`ERROR`）；排查完请调回「错误」（级别调高会增加 CPU 与内存环写入量）。
   - **同时输出到串口**：逃生开关。勾上后日志除进网页外**也照旧写 UART0**（会干扰 Arduino，仅网页打不开或需要接 USB-TTL 抓日志时用）。
   - **清空显示 / 暂停**：只影响浏览器画面，不影响设备缓冲。
+  - **清空设备缓冲**（`🗑`）：清掉**设备侧**环形缓冲历史（含重启后保留的崩溃前日志）。想重新观察一轮重启日志时用它。
+  - **拉取频率**：日志区展开时 1 秒/次，收起时 3 秒/次；切离「🎮 机器人控制」面板则停止。收起仍拉是因为下位机指令记录与系统日志**同源**（停了指令回执就不刷新）。
 - **下位机指令记录**：「🎮 机器人控制」面板底部（同一份数据，已按 `[UNO]` 前缀自动筛出）。看懂它就基本能定位控制问题：
 
 | 标记 | 含义 |
@@ -710,10 +728,19 @@ ESP32 的 UART0 RX 解析任务维护状态（含 30 秒 busy 看门狗，防 `@
 - **AI 侧逃生与调试工具**（网页打不开时用语音）：
   - `self.debug.log_to_serial(on)`：0=关闭（默认，日志只在网页）、1=打开串口日志（会干扰 Arduino）。
   - `self.debug.set_log_level(level)`：0~4 切换日志级别。
-- **内存开销**（静态内部 RAM，不占 PSRAM）：环形缓冲 4KB + 网页拉取缓冲 1KB ≈ **5KB**；指令记录与系统日志**共用**同一个缓冲，因此指令功能不额外占内存。
+- **内存开销**：环形缓冲 4KB（放在 `.noinit` 段，**不额外增加占用**——只是从 `.bss` 平移过来）+ 拉取缓冲 0.5KB；指令记录与系统日志**共用**同一个缓冲，因此指令功能不额外占内存。
+  - ⚠️ **另外还有两笔常驻占用，做重内存操作前要想到**：httpd 任务栈 8KB（上传写 SD 卡需要，见 `http_upload_server.cc`）与一条 WebSocket 连接。本板内部 SRAM（**不是 PSRAM**）实测空载 `free sram` 仅 20~25KB、历史最低 `minimal sram` 曾掉到 6KB 量级——所以**拍照/上传这类重内存操作时建议先关掉网页**（页面常驻的 WS 会一直占着内部 SRAM）。
+  - 注意 `SystemInfo: free sram` 打印的是 `MALLOC_CAP_INTERNAL`（内部 SRAM），与 8MB PSRAM 无关，别被“内存很大”误导；`minimal sram` 是**历史最低值**，比瞬时值更能暴露峰值不足。
   - 为何定 4KB：本板内部 RAM 很紧（实测 `free sram` 仅 20~25KB），日志功能静态占用要克制；4KB 够存约 30~40 行日志。需要更长历史时调大 `log_capture.cc` 的 `kRingSize` 即可。
   - 为何不放 PSRAM：临界区内访问 PSRAM 可能长时间持锁，会让等锁的中断超时（见 `sdkconfig.defaults` 关于中断看门狗的说明）。
   - 写入路径用两段 `memcpy`（非逐字节循环）：日志级别开到“调试”时这条路径每秒走很多次，临界区持锁时间直接决定 WiFi/音频中断被推迟多久。
+- **崩溃日志怎么看**（偶发重启排查）：
+  - 设备**软重启后**（panic / 看门狗 / OTA / `self.reboot`）环形缓冲内容会保留，网页系统日志里会出现一行：
+    `================ 设备重启 #N：PANIC 异常或 abort(多为内存不足/空指针/栈溢出) ================`
+    **这一行的上方就是崩溃前的日志**（重启前最后做了什么，一目了然）。上电冷启动（拔电/按复位）则缓冲清空——这是刻意的，避免把随机 RAM 当成日志显示。
+  - 分隔行里的**重启原因**直接指向方向：`PANIC` 多为内存不足/空指针/栈溢出；`中断看门狗` 多为临界区过长或中断被饿死；`任务看门狗` 多为某任务长时间不让出 CPU；`欠压重启` 是供电问题。
+  - ⚠️ **panic 的 `Guru Meditation Error`、backtrace、`stack overflow in task xxx` 永远不在网页里**：它们由 IDF panic handler 用 ROM printf **直写 UART0**，不经过 `esp_log_set_vprintf` 的钩子。**要抓 backtrace 必须接 USB 串口**（按上面说明先断开 Arduino 接线），而且**不需要**打开「同时输出到串口」开关——panic 输出本来就写 UART0。
+  - 拿到地址后用踩坑 14 里的 `xtensa-esp32s3-elf-addr2line -pfiaC -e build/xiaozhi.elf <地址>` 解析，并比对日志里的 `ELF file SHA256` 确认固件版本一致。
 - **注意**：日志级别默认 `ERROR`，正常运行时网页日志面板几乎是空的，**只有下位机指令行**——这正是想要的（指令不被系统日志冲掉）。
 
 ### 巡线（4 路循迹传感器）
@@ -1005,6 +1032,45 @@ ws.send(JSON.stringify(Object.assign({}, obj, { id: id })));  // ← 覆盖调�
 
 **教训**：给 AI 的工具**回执不能有歧义**。“防抖/已忽略/失败”这类词会被读成“没成功”，而带**时间证据**的“已完成”才能终结重试。另外：防抖拦截本身是**正常行为**（AI 重复调用同一指令），看到 `[UNO] !` 刷屏不必惊慌，真正要盯的是**回执有没有让 AI 以为失败**。
 
+### 16. AI 拍照片偶发重启（内部 SRAM 耗尽，2026-09 修复）
+
+**现象**：加了网页日志功能后，让 AI 拍照，有时照片已拍成功、屏幕也显示了，ESP32 却直接重启。
+网页日志在 `HttpClient: Established new connection ... cost=40` 一行后戛然而止，下一行就是开机日志
+（`I (365) Display: ...`），**没有任何错误信息**；`SystemInfo` 显示 `free sram: 24579 minimal sram: 6175`。
+
+**根因（两层叠加）**：
+
+1. **内部 SRAM 余量被 web 功能吃掉**：本板 `free sram`（`MALLOC_CAP_INTERNAL`，**非 PSRAM**）空载只有 20~25KB。
+   web 日志功能常驻占用 = 4KB 环形缓冲 + 0.5~1KB 拉取缓冲 + **httpd 任务栈 8KB** + 一条 WS 连接；
+   而**拍照上传那一刻**主任务还要开一条到 `api.xiaozhi.me` 的 HTTP 连接、创建 JPEG 编码线程
+   （pthread 默认栈 3KB），同时 LVGL 任务在把 640×480 RGB565 预览图缩放渲染到 240×240 ——
+   多方并发抢内部 SRAM，于是“有时够、有时不够”（第一次成功、第二次崩）。
+   崩溃点落在没有 try/catch 的上下文（HTTP 接收任务 / LVGL 任务 / esp_timer），所以表现为直接重启。
+2. **lwIP/WiFi 缓冲不能落 PSRAM**：`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` 默认关闭，
+   8MB PSRAM 完全帮不上忙；而 `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=2048` 又把所有
+   ≤2KB 的分配塞进内部 RAM，碎片化更严重。
+
+**为何完全看不到崩溃原因（最惨的教训）**：`log_capture` 用 `esp_log_set_vprintf()` 只接管 `ESP_LOGx`；
+panic 的 `Guru Meditation`、backtrace、`abort()` 消息由 IDF panic handler 用 ROM printf
+**直写 UART0**，不经过该钩子 —— 网页日志**永远看不到崩溃原因**；而设备一重启，`.bss` 里的
+环形缓冲又被清零，崩溃前的日志也一起没了。**结果就是“重启了但什么线索都没有”。**
+
+**修复**：
+- 环形缓冲迁到 `.noinit` 段（软重启保留崩溃前日志），并打印 `esp_reset_reason()` 分隔行指明重启原因；
+  新增网页「🗑 清空设备缓冲」按钮。
+- 本板 `config.json`：开 `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`，
+  `LWIP_TCP_SND_BUF_DEFAULT` / `LWIP_TCP_WND_DEFAULT` 5760→2920，`LWIP_MAX_SOCKETS` 16→10。
+- 日志拉取路径瘦身（原地 UTF-8 清洗代替字符串拷贝 + 缓冲 1KB→0.5KB + WS 会话上限 4→2）、
+  前端拉取频率分层（展开 1s / 收起 3s）。
+
+**排查手段（已固化）**：以后遇到偶发重启，先用网页日志的重启分隔行拿**复位原因**，
+再接 USB 串口抓 backtrace（panic 输出不受网页日志开关影响）。**不要再只盯网页日志找崩溃原因。**
+
+**回归防护**：`scripts/tests/test_airobot_log_persist.py`（`.noinit` 段、三重校验、
+冷启动必须清空、复位原因必须覆盖 PANIC/看门狗/欠压）+ `test_airobot_web_photo.py`
+（拍照必须复用已捕获帧、不得新增帧缓冲、JPEG 必须落 PSRAM）。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。
+本板新增的 `local_photo.*` 由 `main/CMakeLists.txt` 的 `file(GLOB boards/<BOARD_DIR>/*.cc)` 自动纳入，无需在核心 CMake 里登记。

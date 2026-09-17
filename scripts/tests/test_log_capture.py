@@ -80,8 +80,14 @@ class TestLogCapture(unittest.TestCase):
                           "钩子内不得调用 printf(（vsnprintf 除外）")
 
     def test_ring_buffer_is_static(self):
-        """环形缓冲必须是静态数组（内部 RAM），临界区内不能碰堆/PSRAM。"""
-        self.assertIn("char s_ring[kRingSize];", self.src)
+        """环形缓冲必须是静态内存（内部 RAM），临界区内不能碰堆/PSRAM。
+
+        2026-09-17 起缓冲从 .bss 数组迁到 .noinit 结构体（软重启后保留崩溃前日志），
+        因此断言对象改为 RingStore + .noinit 段属性；"不得动态分配"的约束不变。
+        """
+        self.assertIn('__attribute__((section(".noinit")))', self.src)
+        self.assertIn("RingStore s_store", self.src)
+        self.assertIn("char ring[kRingSize];", self.src)
         body = _strip_comments(self.src)
         for bad in ("malloc(", "heap_caps_malloc(", "new ", "calloc("):
             self.assertNotIn(bad, body, f"日志缓冲不得动态分配（{bad}）")

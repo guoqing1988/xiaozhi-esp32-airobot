@@ -17,6 +17,7 @@
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 #include "local_music_player.h"
 #include "http_upload_server.h"
+#include "local_photo.h"
 #include "alarm_manager.h"
 #include "assets/lang_config.h"
 #endif
@@ -294,6 +295,14 @@ private:
             ESP_LOGW(TAG, "SD card not mounted, skip upload server");
             return;
         }
+        // 网页拍照：JPEG 常驻 PSRAM(128KB 配额，VGA JPEG 约 30~60KB)，失败不影响其它功能。
+        // 与 AI 拍照共用同一个 camera 驱动，本地已加互斥(见 local_photo.cc)。
+        LocalPhotoInit(camera_, 128 * 1024);
+        SetCameraWebApi(CameraWebApi{
+            .take_photo = []() -> bool { return LocalPhotoCapture(); },
+            .data = []() -> const uint8_t* { return LocalPhotoData(); },
+            .size = []() -> size_t { return LocalPhotoSize(); },
+        });
         // 上传成功回调：刷新歌曲列表缓存，AI 立刻能查到新歌(无需重启)
         StartUploadServer([this]() { GetMusicPlayer()->ScanSongs(); });
     }
