@@ -1089,7 +1089,13 @@ panic 的 `Guru Meditation`、backtrace、`abort()` 消息由 IDF panic handler 
 - 环形缓冲迁到 `.noinit` 段（软重启保留崩溃前日志），并打印 `esp_reset_reason()` 分隔行指明重启原因；
   新增网页「🗑 清空设备缓冲」按钮。
 - 本板 `config.json`：开 `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`，
-  `LWIP_TCP_SND_BUF_DEFAULT` / `LWIP_TCP_WND_DEFAULT` 5760→2920，`LWIP_MAX_SOCKETS` 16→10。
+  `LWIP_TCP_SND_BUF_DEFAULT` / `LWIP_TCP_WND_DEFAULT` 5760→2920。
+  > ⚠️ **这两项只在用 `scripts/build.py` 构建时才会写进 `sdkconfig`**；`idf.py build` 不读 `config.json`，
+  > 所以走 `idf.py build` 路线时它们从未生效（如上表实测）。要生效只能 `menuconfig` 手改一次，
+  > 或跑一次 `build.py`（它会重建 `sdkconfig`）。
+  >
+  > ⚠️ 原先这里还有 `LWIP_MAX_SOCKETS=10`，**已删除**：它与 `sdkconfig.defaults` 里“故意设 16 以免
+  > socket 池被占满挤掉小智 UDP 音频通道”的注释直接冲突（详见踩坑 9）。
 - 日志拉取路径瘦身（原地 UTF-8 清洗代替字符串拷贝 + 缓冲 1KB→0.5KB + WS 会话上限 4→2）、
   前端拉取频率分层（展开 1s / 收起 3s）。
 
