@@ -71,12 +71,26 @@
     .tabs {
       display: flex;
       gap: 6px;
-      margin-bottom: 14px
+      margin-bottom: 14px;
+      /* 窄屏（手机）放不下时改为左右滑动，不再把标签压成两行 */
+      overflow-x: auto;
+      scrollbar-width: none;
+      /* 隐藏滚动条但保留滑动（鼠标/触摸仍可滚） */
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 2px
+    }
+
+    .tabs::-webkit-scrollbar {
+      display: none
     }
 
     .tab {
-      flex: 1;
-      padding: 11px 0;
+      /* flex:1 1 0 = 宽屏等宽平分整行；min-width:max-content = 窄屏不被压到内容以下
+         （压不下就溢出，由 .tabs 的 overflow-x 左右滑动） */
+      flex: 1 1 0;
+      min-width: max-content;
+      white-space: nowrap;
+      padding: 11px 12px;
       text-align: center;
       font-size: 15px;
       font-weight: 500;
@@ -433,6 +447,8 @@
     .joystick {
       width: 190px;
       height: 190px;
+      /* 摇杆是正圆，绝不能被 flex 压缩成椭圆：窄屏空间不够时只压「左转/右转」按钮 */
+      flex: 0 0 auto;
       border-radius: 50%;
       background: radial-gradient(circle at 50% 50%, #f8fafc, #eef0f4);
       position: relative;
@@ -516,12 +532,13 @@
 
     .turn-btn {
       touch-action: none;
-      /* 与摇杆同行，宽度不再写死：flex 平分剩余空间(窄屏也不溢出)，
-         字号/内边距同时收小，避免把 190px 的摇杆挤变形 */
-      flex: 1 1 0;
+      /* 固定一个正常的按钮尺寸：不再 flex-grow 平分剩余空间，否则 PC 端会被拉成
+         199×37 的细长横杠。窄屏放不下时靠 flex-shrink 收缩（min-width:0 允许），
+         所以手机上仍旧不会溢出。 */
+      flex: 0 1 96px;
       min-width: 0;
       font-size: 13px;
-      padding: 9px 4px;
+      padding: 12px 4px;
       white-space: nowrap
     }
 
@@ -1132,6 +1149,26 @@
       document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
       btn.classList.add('active');
       document.getElementById('panel-' + id).classList.add('active');
+      // 窄屏下 tab 栏可横向滚动：把当前 tab 滑到可视区中间，
+      // 否则靠右的 tab（如「📷 照片」）点完后可能只露一半或被挤出屏。
+      const tabsBar = btn.parentElement;
+      if (tabsBar && tabsBar.scrollWidth > tabsBar.clientWidth) {
+        const barRect = tabsBar.getBoundingClientRect();
+        const btnRect = btn.getBoundingClientRect();
+        // 用 rect 换算容器内坐标（offsetLeft 受 offsetParent 影响，不可靠）
+        const target = tabsBar.scrollLeft + (btnRect.left - barRect.left) -
+          (barRect.width - btnRect.width) / 2;
+        const maxLeft = tabsBar.scrollWidth - tabsBar.clientWidth;
+        const left = Math.max(0, Math.min(target, maxLeft));
+        // 页面可见时用平滑滚动；标签页在后台时 Chrome 会暂停 smooth 动画（点了但不走位），
+        // 此时直接瞬时定位（反正用户也看不见）。
+        const behavior = (document.visibilityState === 'visible') ? 'smooth' : 'auto';
+        try {
+          tabsBar.scrollTo({ left: left, behavior: behavior });
+        } catch (e) {
+          tabsBar.scrollLeft = left;   // 老浏览器不认 options 对象时直接定位
+        }
+      }
       if (id === 'alarm') loadAlarms();
       if (id === 'upload') loadSongs();
       if (id === 'photos') loadPhotos();
