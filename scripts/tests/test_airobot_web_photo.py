@@ -108,6 +108,40 @@ class TestWebPhoto(unittest.TestCase):
         self.assertIn("'/photo.jpg?t=' + Date.now()", self.web)
         self.assertIn('id="photoImg"', self.web)
 
+    def test_photo_controls_live_in_photos_tab(self):
+        """拍照属于照片功能：按钮与显示区必须在「📷 照片」面板里，不在「🎮 机器人控制」里。
+
+        2026-09 从机器人控制面板搬到照片 Tab：拍出来的照片就存进本 Tab 的相册，控件留在
+        机器人面板会让人拍完还得切 Tab 才看得到（搬完把位置钉住，防止以后又搬回去）。
+        """
+        idx_uno = self.web.index('id="panel-uno"')
+        idx_photos = self.web.index('id="panel-photos"')
+        self.assertLess(idx_uno, idx_photos, "面板顺序：机器人控制在前、照片在后")
+        for el in ('id="photoBtn"', 'id="photoBox"', 'id="photoImg"', 'id="photoStatus"'):
+            self.assertGreater(self.web.index(el), idx_photos,
+                               f"{el} 必须落在「📷 照片」面板内部")
+
+    def test_clear_photo_view_is_display_only(self):
+        """「🧹 清空显示」只清页面，不得动设备/卡上的照片（删照片是「🗑 清空本相册」的事）。
+
+        差一个字的两个按钮很容易被接错：清显示误删卡上照片是不可逆的数据丢失，
+        所以用断言钉住「不发任何请求」。
+        """
+        self.assertIn('onclick="clearPhotoView()"', self.web)
+        m = re.search(r"function clearPhotoView\(.*?\n    \}", self.web, re.S)
+        self.assertIsNotNone(m, "未找到 clearPhotoView")
+        body = m.group(0)
+        self.assertNotIn("fetch(", body, "清空显示不得发请求")
+        self.assertNotIn("/photos", body, "清空显示不得碰相册接口")
+        self.assertIn("photoImg", body)
+        self.assertIn("photoBox", body)
+
+    def test_photo_refreshes_album_grid(self):
+        """拍完存卡成功要自动刷新相册网格，否则刚拍那张要手动点「🔄 刷新」才出现。"""
+        m = re.search(r"function takePhoto\(.*?\n    \}", self.web, re.S)
+        self.assertIsNotNone(m, "未找到 takePhoto")
+        self.assertIn("loadPhotos();", m.group(0))
+
     def test_take_handler_drains_body(self):
         """POST body 要读掉，否则 keep-alive 复用连接时残留会导致解析异常。"""
         m = re.search(r"static esp_err_t HandlePhotoTake\(.*?\n\}", self.server, re.S)

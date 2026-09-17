@@ -861,17 +861,6 @@
       </div>
       <pre id="unoCmdView"></pre>
 
-      <!-- 网页拍照：设备侧抓帧 → JPEG 存 PSRAM → 本页 <img> 直接从 /photo.jpg 拉取显示。
-           与 AI 拍照共用摄像头驱动，设备侧已互斥；颜色/白平衡由设备侧决定。 -->
-      <div class="row" style="align-items:center;margin-top:10px">
-        <button class="btn" id="photoBtn" onclick="takePhoto()">📷 拍照</button>
-        <span style="font-size:12.5px;color:#6b7280;flex:1;line-height:1.4">照片直接显示在下方；想让 AI 描述画面，对设备说「看看我」即可（AI 会自己拍一张）。</span>
-      </div>
-      <div id="photoBox" style="display:none;margin-top:8px">
-        <img id="photoImg" alt="照片" style="max-width:100%;border-radius:8px">
-        <div id="photoStatus" style="font-size:12.5px;color:#6b7280;margin-top:4px"></div>
-      </div>
-
       <!-- 系统日志（折叠）：原顶部「🐞 调试日志」tab 的内容搬到这里，
            平时收起不占地方，排查时点开即可（数据与上面的指令记录同源） -->
       <details class="logbox">
@@ -905,6 +894,22 @@
     <div class="panel" id="panel-photos">
       <div class="hint">TF 卡里的照片。<b>网页拍照</b>存在 <code>photos</code> 目录，<b>AI 拍照</b>留档在
         <code>photos_ai</code>；每个目录最多保留 100 张（超出自动删最旧的）。</div>
+
+      <!-- 网页拍照（原在「🎮 机器人控制」面板，2026-09 搬到本 Tab）：设备侧抓帧 → JPEG 存 PSRAM →
+           本页 <img> 直接从 /photo.jpg 拉取显示（所以 LCD 上也会闪一下同一张）。
+           与 AI 拍照共用摄像头驱动，设备侧已互斥；颜色/白平衡由设备侧决定。 -->
+      <div class="row" style="align-items:center;margin-top:10px">
+        <button class="btn" id="photoBtn" onclick="takePhoto()">📷 拍照</button>
+        <span style="font-size:12.5px;color:#6b7280;flex:1;line-height:1.4">照片显示在下方；想让 AI 描述画面，对设备说「看看我」即可（AI 会自己拍一张）。</span>
+      </div>
+      <div id="photoBox" style="display:none;margin-top:8px">
+        <img id="photoImg" alt="照片" style="max-width:100%;border-radius:8px">
+        <div class="row" style="align-items:center;margin-top:4px">
+          <span id="photoStatus" style="font-size:12.5px;color:#6b7280;flex:1"></span>
+          <button class="btn" onclick="clearPhotoView()" title="只清这里的显示，不删卡上的照片">🧹 清空显示</button>
+        </div>
+      </div>
+
       <div class="row" style="align-items:center">
         <span style="font-size:13px;color:#6b7280">相册</span>
         <select id="photoKind" onchange="loadPhotos()">
@@ -1102,11 +1107,25 @@
               ? '已存卡：' + res.file + '（' + res.count + '/100）'
               : '仅显示（未插卡或写卡失败）';
           }
+          // 拍照按钮现在就在「📷 照片」Tab 里，相册网格就在下方：存卡成功后立即刷新列表，
+          // 否则刚拍的这张要手动点「🔄 刷新」才出现（列表只有元数据，一次请求很轻）。
+          if (res && res.saved && photoKind() === 'web') { loadPhotos(); }
         })
         .catch(function (e) { alert('拍照失败：' + e.message); })
         .finally(function () {
           if (btn) { btn.disabled = false; btn.textContent = old || '📷 拍照'; }
         });
+    }
+    // 只清页面上的那一张显示（隐藏显示区、清掉 <img> 的 src）。
+    // ⚠ 不请求设备：PSRAM 里的 JPEG 和卡上的照片都不动 —— 删卡上的照片用相册的「🗑 清空本相册」。
+    // 清空后重新拍照会带上新时间戳的 URL，因此不会被清空的 src 影响。
+    function clearPhotoView() {
+      const img = document.getElementById('photoImg');
+      const box = document.getElementById('photoBox');
+      const st = document.getElementById('photoStatus');
+      if (img) img.removeAttribute('src');
+      if (st) st.textContent = '';
+      if (box) box.style.display = 'none';
     }
     function toggleLogPause() { logPaused = !logPaused; syncLogPauseBtn(); }
     function syncLogPauseBtn() {
