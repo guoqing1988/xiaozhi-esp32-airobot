@@ -4,7 +4,9 @@
 #include <cstdio>
 #include <cstring>
 #include <esp_log.h>
+#include <esp_pthread.h>
 #include <img_converters.h>
+#include <utility>
 
 #include "esp32_camera.h"
 #include "board.h"
@@ -16,6 +18,40 @@
 #include "esp_timer.h"
 
 #define TAG "Esp32Camera"
+
+namespace {
+// 编码线程栈：std::thread 底层是 pthread，默认栈只有 3KB
+// (CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=3072)。这条线程要跑软件 JPEG 编码
+// (image_to_jpeg_cb → esp_new_jpeg)，还要**同步执行**板级 JPEG 观察者
+// (SetJpegObserver，如照片相册写 TF 卡：FatFS + SDMMC + 目录清理)，两者叠加远超 3KB，
+// 现象就是拍照瞬间 "A stack overflow in task pthread" 直接 panic 重启。
+// 对照：网页拍照跑在同一段编码+写卡代码上、但位于 httpd 任务(栈 8192)，从不重启。
+// 取 16KB（httpd 栈的两倍余量）；内部 SRAM 本就紧张，故优先放 PSRAM。
+constexpr size_t kEncoderThreadStackBytes = 16 * 1024;
+
+// 用显式栈创建编码线程。esp_pthread_set_cfg() 改的是**全局默认值**，
+// 创建完必须立刻恢复，否则会污染调用方后续创建的任何线程。
+std::thread CreateEncoderThread(std::function<void()> fn) {
+    esp_pthread_cfg_t saved = esp_pthread_get_default_config();
+    esp_pthread_cfg_t cfg = saved;
+    cfg.stack_size = kEncoderThreadStackBytes;
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    // 与播放线程同法：栈放 PSRAM，少占内部 RAM（需 ext-mem 允许，见 sdkconfig）
+    cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+#endif
+    cfg.thread_name = "cam_encode";  // 崩溃日志里 "pthread" 无法区分是哪条线程
+    esp_pthread_set_cfg(&cfg);
+    std::thread t;
+    try {
+        t = std::thread(std::move(fn));
+    } catch (...) {
+        esp_pthread_set_cfg(&saved);  // 创建失败也要恢复，避免残留影响后续线程
+        throw;
+    }
+    esp_pthread_set_cfg(&saved);
+    return t;
+}
+}  // namespace
 
 #if CONFIG_XIAOZHI_CAMERA_MIRROR_CONFIGURED
 #if CONFIG_XIAOZHI_CAMERA_HMIRROR
@@ -291,8 +327,8 @@ std::string Esp32Camera::Explain(const std::string &question) {
         throw std::runtime_error("Failed to create JPEG queue");
     }
 
-    // Start encoding thread
-    encoder_thread_ = std::thread([this, jpeg_queue]() {
+    // Start encoding thread（必须经 CreateEncoderThread：默认 3KB pthread 栈会栈溢出）
+    encoder_thread_ = CreateEncoderThread([this, jpeg_queue]() {
         int64_t start_time = esp_timer_get_time();
         uint16_t w = current_fb_->width;
         uint16_t h = current_fb_->height;
@@ -338,7 +374,9 @@ std::string Esp32Camera::Explain(const std::string &question) {
             xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
         }
         int64_t end_time = esp_timer_get_time();
-        ESP_LOGI(TAG, "JPEG encoding time: %ld ms", int((end_time - start_time) / 1000));
+        // stack free：编码+写卡后的栈剩余量（字节）。接近 0 说明栈又要不够了，先看这里。
+        ESP_LOGI(TAG, "JPEG encoding time: %ld ms, stack free=%u", int((end_time - start_time) / 1000),
+                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     });
 
     auto network = Board::GetInstance().GetNetwork();

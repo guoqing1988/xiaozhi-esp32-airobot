@@ -513,6 +513,8 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - **相册里看不到刚拍的 AI 照片** → 先确认「AI 拍照也存卡」是勾上的；对 AI 说「打开 AI 拍照存卡」可恢复默认。
 - **照片颜色反了** → 编码源问题，见「网页拍照」排查（RGB565 字节序在 `Capture()` 里就已处理好，编码时**不要**再换一次）。
 - **张数超过 100** → 正常不会；若出现，是清理失败（如卡只读），删掉几张或检查卡。
+- **一让 AI 拍照就重启** → 编码线程栈溢出（**不是内存不够**），见踩坑 18：
+  网页拍照（httpd 栈 8KB）正常、AI 拍照（编码线程）崩，就是最典型的症状。
 
 ## 待机全屏大时钟（AI 控制 + 多主题 + 本地持久化）
 
@@ -1098,6 +1100,9 @@ panic 的 `Guru Meditation`、backtrace、`abort()` 消息由 IDF panic handler 
 冷启动必须清空、复位原因必须覆盖 PANIC/看门狗/欠压）+ `test_airobot_web_photo.py`
 （拍照必须复用已捕获帧、不得新增帧缓冲、JPEG 必须落 PSRAM）。
 
+> 后续更正（见踩坑 18）：真正的根因是 **JPEG 编码线程 3KB 栈溢出**，不是内部 SRAM 耗尽。
+> 本节当时只有网页日志、没抓到 backtrace，归因偏了；内存优化本身无害，但治不了这个崩溃。
+
 ### 17. 照片相册的 4 个坑（2026-09）
 
 **① ESP32 上做不了缩略图**：JPEG 缩略图必须先解码（640×480 解码约 100~300ms + 一块解码缓冲），
@@ -1122,6 +1127,48 @@ panic 的 `Guru Meditation`、backtrace、`abort()` 消息由 IDF panic handler 
 
 另一种思路是重写一遗 JPEG 去存卡（复用 `Capture()` 的帧），但会多一次编码（多 100~200ms CPU
 且内存峰值更高）——本板内部 SRAM 很紧，不值得。
+
+> ⚠ 这个观察者回调跑在 `Explain()` 的**编码线程**里，写卡是重活：该线程栈已显式放大到
+> **16KB**（见踩坑 18）。改编码线程的创建方式时**别退回 `std::thread` 默认栈**（3KB 必崩）。
+
+### 18. AI 拍照必重启（编码线程 3KB 栈溢出，2026-09 修复）
+
+**现象**：网页「📷 拍照」一切正常，但**只要让 AI 拍照**就立刻重启。网页日志只有复位分隔行
+（`设备重启 #N：PANIC 异常或 abort`），**真正的 backtrace 只有接 USB 串口才看得到**：
+
+```
+***ERROR*** A stack overflow in task pthread has been detected.
+--- vApplicationStackOverflowHook
+--- vTaskSwitchContext
+```
+
+**根因**：`Esp32Camera::Explain()` 用 `std::thread` 起编码线程，而 `std::thread` 底层是 pthread，
+栈只有 **3KB**（`CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=3072`）。这条线程里要干两件重活：
+
+1. 软件 JPEG 编码（`image_to_jpeg_cb` → esp_new_jpeg）；
+2. 板级 JPEG 观察者里的**同步写 TF 卡**（照片相册那版新加的：FatFS + SDMMC + 目录清理）。
+
+两者叠加远超 3KB → 任务 `pthread` 栈溢出 → panic 重启。同一条线程此后还背着
+`JpegEncodeCb` 的入队与 `std::function` 调用，栈本来就在临界点上。
+
+**判决性对照**：网页拍照在 **httpd 任务（栈 8192）** 里跑**同一段**编码 + 写卡代码，
+从来不重启——唯一差别就是任务栈大小（这也是「网页拍照没问题、AI 拍照就崩」的原因）。
+
+**修复**（`esp32_camera.cc`）：新增 `CreateEncoderThread()`，显式给编码线程 **16KB** 栈并优先放
+PSRAM（与 `local_music_player` 的播放线程同法），任务名从 `pthread` 改成 `cam_encode`
+（崩溃日志一眼认出是谁）；`esp_pthread_set_cfg()` 改的是**全局默认值**，创建完（含异常路径）
+立即恢复。编码耗时日志顺带打印 `stack free=`（栈剩余字节）——接近 0 就是又快爆栈了。
+
+**排查手段**：AI 拍照重启时先接串口看 backtrace 里的**任务名**：`pthread` = 无名 std::thread
+（本条）、`cam_encode` = 本条修复后的编码线程、`httpd` = 网页拍照那条路、`music_play` = 本地音乐。
+**只盯网页日志永远看不到这条 backtrace**（panic 输出由 IDF panic handler 直写 UART0）。
+
+**回归防护**：`scripts/tests/test_airobot_camera_encode_stack.py`
+（必须经 `CreateEncoderThread` 建线程、栈 ≥8KB、优先 PSRAM、创建后恢复全局默认配置、
+线程必须有可辨认名字）。
+
+**教训**：本仓库 `std::thread` 的默认栈只有 3KB，**凡是带着重活（编解码、写卡、JSON、网络）
+的线程都必须显式放大栈**；尤其是往已有回调/线程里加新调用时，先问一句「这条线程的栈还剩多少」。
 
 ## 与上游合并提示
 

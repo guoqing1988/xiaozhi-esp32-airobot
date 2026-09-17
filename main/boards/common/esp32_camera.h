@@ -62,8 +62,9 @@ public:
 
     // 注册/注销 JPEG 观察者：Explain() 编码完成时（拿到**完整** JPEG 的那一刻）回调。
     // 板级用它把 AI 拍的照片顺手存进 TF 卡；默认未注册 → 行为与以前完全一致。
-    // ⚠ 回调运行在 Explain() 的**编码线程**里，且 jpeg 指针只在回调期间有效：
-    //   必须在回调内同步用完（如直接 fwrite），不得只记下指针稍后再读。
+    // ⚠ 回调运行在 Explain() 的**编码线程**里（栈已显式放大到 16KB，见 .cc 的 CreateEncoderThread），
+    //   且 jpeg 指针只在回调期间有效：必须在回调内同步用完（如直接 fwrite），
+    //   不得只记下指针稍后再读。
     //   回调也不得阻塞过久（写卡 100~300ms 可接受：上传线程已在并行取队列数据）。
     void SetJpegObserver(std::function<void(const uint8_t *jpeg, size_t len)> cb);
 };
