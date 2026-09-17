@@ -241,6 +241,40 @@ bool Esp32Camera::EncodeCurrentFrameToJpeg(uint8_t *out, size_t out_capacity, si
     return true;
 }
 
+void Esp32Camera::SetJpegObserver(std::function<void(const uint8_t *jpeg, size_t len)> cb) {
+    jpeg_observer_ = std::move(cb);
+}
+
+// image_to_jpeg_cb 的输出回调：把完整 JPEG 投递给上传队列，并通知板级观察者（TF 卡留档）。
+// 注意：image_to_jpeg_cb 只收普通函数指针，捕获 this 的 lambda 转不过去，
+// 所以这里必须是**静态成员函数**，需要的东西都从 EncodeCtx(arg) 里取。
+// 静态成员函数仍可访问类的私有成员，所以 jpeg_observer_ 直接调用。
+size_t Esp32Camera::JpegEncodeCb(void *arg, size_t index, const void *data, size_t len) {
+    auto *ctx = static_cast<EncodeCtx *>(arg);
+    QueueHandle_t jpeg_queue = ctx->queue;
+    JpegChunk chunk = {.data = nullptr, .len = len};
+    if (index == 0 && data != nullptr && len > 0) {
+        chunk.data =
+            (uint8_t *)heap_caps_aligned_alloc(16, len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (chunk.data == nullptr) {
+            ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG chunk", len);
+            chunk.len = 0;
+        } else {
+            memcpy(chunk.data, data, len);
+        }
+        // 板级观察者：index==0 就是完整 JPEG。先备好上传数据再通知，
+        // 即使观察者写卡较慢也不影响上传（上传线程从队列取数据，两者并行）。
+        // ⚠ data 只在本回调期间有效，观察者必须**当场**用完（如直接 fwrite）。
+        if (ctx->self->jpeg_observer_) {
+            ctx->self->jpeg_observer_(static_cast<const uint8_t *>(data), len);
+        }
+    } else {
+        chunk.len = 0;  // Sentinel or error
+    }
+    xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
+    return len;
+}
+
 std::string Esp32Camera::Explain(const std::string &question) {
     if (explain_url_.empty()) {
         throw std::runtime_error("Image explain URL or token is not set");
@@ -295,24 +329,9 @@ std::string Esp32Camera::Explain(const std::string &question) {
             jpeg_src_len = encode_buf_size_;
         }
 
+        EncodeCtx ctx = {jpeg_queue, this};
         bool ok = image_to_jpeg_cb(jpeg_src_buf, jpeg_src_len, w, h, enc_fmt, 80,
-            [](void* arg, size_t index, const void* data, size_t len) -> size_t {
-                auto jpeg_queue = static_cast<QueueHandle_t>(arg);
-                JpegChunk chunk = {.data = nullptr, .len = len};
-                if (index == 0 && data != nullptr && len > 0) {
-                    chunk.data = (uint8_t*)heap_caps_aligned_alloc(16, len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                    if (chunk.data == nullptr) {
-                        ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG chunk", len);
-                        chunk.len = 0;
-                    } else {
-                        memcpy(chunk.data, data, len);
-                    }
-                } else {
-                    chunk.len = 0;  // Sentinel or error
-                }
-                xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
-                return len;
-            }, jpeg_queue);
+                                   JpegEncodeCb, &ctx);
 
         if (!ok) {
             JpegChunk chunk = {.data = nullptr, .len = 0};

@@ -99,8 +99,17 @@ int PhotoStoreCount(PhotoKind kind);
 void SetJpegObserver(std::function<void(const uint8_t *jpeg, size_t len)> cb);
 ```
 ```cpp
-// esp32_camera.cc：在 Explain() 的编码回调 index==0 分支里，入队之后调用
-if (jpeg_observer_) jpeg_observer_(static_cast<const uint8_t*>(data), len);
+// esp32_camera.cc：image_to_jpeg_cb 只收**普通函数指针**，捕获 this 的 lambda 转不过去，
+// 所以回调写成静态成员函数，上下文（队列 + this）用 EncodeCtx 打包当 arg 传：
+struct EncodeCtx { QueueHandle_t queue; Esp32Camera *self; };
+static size_t JpegEncodeCb(void *arg, size_t index, const void *data, size_t len);
+
+// Explain() 内：
+EncodeCtx ctx = {jpeg_queue, this};
+bool ok = image_to_jpeg_cb(..., JpegEncodeCb, &ctx);
+
+// JpegEncodeCb 里，index==0（完整 JPEG）时先备好上传数据再通知观察者：
+if (ctx->self->jpeg_observer_) ctx->self->jpeg_observer_(static_cast<const uint8_t*>(data), len);
 ```
 
 - 线程：观察者在**编码线程**运行，回调内**同步写卡**（`fwrite` 直接从 `data` 读，零额外缓冲）。
@@ -116,7 +125,7 @@ if (jpeg_observer_) jpeg_observer_(static_cast<const uint8_t*>(data), len);
 
 | 方法 | URI | 说明 |
 |---|---|---|
-| GET | `/photos?kind=web\|ai` | 列表：`{"ok":true,"kind":"web","count":37,"limit":100,"items":[{"name":"..","size":..,"mtime":..}]}` |
+| GET | `/photos?kind=web\|ai` | 列表：`{"ok":true,"kind":"web","ai_save":1,"count":37,"limit":100,"items":[{"name":"..","size":..,"mtime":..}]}`（`ai_save` 为**实现时补充**：与列表一起返回，前端一次请求就能初始化开关勾选框，省一次往返与 CORS 预检） |
 | GET | `/photos/file?kind=web&name=xxx.jpg` | 单张 JPEG，`Content-Type: image/jpeg` + `Cache-Control: no-store`；文件名非法/不存在 → 404 |
 | POST | `/photos` | body：`{"action":"delete","kind":"web","name":".."}` / `{"action":"clear","kind":"web"}` / `{"action":"ai_save","on":1}` / `{"action":"status"}` |
 | POST | `/photo/take` | 现有接口，响应增加 `"saved":0/1,"file":"..","count":n` |

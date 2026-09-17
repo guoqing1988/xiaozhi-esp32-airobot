@@ -596,6 +596,67 @@
       white-space: pre-wrap;
       word-break: break-all;
     }
+    /* ===== 照片相册 ===== */
+    .photo-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .photo-cell {
+      position: relative;
+    }
+    .photo-cell img {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      border-radius: 8px;
+      background: #f3f4f6;
+      cursor: zoom-in;
+      display: block;
+    }
+    .photo-del {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      width: 24px;
+      height: 24px;
+      line-height: 1;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, .55);
+      color: #fff;
+      font-size: 15px;
+      cursor: pointer;
+    }
+    .photo-name {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 3px;
+      word-break: break-all;
+    }
+    #photoViewer {
+      position: fixed;
+      inset: 0;
+      z-index: 99;
+      background: rgba(0, 0, 0, .85);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 16px;
+      cursor: zoom-out;
+    }
+    #photoViewer.show {
+      display: flex;
+    }
+    #photoViewer img {
+      max-width: 100%;
+      max-height: 82vh;
+      border-radius: 8px;
+    }
   </style>
 </head>
 
@@ -613,6 +674,7 @@
       <button class="tab active" onclick="showTab('upload',this)">🎵 歌曲管理</button>
       <button class="tab" onclick="showTab('alarm',this)">⏰ 闹钟提醒</button>
       <button class="tab" onclick="showTab('uno',this)">🎮 机器人控制</button>
+      <button class="tab" onclick="showTab('photos',this)">📷 照片</button>
     </div>
 
     <!-- 歌曲管理 -->
@@ -790,6 +852,7 @@
       </div>
       <div id="photoBox" style="display:none;margin-top:8px">
         <img id="photoImg" alt="照片" style="max-width:100%;border-radius:8px">
+        <div id="photoStatus" style="font-size:12.5px;color:#6b7280;margin-top:4px"></div>
       </div>
 
       <!-- 系统日志（折叠）：原顶部「🐞 调试日志」tab 的内容搬到这里，
@@ -819,6 +882,37 @@
         <pre id="logView"></pre>
       </details>
     </div>
+
+    <!-- 照片相册：列表只拉元数据，图片逐个按需拉取（设备从 TF 卡逐张读发，
+         一次拉 100 张会把单线程 httpd 卡住）。12 张/批 + 滚到底自动加载。 -->
+    <div class="panel" id="panel-photos">
+      <div class="hint">TF 卡里的照片。<b>网页拍照</b>存在 <code>photos</code> 目录，<b>AI 拍照</b>留档在
+        <code>photos_ai</code>；每个目录最多保留 100 张（超出自动删最旧的）。</div>
+      <div class="row" style="align-items:center">
+        <span style="font-size:13px;color:#6b7280">相册</span>
+        <select id="photoKind" onchange="loadPhotos()">
+          <option value="web">📷 网页拍照</option>
+          <option value="ai">🤖 AI 拍照</option>
+        </select>
+        <span id="photoStat" style="font-size:12.5px;color:#6b7280;flex:1"></span>
+      </div>
+      <div class="row" style="align-items:center">
+        <label class="check"><input type="checkbox" id="aiSaveChk" onchange="setAiSave()"> AI 拍照也存卡</label>
+        <button class="btn" onclick="loadPhotos()">🔄 刷新</button>
+        <button class="btn" onclick="clearPhotos()">🗑 清空本相册</button>
+      </div>
+      <div id="photoGrid" class="photo-grid"></div>
+      <div id="photoEmpty" class="hint" style="display:none">还没有照片。</div>
+      <div class="row" style="justify-content:center">
+        <button class="btn" id="photoMoreBtn" style="display:none" onclick="loadMorePhotos()">加载更多</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 点图放大（再点关闭） -->
+  <div id="photoViewer" onclick="closePhotoViewer()">
+    <img id="photoViewerImg" alt="照片">
+    <div id="photoViewerName" style="color:#e5e7eb;font-size:13px"></div>
   </div>
 
   <script>
@@ -979,11 +1073,18 @@
       if (btn) { btn.disabled = true; btn.textContent = '📷 拍摄中…'; }
       fetch('/photo/take', { method: 'POST' })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); })
-        .then(function () {
+        .then(function (res) {
           const img = document.getElementById('photoImg');
           const box = document.getElementById('photoBox');
           // 同 URL 图片不会重新加载，必须带时间戳（设备侧也回了 no-store）
           if (img && box) { img.src = '/photo.jpg?t=' + Date.now(); box.style.display = ''; }
+          // 存卡结果：写卡失败不影响当次显示，只在这里提示（不影响拍照成功的判定）
+          const st = document.getElementById('photoStatus');
+          if (st) {
+            st.textContent = (res && res.saved)
+              ? '已存卡：' + res.file + '（' + res.count + '/100）'
+              : '仅显示（未插卡或写卡失败）';
+          }
         })
         .catch(function (e) { alert('拍照失败：' + e.message); })
         .finally(function () {
@@ -1033,9 +1134,178 @@
       document.getElementById('panel-' + id).classList.add('active');
       if (id === 'alarm') loadAlarms();
       if (id === 'upload') loadSongs();
+      if (id === 'photos') loadPhotos();
       if (id === 'uno') { startUnoPolling(); }   // 由 WS 推送更新状态, 此处只主动问一次
       else { stopUnoPolling(); unoStop(); }
       if (id === 'uno') startLogPolling(); else stopLogPolling();   // 日志区就在机器人面板里
+    }
+
+    // ===== 照片相册 =====
+    // 列表只拿元数据（一次 100 项的 JSON，很小），图片按需逐张拉：
+    // 设备是从 TF 卡逐张读发的，一次全量拉图会把单线程 httpd 卡住（日志拉取也要排队）。
+    const PHOTO_PAGE_SIZE = 12;
+    let photoItems = [];    // 当前相册的全部元数据（已按拍摄时间倒序）
+    let photoShown = 0;     // 已渲染到网格的张数
+    let photoLimit = 100;
+
+    function photoKind() {
+      const el = document.getElementById('photoKind');
+      return el ? el.value : 'web';
+    }
+
+    function photoUrl(name) {
+      return '/photos/file?kind=' + encodeURIComponent(photoKind()) +
+        '&name=' + encodeURIComponent(name);
+    }
+
+    function refreshPhotoStat() {
+      const stat = document.getElementById('photoStat');
+      if (!stat) return;
+      let bytes = 0;
+      for (let i = 0; i < photoItems.length; i++) bytes += (photoItems[i].size || 0);
+      stat.textContent = photoItems.length + '/' + photoLimit + ' 张 · ' + fmtSize(bytes);
+    }
+
+    function loadPhotos() {
+      const grid = document.getElementById('photoGrid');
+      const empty = document.getElementById('photoEmpty');
+      if (grid) grid.innerHTML = '';
+      photoItems = [];
+      photoShown = 0;
+      if (empty) { empty.textContent = '还没有照片。'; empty.style.display = 'none'; }
+      const url = '/photos?kind=' + encodeURIComponent(photoKind());
+      // no-store：否则浏览器可能拿缓存的旧列表（刚拍的照片就不出来了）
+      fetch(url, { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (res) {
+        if (!res || !res.ok) throw new Error('bad response');
+        photoItems = res.items || [];
+        photoLimit = res.limit || 100;
+        const chk = document.getElementById('aiSaveChk');
+        if (chk) chk.checked = !!res.ai_save;   // 开关状态随列表一起返回，省一次往返
+        refreshPhotoStat();
+        renderPhotos();
+      }).catch(function (e) {
+        if (empty) { empty.textContent = '读取相册失败：' + e.message; empty.style.display = ''; }
+      });
+    }
+
+    // 按批渲染（默认 12 张/批）：
+    // 每张图用 loading="lazy" 让浏览器只拉视口附近的图，避免一次把 100 张全拉下来。
+    function renderPhotos() {
+      const grid = document.getElementById('photoGrid');
+      if (!grid) return;
+      const next = Math.min(photoShown + PHOTO_PAGE_SIZE, photoItems.length);
+      for (let i = photoShown; i < next; i++) {
+        const it = photoItems[i];
+        const cell = document.createElement('div');
+        cell.className = 'photo-cell';
+        cell.dataset.name = it.name;
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.src = photoUrl(it.name);
+        img.alt = it.name;
+        img.onclick = (function (name) { return function () { openPhotoViewer(name); }; })(it.name);
+        const del = document.createElement('button');
+        del.className = 'photo-del';
+        del.textContent = '×';
+        del.title = '删除这张';
+        del.onclick = (function (name) {
+          return function (ev) { ev.stopPropagation(); deletePhoto(name); };
+        })(it.name);
+        const label = document.createElement('div');
+        label.className = 'photo-name';
+        label.textContent = String(it.name).replace(/\.jpg$/i, '');
+        cell.appendChild(img);
+        cell.appendChild(del);
+        cell.appendChild(label);
+        grid.appendChild(cell);
+      }
+      photoShown = next;
+      const empty = document.getElementById('photoEmpty');
+      if (empty) empty.style.display = photoItems.length === 0 ? '' : 'none';
+      const moreBtn = document.getElementById('photoMoreBtn');
+      if (moreBtn) {
+        const rest = photoItems.length - photoShown;
+        moreBtn.style.display = rest > 0 ? '' : 'none';
+        moreBtn.textContent = '加载更多（还有 ' + rest + ' 张）';
+      }
+    }
+
+    function loadMorePhotos() { renderPhotos(); }
+
+    // 滚到底自动加载下一批（按钮作兜底：不支持 Observer 或内容不足一屏时点按钮）
+    window.addEventListener('scroll', function () {
+      const p = document.getElementById('panel-photos');
+      if (!p || !p.classList.contains('active')) return;
+      if (photoItems.length - photoShown <= 0) return;
+      if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 140) loadMorePhotos();
+    }, { passive: true });
+
+    function openPhotoViewer(name) {
+      const v = document.getElementById('photoViewer');
+      const img = document.getElementById('photoViewerImg');
+      const label = document.getElementById('photoViewerName');
+      if (!v || !img) return;
+      img.src = photoUrl(name);
+      if (label) label.textContent = name;
+      v.classList.add('show');
+    }
+
+    function closePhotoViewer() {
+      const v = document.getElementById('photoViewer');
+      if (v) v.classList.remove('show');
+    }
+
+    // 删除单张：成功后只移除对应格子（不重拉整页，避免已加载的图重新下载）
+    function deletePhoto(name) {
+      if (!confirm('删除这张照片？\n' + name)) return;
+      fetch('/photos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', kind: photoKind(), name: name })
+      }).then(function (r) { return r.json(); }).then(function (res) {
+        if (!res || !res.ok) throw new Error(res && res.error ? res.error : '删除失败');
+        photoItems = photoItems.filter(function (it) { return it.name !== name; });
+        const cell = document.querySelector('.photo-cell[data-name="' + name + '"]');
+        if (cell) cell.remove();
+        photoShown = countPhotoCellsLeft();  // 删除后已渲染张数就是网格里剩下的格子数
+        refreshPhotoStat();
+        renderPhotos();
+      }).catch(function (e) { alert('删除失败：' + e.message); });
+    }
+
+    function countPhotoCellsLeft() {
+      return document.querySelectorAll('#photoGrid .photo-cell').length;
+    }
+
+    function clearPhotos() {
+      const n = photoItems.length;
+      if (!n) { alert('这个相册里还没有照片'); return; }
+      const which = photoKind() === 'ai' ? 'AI 拍照' : '网页拍照';
+      if (!confirm('清空「' + which + '」相册的 ' + n + ' 张照片？此操作不可撤销。')) return;
+      fetch('/photos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'clear', kind: photoKind() })
+      }).then(function (r) { return r.json(); }).then(function (res) {
+        if (!res || !res.ok) throw new Error(res && res.error ? res.error : '清空失败');
+        loadPhotos();
+      }).catch(function (e) { alert('清空失败：' + e.message); });
+    }
+
+    // AI 拍照是否存卡（写入设备 NVS，断电保留）；失败时把勾选状态复原
+    function setAiSave() {
+      const chk = document.getElementById('aiSaveChk');
+      const on = (chk && chk.checked) ? 1 : 0;
+      fetch('/photos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ai_save', on: on })
+      }).then(function (r) { return r.json(); }).then(function (res) {
+        if (!res || !res.ok) throw new Error('设置失败');
+      }).catch(function (e) {
+        alert('设置失败：' + e.message);
+        if (chk) chk.checked = !chk.checked;
+      });
     }
     // 按当前可见面板补一次数据: WS 首次就绪时调用(见 ws.onopen),
     // 否则首屏(默认歌曲管理)没有点击事件, 列表永远是空的, 得手动点「刷新列表」。
@@ -1045,6 +1315,7 @@
       if (p.id === 'panel-upload') loadSongs();
       else if (p.id === 'panel-alarm') loadAlarms();
       else if (p.id === 'panel-uno') { loadServoHome(); startLogPolling(); }
+      else if (p.id === 'panel-photos') loadPhotos();
     }
     // ===== 上传弹窗 =====
     function openUpload() { document.getElementById('uploadModal').classList.add('show'); }

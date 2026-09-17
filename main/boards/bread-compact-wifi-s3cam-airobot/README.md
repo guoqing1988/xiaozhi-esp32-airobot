@@ -474,6 +474,9 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 
 「🎮 机器人控制」面板点 **📷 拍照** → 照片直接显示在按钮下方（同一张也会出现在 LCD 上，因为复用了带预览的抓帧路径）。
 
+有 TF 卡时这张照片还会**存到卡上**（图片下方会显示「已存卡：`20260917_153002.jpg`（3/100）」），
+可在新增的「📷 照片」Tab 里翻看历史——见下方「照片相册」。
+
 - **接口**：`POST /photo/take` 触发抓帧+编码；`GET /photo.jpg` 取最近一次 JPEG。
 - **实现**：`LocalPhotoCapture()`（`local_photo.cc`）→ `Esp32Camera::Capture()` 抓帧 →
   `EncodeCurrentFrameToJpeg()` 编码进 **PSRAM 常驻缓冲**（128KB 配额，VGA JPEG 通常 30~60KB）→ 页面用
@@ -485,6 +488,31 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
   - **颜色不对（红蓝互换）** → 编码源用错了：RGB565 的字节序在 `Capture()` 里已经换好并存进 `encode_buf_`，
     `EncodeCurrentFrameToJpeg()` 必须复用它；若自己在编码时再换一次就会红蓝互换（改这块时务必与 `Explain()` 对齐）。
   - 照片是上一张 → 浏览器缓存：`/photo.jpg` 已带 `Cache-Control: no-store`，前端也加了时间戳；若仍出现请检查代理缓存。
+
+## 照片相册（TF 卡留档 + 网页查看）
+
+> 仅 TF 卡功能开启时生效（与本地音乐/上传页同开关 `CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD`）。
+
+有 TF 卡时，拍的照片会**存到卡上**，并在网页新增的「📷 照片」Tab 里翻看。
+
+- **目录分工**：网页按钮拍的 → `/sdcard/photos/`；AI 语音拍的 → `/sdcard/photos_ai/`。分开存，便于分别管理和清理。
+- **保留量**：每目录最多 **100** 张（VGA JPEG 约 30~60KB，100 张 ≈ 5MB），**写卡成功后**超出部分自动删除最旧的——所以卡不会被照片塞满。
+- **文件名**：时间已同步（联网 NTP 后）→ `20260917_153002.jpg`（一眼看出拍摄时间）；刚开机还没同步时 → `P_0001.jpg`（扫目录取最大编号+1），避免同一秒的照片互相覆盖。
+- **AI 拍照存卡开关**：默认**开**。网页「📷 照片」里的「AI 拍照也存卡」勾选框，或对 AI 说「关掉 AI 拍照存卡」→ `self.camera.ai_save`（`on`: 1=开, 0=关）。设置写入 NVS（`photo/ai_save`），断电保留。
+- **接口**（也可直接用 curl / 小程序）：
+  - `GET /photos?kind=web|ai` → `{"ok":true,"kind":"web","ai_save":1,"count":37,"limit":100,"items":[{"name":…,"size":…,"mtime":…}]}`
+  - `GET /photos/file?kind=web&name=20260917_153002.jpg` → 单张 JPEG（`no-store`）
+  - `POST /photos` → `{"action":"delete","kind":"web","name":"…"}` / `{"action":"clear","kind":"web"}` / `{"action":"ai_save","on":1}` / `{"action":"status"}`
+- **页面行为**：网格 **12 张/批**，滚到底自动加载下一批（另有「加载更多」按钮兼底）；点图放大（再点关闭）；每张右上角 `×` 删除；顶部可切「网页/AI」相册、显示 `n/100 张 · 占用`、清空本相册（二次确认）。
+- **不插卡时**：拍照照旧（只存 PSRAM，页面显示当次那张），状态提示「仅显示（未插卡或写卡失败）」；相册 Tab 里没有照片。
+- **实现**：板级 `photo_store.h/.cc`（目录、命名、写、列、删、滚动清理、开关）+ `http_upload_server.cc` 的 `/photos` 路由；AI 拍照留档靠共享 `Esp32Camera` 新增的**纯增量**观察者 `SetJpegObserver()`（默认空回调 → 其它共用 `esp32_camera.cc` 的板子行为不变），在拿到完整 JPEG 的回调里**当场同步写卡**。
+
+### 排查（照片相关）
+
+- **提示「仅显示（未插卡或写卡失败）」** → 卡没挂载或写入失败：先用「🎵 歌曲管理」确认能列出卡上文件（同一个挂载点）；卡满/只读也会这样。
+- **相册里看不到刚拍的 AI 照片** → 先确认「AI 拍照也存卡」是勾上的；对 AI 说「打开 AI 拍照存卡」可恢复默认。
+- **照片颜色反了** → 编码源问题，见「网页拍照」排查（RGB565 字节序在 `Capture()` 里就已处理好，编码时**不要**再换一次）。
+- **张数超过 100** → 正常不会；若出现，是清理失败（如卡只读），删掉几张或检查卡。
 
 ## 待机全屏大时钟（AI 控制 + 多主题 + 本地持久化）
 
@@ -1070,7 +1098,32 @@ panic 的 `Guru Meditation`、backtrace、`abort()` 消息由 IDF panic handler 
 冷启动必须清空、复位原因必须覆盖 PANIC/看门狗/欠压）+ `test_airobot_web_photo.py`
 （拍照必须复用已捕获帧、不得新增帧缓冲、JPEG 必须落 PSRAM）。
 
+### 17. 照片相册的 4 个坑（2026-09）
+
+**① ESP32 上做不了缩略图**：JPEG 缩略图必须先解码（640×480 解码约 100~300ms + 一块解码缓冲），
+而本板内部 SRAM 只有几十 KB。因此列表**直接用原图**让浏览器缩放，靠 `loading="lazy"` + 分批
+（12 张/批）避免一次把 100 张全拉下来——设备是从 TF 卡**逐张**读取发送的（每张约 50KB、100~300ms），
+一次全量拉图会把**单线程的 httpd 任务**卡住（连 WS 日志拉取都要排队）。
+
+**② httpd 的 URI 通配符匹配默认关闭**：`/photos/<name>.jpg` 这种路径需要
+`CONFIG_HTTPD_URI_MATCH_WILDCARD`（本项目未开启），所以文件名用 **query 参数**传
+（`/photos/file?kind=web&name=…`），零额外配置。
+
+**③ 滚动清理必须放在写卡成功之后**：先清理再写，写失败就把用户的旧照片白删了。
+同理，`fwrite` 长度不符要**删掉半截文件**再返回失败（半截 JPEG 打不开，比没有更糟）。
+删除/读取的文件名都要净化（拒绝 `/`、`\`、`..`，只收 `.jpg`），否则
+`/photos/file?name=../../config.json` 这类请求能读走卡上其它文件。
+
+**④ AI 拍照的 JPEG 是流式的，没有现成缓冲**：`Explain()` 边编码边入队上传，
+要顺带存卡只能在编码回调拿到完整 JPEG（`index==0`）的那一刻**同步写卡**——
+那个指针只在回调期间有效，记下来稍后再读就是野指针。为此在共享的 `Esp32Camera` 上
+加了一个默认空的观察者 `SetJpegObserver()`（纯增量，其它板行为不变）。
+写卡与上传是**并行**的（上传线程已从队列取到数据），AI 响应只慢约 100~300ms。
+
+另一种思路是重写一遗 JPEG 去存卡（复用 `Capture()` 的帧），但会多一次编码（多 100~200ms CPU
+且内存峰值更高）——本板内部 SRAM 很紧，不值得。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。
-本板新增的 `local_photo.*` 由 `main/CMakeLists.txt` 的 `file(GLOB boards/<BOARD_DIR>/*.cc)` 自动纳入，无需在核心 CMake 里登记。
+本板新增的 `local_photo.*`、`photo_store.*` 由 `main/CMakeLists.txt` 的 `file(GLOB boards/<BOARD_DIR>/*.cc)` 自动纳入，无需在核心 CMake 里登记。

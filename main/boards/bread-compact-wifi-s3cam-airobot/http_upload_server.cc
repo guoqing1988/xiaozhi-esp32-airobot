@@ -1,5 +1,6 @@
 #include "http_upload_server.h"
 #include "log_capture.h"
+#include "photo_store.h"
 
 #include <esp_http_server.h>
 #include <esp_log.h>
@@ -152,6 +153,29 @@ static esp_err_t HandleOptions(httpd_req_t* req) {
 static bool HasSuffix(const char* s, const char* ext) {
     size_t sl = strlen(s), el = strlen(ext);
     return sl >= el && strcasecmp(s + sl - el, ext) == 0;
+}
+
+// 取 URL query 参数(如 /photos/file?kind=web&name=x.jpg 里的 name)。不存在返回 false。
+static bool GetQueryParam(httpd_req_t* req, const char* key, char* out, size_t out_size) {
+    char query[192];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return false;
+    }
+    return httpd_query_key_value(query, key, out, out_size) == ESP_OK;
+}
+
+// photos 系列接口的 kind 参数: 缺省/空=网页拍照目录(web), "ai"=AI 拍照留档目录。
+// 未知值返回 false，调用方回 400（而不是默默当成 web，否则会删错目录）。
+static bool ParsePhotoKind(const char* value, PhotoKind& out) {
+    if (value == nullptr || value[0] == '\0' || strcasecmp(value, "web") == 0) {
+        out = PhotoKind::kWeb;
+        return true;
+    }
+    if (strcasecmp(value, "ai") == 0) {
+        out = PhotoKind::kAi;
+        return true;
+    }
+    return false;
 }
 
 // 统一发送 application/json 响应。
@@ -515,10 +539,139 @@ static esp_err_t HandlePhotoTake(httpd_req_t* req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "capture failed");
         return ESP_FAIL;
     }
-    char body[64];
-    snprintf(body, sizeof(body), "{\"ok\":true,\"size\":%u}",
-             static_cast<unsigned>(s_camera_api.size ? s_camera_api.size() : 0));
+    // 顺手存进 TF 卡（失败不影响拍照本身：页面仍能显示当次照片）
+    bool saved = false;
+    std::string file;
+    const uint8_t* data = s_camera_api.data ? s_camera_api.data() : nullptr;
+    const size_t len = s_camera_api.size ? s_camera_api.size() : 0;
+    if (data != nullptr && len > 0) {
+        saved = PhotoStoreSave(PhotoKind::kWeb, data, len, &file);
+    }
+    char body[192];
+    snprintf(body, sizeof(body),
+             "{\"ok\":true,\"size\":%u,\"saved\":%d,\"file\":\"%s\",\"count\":%d}",
+             static_cast<unsigned>(len), saved ? 1 : 0, file.c_str(),
+             PhotoStoreCount(PhotoKind::kWeb));
     return SendJson(req, body);
+}
+
+// GET /photos?kind=web|ai：列出卡上照片的元数据（按拍摄时间倒序）。
+// 只返回元数据、不含图片内容：设备是从卡里逐张读发的，前端按需再拉 /photos/file
+// （一次全量拉图会把单线程的 httpd 任务卡住，连 WS 日志拉取都要排队）。
+static esp_err_t HandlePhotoList(httpd_req_t* req) {
+    SetCors(req);
+    char kind_str[8] = {};
+    PhotoKind kind = PhotoKind::kWeb;
+    if (GetQueryParam(req, "kind", kind_str, sizeof(kind_str)) &&
+        !ParsePhotoKind(kind_str, kind)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad kind");
+        return ESP_OK;
+    }
+    // 列表不加缓存：刚拍/刚删的照片必须立刻可见（与 /photos/file 一样 no-store）
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return SendJson(req, PhotoStoreListJson(kind));
+}
+
+// GET /photos/file?kind=web&name=20260917_153002.jpg：回单张 JPEG。
+// 分块发送：2KB 静态缓冲（不占 httpd 栈——该任务同时还要跑上传/WS），
+// 不把整张照片读进内存（本板内部 SRAM 只有几十 KB）。
+static esp_err_t HandlePhotoFile(httpd_req_t* req) {
+    SetCors(req);
+    char kind_str[8] = {};
+    char name[64] = {};
+    PhotoKind kind = PhotoKind::kWeb;
+    if (GetQueryParam(req, "kind", kind_str, sizeof(kind_str)) &&
+        !ParsePhotoKind(kind_str, kind)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad kind");
+        return ESP_OK;
+    }
+    if (!GetQueryParam(req, "name", name, sizeof(name))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing name");
+        return ESP_OK;
+    }
+    char path[128];
+    if (!PhotoStoreResolvePath(kind, name, path, sizeof(path))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad name");
+        return ESP_OK;
+    }
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) {
+        httpd_resp_set_status(req, "404 Not Found");
+        return httpd_resp_sendstr(req, "not found");
+    }
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");  // 删掉后不应还能从缓存里看到
+    static char send_buf[2048];
+    esp_err_t err = ESP_OK;
+    size_t n = 0;
+    while ((n = fread(send_buf, 1, sizeof(send_buf), f)) > 0) {
+        if (httpd_resp_send_chunk(req, send_buf, n) != ESP_OK) {
+            err = ESP_FAIL;  // 客户端断开：不再补终止块（连接已废）
+            break;
+        }
+    }
+    fclose(f);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return httpd_resp_send_chunk(req, nullptr, 0);  // 结束分块响应
+}
+
+// 照片管理动作(纯函数，不依赖 httpd_req)，供 HTTP POST /photos 使用。
+//   {"action":"delete","kind":"web","name":"20260917_153002.jpg"}
+//   {"action":"clear","kind":"web"}
+//   {"action":"ai_save","on":1}
+//   {"action":"status"}
+static std::string PhotoActionJson(const char* body) {
+    cJSON* root = cJSON_Parse(body);
+    if (root == nullptr) {
+        return "{\"ok\":false,\"error\":\"bad json\"}";
+    }
+    cJSON* c_action = cJSON_GetObjectItem(root, "action");
+    const char* action = (c_action && c_action->valuestring) ? c_action->valuestring : "";
+    cJSON* c_kind = cJSON_GetObjectItem(root, "kind");
+    PhotoKind kind = PhotoKind::kWeb;
+    if (c_kind != nullptr && c_kind->valuestring != nullptr &&
+        !ParsePhotoKind(c_kind->valuestring, kind)) {
+        cJSON_Delete(root);
+        return "{\"ok\":false,\"error\":\"bad kind\"}";
+    }
+
+    std::string resp = "{\"ok\":false,\"error\":\"unknown action\"}";
+    if (strcmp(action, "delete") == 0) {
+        cJSON* c_name = cJSON_GetObjectItem(root, "name");
+        const char* name = (c_name && c_name->valuestring) ? c_name->valuestring : "";
+        if (PhotoStoreDelete(kind, name)) {
+            resp = std::string("{\"ok\":true,\"count\":") + std::to_string(PhotoStoreCount(kind)) +
+                   "}";
+        } else {
+            resp = "{\"ok\":false,\"error\":\"delete failed\"}";
+        }
+    } else if (strcmp(action, "clear") == 0) {
+        resp = std::string("{\"ok\":true,\"removed\":") + std::to_string(PhotoStoreClear(kind)) +
+               "}";
+    } else if (strcmp(action, "ai_save") == 0) {
+        cJSON* c_on = cJSON_GetObjectItem(root, "on");
+        bool on = (c_on != nullptr) && (cJSON_IsBool(c_on) ? cJSON_IsTrue(c_on) : c_on->valueint != 0);
+        PhotoStoreSetAiSave(on);
+        resp = std::string("{\"ok\":true,\"ai_save\":") + (on ? "1" : "0") + "}";
+    } else if (strcmp(action, "status") == 0) {
+        resp = std::string("{\"ok\":true,\"ai_save\":") + (PhotoStoreGetAiSave() ? "1" : "0") +
+               ",\"web_count\":" + std::to_string(PhotoStoreCount(PhotoKind::kWeb)) +
+               ",\"ai_count\":" + std::to_string(PhotoStoreCount(PhotoKind::kAi)) + "}";
+    }
+    cJSON_Delete(root);
+    return resp;
+}
+
+// POST /photos：照片管理(删除/清空/AI 存卡开关/状态)。
+static esp_err_t HandlePhotoPost(httpd_req_t* req) {
+    SetCors(req);
+    char buf[256];
+    if (!ReadBody(req, buf, sizeof(buf))) {
+        return ESP_OK;
+    }
+    return SendJson(req, PhotoActionJson(buf));
 }
 
 #if CONFIG_HTTPD_WS_SUPPORT
@@ -903,7 +1056,7 @@ static void StartHttpServer() {
     cfg.server_port = 80;
     cfg.stack_size = 8192;  // 上传写 SD 卡需要较大栈(FATFS)，默认 4096 会栈溢出导致重启
     cfg.task_priority = 6;  // 低于音频输入任务(prio 8)，避免上传/访问时抢占 AI 音频
-    cfg.max_uri_handlers = 20;  // CORS OPTIONS 预检也占用 handler 槽位, 调大预留
+    cfg.max_uri_handlers = 24;  // CORS OPTIONS 预检也占用 handler 槽位, 调大预留
 #if CONFIG_HTTPD_WS_SUPPORT
     // WS 异常断开时清理登记表 + 恢复 WiFi 省电(见 OnWsSessionClosed 注释)
     cfg.close_fn = OnWsSessionClosed;
@@ -945,6 +1098,17 @@ static void StartHttpServer() {
     httpd_uri_t photo_take_uri = {
         .uri = "/photo/take", .method = HTTP_POST, .handler = HandlePhotoTake, .user_ctx = nullptr,
     };
+    // 相册：列表 / 单张 / 管理(删除·清空·AI 存卡开关)。
+    // 用 query 参数传文件名而不是 /photos/<name>：httpd 的 URI 通配符匹配默认关闭。
+    httpd_uri_t photo_list_uri = {
+        .uri = "/photos", .method = HTTP_GET, .handler = HandlePhotoList, .user_ctx = nullptr,
+    };
+    httpd_uri_t photo_post_uri = {
+        .uri = "/photos", .method = HTTP_POST, .handler = HandlePhotoPost, .user_ctx = nullptr,
+    };
+    httpd_uri_t photo_file_uri = {
+        .uri = "/photos/file", .method = HTTP_GET, .handler = HandlePhotoFile, .user_ctx = nullptr,
+    };
     if (httpd_register_uri_handler(server, &index_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &upload_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &music_get_uri) != ESP_OK ||
@@ -954,7 +1118,10 @@ static void StartHttpServer() {
         httpd_register_uri_handler(server, &alarm_get_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &photo_jpeg_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &photo_take_uri) != ESP_OK) {
+        httpd_register_uri_handler(server, &photo_take_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &photo_list_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &photo_post_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &photo_file_uri) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register uri handlers");
         return;
     }
@@ -966,6 +1133,7 @@ static void StartHttpServer() {
         { .uri = "/uno",    .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
         { .uri = "/alarm",  .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
         { .uri = "/photo/take", .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
+        { .uri = "/photos",     .method = HTTP_OPTIONS, .handler = HandleOptions, .user_ctx = nullptr },
     };
     for (size_t i = 0; i < sizeof(options_uris) / sizeof(options_uris[0]); ++i) {
         if (httpd_register_uri_handler(server, &options_uris[i]) != ESP_OK) {

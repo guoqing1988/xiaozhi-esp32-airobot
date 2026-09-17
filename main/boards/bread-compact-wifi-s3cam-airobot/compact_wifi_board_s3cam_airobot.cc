@@ -18,6 +18,7 @@
 #include "local_music_player.h"
 #include "http_upload_server.h"
 #include "local_photo.h"
+#include "photo_store.h"
 #include "alarm_manager.h"
 #include "assets/lang_config.h"
 #endif
@@ -233,6 +234,19 @@ private:
                 settings.SetInt("flip", mode);
                 return std::string("摄像头画面已设置为模式 ") + std::to_string(mode);
             });
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+        // AI 拍照是否存到 TF 卡(默认开启，设置写入 NVS 断电保留)。
+        // 与网页上的同一个开关同源(photo/ai_save)，两边都能切。
+        mcp.AddTool(
+            "self.camera.ai_save",
+            "设置 AI 拍照时是否把照片保存到 TF 卡(默认开启)。on: 1=开启保存, 0=关闭。设置本地保存(断电重启仍生效)",
+            PropertyList({Property("on", kPropertyTypeInteger, 1, 0, 1)}),
+            [](const PropertyList& props) -> ReturnValue {
+                bool on = props["on"].value<int>() != 0;
+                PhotoStoreSetAiSave(on);
+                return std::string("AI 拍照存卡已") + (on ? "开启" : "关闭");
+            });
+#endif
     }
 
     void InitializeButtons() {
@@ -294,6 +308,19 @@ private:
         if (!sd_card_mounted_) {
             ESP_LOGW(TAG, "SD card not mounted, skip upload server");
             return;
+        }
+        // TF 卡照片仓库：确保 /sdcard/photos 与 /sdcard/photos_ai 存在（失败则相册不可用）
+        PhotoStoreInit();
+        // AI 拍照也留档到 TF 卡（网页/AI 都能开关，默认开）。
+        // 回调运行在 Explain() 的**编码线程**里，jpeg 指针只在回调期间有效
+        // → 必须当场同步写卡（不能只记下指针稍后再读）。
+        if (camera_ != nullptr) {
+            camera_->SetJpegObserver([](const uint8_t* jpeg, size_t len) {
+                if (!PhotoStoreGetAiSave()) {
+                    return;  // 用户关掉了 AI 拍照留档
+                }
+                PhotoStoreSave(PhotoKind::kAi, jpeg, len);
+            });
         }
         // 网页拍照：JPEG 常驻 PSRAM(128KB 配额，VGA JPEG 约 30~60KB)，失败不影响其它功能。
         // 与 AI 拍照共用同一个 camera 驱动，本地已加互斥(见 local_photo.cc)。

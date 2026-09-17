@@ -2,6 +2,7 @@
 #include "sdkconfig.h"
 
 #include <lvgl.h>
+#include <functional>
 #include <thread>
 #include <memory>
 #include <vector>
@@ -30,6 +31,16 @@ private:
     camera_fb_t *current_fb_ = nullptr;
     uint8_t *encode_buf_ = nullptr;  // Buffer for JPEG encoding (with optional byte swap)
     size_t encode_buf_size_ = 0;
+    // AI 拍照（Explain）编码完成时的回调，用于板级顺手存卡（默认空 → 其它板行为不变）
+    std::function<void(const uint8_t *jpeg, size_t len)> jpeg_observer_;
+
+    // 编码回调的上下文：image_to_jpeg_cb 只收**函数指针**（不能传捕获 lambda），
+    // 所以把队列与 this 打包成 arg 传进去，回调本体用静态成员函数。
+    struct EncodeCtx {
+        QueueHandle_t queue;
+        Esp32Camera *self;
+    };
+    static size_t JpegEncodeCb(void *arg, size_t index, const void *data, size_t len);
 
 public:
     Esp32Camera(const camera_config_t &config);
@@ -48,4 +59,11 @@ public:
     // 前置条件：先调用 Capture() 成功。返回是否成功，成功时 out_len 为 JPEG 字节数。
     // 复用与 Explain() 相同的字节序处理与编码参数；编码期间不可并发调用 Capture()。
     bool EncodeCurrentFrameToJpeg(uint8_t *out, size_t out_capacity, size_t &out_len);
+
+    // 注册/注销 JPEG 观察者：Explain() 编码完成时（拿到**完整** JPEG 的那一刻）回调。
+    // 板级用它把 AI 拍的照片顺手存进 TF 卡；默认未注册 → 行为与以前完全一致。
+    // ⚠ 回调运行在 Explain() 的**编码线程**里，且 jpeg 指针只在回调期间有效：
+    //   必须在回调内同步用完（如直接 fwrite），不得只记下指针稍后再读。
+    //   回调也不得阻塞过久（写卡 100~300ms 可接受：上传线程已在并行取队列数据）。
+    void SetJpegObserver(std::function<void(const uint8_t *jpeg, size_t len)> cb);
 };
