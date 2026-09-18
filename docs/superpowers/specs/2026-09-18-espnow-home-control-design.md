@@ -4,6 +4,10 @@
 - 分支：`feature/espnow-home-control`
 - 板级：`main/boards/bread-compact-wifi-s3cam-airobot/`
 - 状态：**设计已获批准，已实现**（实现期有 3 处规格修正，见 §2.1）
+- ⚠️ **架构已被修正**：本文“节点角色/能力硬编码在主控”的做法已由
+  `2026-09-18-espnow-home-autodiscovery-design.md` 取代（节点自描述能力 + 通用工具
+  `self.home.devices` / `self.home.control`；`self.home.light`/`sensor`/`status` 已删除）。
+  本文的 §2 决策表（工具表）、§3.3、§3.5、§4.1 仅作首版记录，**以新文档为准**。
 - 前置依赖：无（不复用未实现的改动）
 
 ## 1. 背景与目标
