@@ -481,12 +481,19 @@ static void sonarTick() {
         last_dist_ms = millis();
     }
 
-    // 人体靠近：迟滞判定，只在"进入"边沿播报一次（走 say 通道）
+    // 人体靠近：迟滞判定，只在"进入"边沿动作一次。
+    // “人来自动开灯”这个策略属于节点自己的业务逻辑（主控不知道也不关心）：
+    // 节点自己开灯 + 上报状态 + 请求播报。换成“人来自动开风扇”也只改这里。
+    // 人离开只复位标志与状态，**不自动关灯**（避免干扰用户刚用语音开的灯）。
     if (!motion_active && cm < MOTION_TRIGGER_CM) {
         motion_active = true;
+        light_on = 1;
+        applyLight();
+        queueEvt("motion", "1");
         queueSay("motion");
     } else if (motion_active && cm > MOTION_RELEASE_CM) {
         motion_active = false;
+        queueEvt("motion", "0");
     }
 }
 #else
