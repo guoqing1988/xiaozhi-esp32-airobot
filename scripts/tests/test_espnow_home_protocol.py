@@ -585,9 +585,10 @@ class TestSourceContracts(unittest.TestCase):
             self.assertIn(need, self.ino, "节点固件缺少 %s" % need)
 
     def test_node_dispatches_generic_action(self):
-        idx = self.ino.find("handleCommand")
-        self.assertGreater(idx, -1)
-        body = self.ino[idx:idx + 1800]
+        # 从定义点起算窗口：调用点在 onReceive 里，距定义有几百字符
+        idx = self.ino.find("static void handleCommand")
+        self.assertGreater(idx, -1, "节点必须有 handleCommand 定义")
+        body = self.ino[idx:idx + 2200]
         self.assertIn('"do "', body)
         self.assertIn("unknown-cap", body)
         self.assertIn("readonly", body)
@@ -598,10 +599,10 @@ class TestSourceContracts(unittest.TestCase):
         self.assertNotIn('"light "', self.ino)
 
     def test_node_say_channel_for_announce(self):
-        """播报走 say 通道；状态类走 evt（否则距离会反复触发 SD 卡查找）。"""
+        """播报走 say 通道；状态类走 evt（否则距离会反复触发 SD 卡文件查找）。"""
         self.assertIn("queueSay", self.ino)
-        idx = self.ino.find('"say "')
-        self.assertGreater(idx, -1, "节点必须发 say 报文")
+        self.assertIn("say %s", self.ino)        # "@n%d say %s"
+        self.assertIn("queueEvt(\"dist\"", self.ino)
 
     def test_high_temp_threshold_moved_to_node(self):
         """温度阈值属于业务语义，必须在节点侧判定。"""

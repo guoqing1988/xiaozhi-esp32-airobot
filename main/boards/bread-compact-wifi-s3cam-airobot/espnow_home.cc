@@ -1,5 +1,6 @@
 #include "espnow_home.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -16,6 +17,21 @@ static const uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // 静态回调拿不到 this，用文件级指针（板级只有一个实例）。
 static EspNowHome* g_home = nullptr;
+
+namespace {
+
+// JSON 字符串转义：能力规格由节点提供，可能含引号/反斜杠，
+// 直接拼接会产出非法 JSON（AI 侧解析失败）。中文 UTF-8 无需转义。
+void AppendJsonEscaped(std::string& out, const char* s) {
+    for (; s != nullptr && *s != '\0'; ++s) {
+        if (*s == '"' || *s == '\\') {
+            out += '\\';
+        }
+        out += *s;
+    }
+}
+
+}  // namespace
 
 int64_t EspNowHome::NowMs() {
     return esp_timer_get_time() / 1000;
@@ -74,8 +90,8 @@ void EspNowHome::BeaconTimerCb(void* arg) {
     if (g_home == nullptr) {
         return;
     }
-    // 节点靠这条广播锁定信道并学习主控 MAC（数据来自未注册 peer → 走节点的 onNewPeer 回调）。
-    // 启动期快发（供节点尽快发现），之后降为低频常驻心跳（供节点重启/换信道后重新发现）。
+    // 节点靠这条广播锁定信道并学习主控 MAC（数据来自未注册 peer → 走节点的 onNewPeer 回调）；
+    // 节点每次收到 beacon 都会重发 info（能力自描述），所以主控重启后注册表能自愈。
     static const char kBeacon[] = "@beacon 1";
     esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t*>(kBeacon), strlen(kBeacon));
 
@@ -84,35 +100,36 @@ void EspNowHome::BeaconTimerCb(void* arg) {
     }
 }
 
-EspNowHome::NodeEntry* EspNowHome::FindNode(int node_id) {
-    for (auto& n : nodes_) {
-        if (n.known && n.id == node_id) {
-            return &n;
+EspNowHome::DeviceEntry* EspNowHome::FindDevice(int node_id) {
+    for (auto& d : devices_) {
+        if (d.known && d.id == node_id) {
+            return &d;
         }
     }
     return nullptr;
 }
 
-EspNowHome::NodeEntry* EspNowHome::FindOrCreateNode(int node_id, const uint8_t* mac) {
-    NodeEntry* found = FindNode(node_id);
+EspNowHome::DeviceEntry* EspNowHome::FindOrCreateDevice(int node_id, const uint8_t* mac) {
+    DeviceEntry* found = FindDevice(node_id);
     if (found != nullptr) {
         return found;
     }
-    for (auto& n : nodes_) {
-        if (!n.known) {
-            n.known = true;
-            n.id = node_id;
-            memcpy(n.mac, mac, sizeof(n.mac));
-            n.last_seen_ms = NowMs();
-            return &n;
+    for (auto& d : devices_) {
+        if (!d.known) {
+            d = DeviceEntry();   // 清空复用槽位，避免上一台设备的能力/状态残留
+            d.known = true;
+            d.id = node_id;
+            memcpy(d.mac, mac, sizeof(d.mac));
+            d.last_seen_ms = NowMs();
+            return &d;
         }
     }
     return nullptr;   // 节点数超上限：忽略（kMaxNodes=4 已远超演示需求）
 }
 
 bool EspNowHome::SendTo(int node_id, const std::string& body) {
-    NodeEntry* n = FindNode(node_id);
-    if (n == nullptr || body.empty()) {
+    DeviceEntry* d = FindDevice(node_id);
+    if (d == nullptr || body.empty()) {
         return false;
     }
     char buf[kMaxPacketLen];
@@ -121,43 +138,203 @@ bool EspNowHome::SendTo(int node_id, const std::string& body) {
         return false;
     }
     // 单播 peer 在上行接收时已登记（见 HandleRecv），此处直接发。
-    return esp_now_send(n->mac, reinterpret_cast<const uint8_t*>(buf), len) == ESP_OK;
+    return esp_now_send(d->mac, reinterpret_cast<const uint8_t*>(buf), len) == ESP_OK;
 }
 
 bool EspNowHome::IsOnline(int node_id) const {
-    for (const auto& n : nodes_) {
-        if (n.known && n.id == node_id) {
-            return (NowMs() - n.last_seen_ms) < kOfflineMs;
+    for (const auto& d : devices_) {
+        if (d.known && d.id == node_id) {
+            return (NowMs() - d.last_seen_ms) < kOfflineMs;
         }
     }
     return false;
 }
 
-std::string EspNowHome::NodesJson() const {
+bool EspNowHome::HasNode(int node_id) const {
+    for (const auto& d : devices_) {
+        if (d.known && d.id == node_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool EspNowHome::HasCap(int node_id, const std::string& cap) const {
+    for (const auto& d : devices_) {
+        if (!d.known || d.id != node_id) {
+            continue;
+        }
+        for (int i = 0; i < d.cap_count; i++) {
+            if (cap == d.caps[i].name) {
+                return true;
+            }
+        }
+        break;
+    }
+    return false;
+}
+
+const char* EspNowHome::NodeName(int node_id) const {
+    for (const auto& d : devices_) {
+        if (d.known && d.id == node_id && d.name[0] != '\0') {
+            return d.name;   // 注册表内缓冲，调用方须立即使用
+        }
+    }
+    static char fallback[24];
+    snprintf(fallback, sizeof(fallback), "节点%d", node_id);
+    return fallback;
+}
+
+std::string EspNowHome::DevicesJson() const {
     std::string json = "{\"nodes\":[";
     bool first = true;
     int64_t now = NowMs();
-    for (const auto& n : nodes_) {
-        if (!n.known) {
+    for (const auto& d : devices_) {
+        if (!d.known) {
             continue;
         }
         if (!first) {
             json += ",";
         }
         first = false;
-        char item[96];
-        snprintf(item, sizeof(item), "{\"id\":%d,\"online\":%s,\"last_seen_ms\":%lld}", n.id,
-                 (now - n.last_seen_ms) < kOfflineMs ? "true" : "false",
-                 static_cast<long long>(now - n.last_seen_ms));
-        json += item;
+        json += "{\"id\":";
+        json += std::to_string(d.id);
+        json += ",\"name\":\"";
+        AppendJsonEscaped(json, d.name);
+        json += d.info_seen ? "\",\"online\":" : "\",\"online\":";
+        json += (now - d.last_seen_ms) < kOfflineMs ? "true" : "false";
+        json += d.info_seen ? ",\"info_seen\":true" : ",\"info_seen\":false";
+        json += ",\"caps\":[";
+        for (int i = 0; i < d.cap_count; i++) {
+            if (i != 0) {
+                json += ",";
+            }
+            json += "{\"name\":\"";
+            AppendJsonEscaped(json, d.caps[i].name);
+            json += "\",\"spec\":\"";
+            AppendJsonEscaped(json, d.caps[i].spec);
+            json += "\"}";
+        }
+        json += "],\"state\":\"";
+        AppendJsonEscaped(json, d.state);
+        json += "\",\"age_ms\":";
+        json += std::to_string(now - d.last_seen_ms);
+        json += "}";
     }
     json += "]}";
     return json;
 }
 
-bool EspNowHome::ShouldDeliver(int node_id, const std::string& evt, int64_t now_ms) {
+// 解析能力自描述正文（text = "<名字> <能力规格>"）。
+// 关键：只把"能力名"与"其余规格原文"分开，**不解释动作语义**——
+// 这样接入新设备/新动作时这里一行都不用改。
+// 全程指针 + 栈缓冲，避免在 WiFi 任务上下文做堆分配。
+void EspNowHome::HandleInfo(DeviceEntry& dev, const char* text) {
+    if (text == nullptr || text[0] == '\0') {
+        return;
+    }
+    const char* sp = strchr(text, ' ');
+    size_t name_len = (sp == nullptr) ? strlen(text) : static_cast<size_t>(sp - text);
+    snprintf(dev.name, sizeof(dev.name), "%.*s", static_cast<int>(name_len), text);
+
+    dev.cap_count = 0;
+    dev.info_seen = true;   // 重报即覆盖：节点改了能力（重刷固件）后旧能力不许残留
+    if (sp == nullptr) {
+        return;
+    }
+
+    const char* cur = sp + 1;
+    while (*cur != '\0' && dev.cap_count < kMaxCaps) {
+        const char* semi = strchr(cur, ';');
+        size_t len = (semi == nullptr) ? strlen(cur) : static_cast<size_t>(semi - cur);
+        // 能力名结束于第一个 '(' 或 ':'（取靠前者），与节点固件/测试约定一致
+        size_t cut = len;
+        for (size_t i = 0; i < len; i++) {
+            if (cur[i] == '(' || cur[i] == ':') {
+                cut = i;
+                break;
+            }
+        }
+        if (cut > 0) {
+            CapEntry& cap = dev.caps[dev.cap_count];
+            snprintf(cap.name, sizeof(cap.name), "%.*s", static_cast<int>(cut), cur);
+            snprintf(cap.spec, sizeof(cap.spec), "%.*s", static_cast<int>(len - cut), cur + cut);
+            dev.cap_count++;
+        }
+        if (semi == nullptr) {
+            break;
+        }
+        cur = semi + 1;
+    }
+}
+
+// 通用 key=value 状态缓存：存在则替换（同名旧项丢弃），否则追加；超长截断。
+// 本层不理解 key 的含义（可能是 light/dist/temp/err 或任何节点自定义项）。
+void EspNowHome::UpsertState(DeviceEntry& dev, const char* key, const char* value) {
+    if (key == nullptr || key[0] == '\0') {
+        return;
+    }
+    size_t key_len = strlen(key);
+    char entry[64];
+    snprintf(entry, sizeof(entry), "%s=%s", key, (value == nullptr) ? "" : value);
+
+    char out[kStateLen];
+    size_t out_len = 0;
+    const char* p = dev.state;
+    bool replaced = false;
+    while (*p != '\0') {
+        const char* end = strchr(p, ' ');
+        size_t seg_len = (end == nullptr) ? strlen(p) : static_cast<size_t>(end - p);
+        bool is_target = (seg_len > key_len) && (p[key_len] == '=') &&
+                         (strncmp(p, key, key_len) == 0);
+        if (is_target) {
+            if (!replaced) {
+                size_t n = strlen(entry);
+                if (out_len + n > sizeof(out) - 1) {
+                    n = sizeof(out) - 1 - out_len;
+                }
+                memcpy(out + out_len, entry, n);
+                out_len += n;
+                replaced = true;
+            }
+        } else if (seg_len > 0) {
+            if (out_len > 0 && out_len < sizeof(out) - 1) {
+                out[out_len++] = ' ';
+            }
+            size_t n = seg_len;
+            if (out_len + n > sizeof(out) - 1) {
+                n = sizeof(out) - 1 - out_len;
+            }
+            memcpy(out + out_len, p, n);
+            out_len += n;
+        }
+        if (end == nullptr) {
+            break;
+        }
+        p = end + 1;
+    }
+    if (!replaced) {
+        if (out_len > 0 && out_len < sizeof(out) - 1) {
+            out[out_len++] = ' ';
+        }
+        size_t n = strlen(entry);
+        if (out_len + n > sizeof(out) - 1) {
+            n = sizeof(out) - 1 - out_len;
+        }
+        memcpy(out + out_len, entry, n);
+        out_len += n;
+    }
+    out[out_len] = '\0';
+    memcpy(dev.state, out, out_len + 1);
+}
+
+// 去重键必须是 kind+名字：否则 "say motion" 会吞掉 "evt motion"（两者语义不同）。
+bool EspNowHome::ShouldDeliver(int node_id, const std::string& kind, const std::string& name,
+                               int64_t now_ms) {
+    char key[24];
+    snprintf(key, sizeof(key), "%s %s", kind.c_str(), name.c_str());
     for (auto& d : dedup_) {
-        if (d.used && d.node_id == node_id && evt == d.evt &&
+        if (d.used && d.node_id == node_id && strncmp(d.key, key, sizeof(d.key)) == 0 &&
             (now_ms - d.ts_ms) < kDedupWindowMs) {
             d.ts_ms = now_ms;   // 续期：连发 3 次全部落在窗口内被吞掉
             return false;
@@ -167,7 +344,7 @@ bool EspNowHome::ShouldDeliver(int node_id, const std::string& evt, int64_t now_
     dedup_pos_ = (dedup_pos_ + 1) % (kMaxNodes * 2);
     slot.used = true;
     slot.node_id = node_id;
-    snprintf(slot.evt, sizeof(slot.evt), "%s", evt.c_str());
+    snprintf(slot.key, sizeof(slot.key), "%s", key);
     slot.ts_ms = now_ms;
     return true;
 }
@@ -190,10 +367,10 @@ void EspNowHome::HandleRecv(const uint8_t* src_mac, const uint8_t* data, int len
     }
 
     int64_t now = NowMs();
-    NodeEntry* n = FindOrCreateNode(node_id, src_mac);
-    if (n != nullptr) {
-        n->last_seen_ms = now;
-        memcpy(n->mac, src_mac, sizeof(n->mac));
+    DeviceEntry* dev = FindOrCreateDevice(node_id, src_mac);
+    if (dev != nullptr) {
+        dev->last_seen_ms = now;
+        memcpy(dev->mac, src_mac, sizeof(dev->mac));
         // 首次见到该节点时登记为单播 peer（含 LMK 加密），否则后续下行发不出去。
         // 接收本身不要求 peer 已登记（节点侧正是靠这一点用 onNewPeer 发现主控）。
         if (!esp_now_is_peer_exist(src_mac)) {
@@ -207,27 +384,92 @@ void EspNowHome::HandleRecv(const uint8_t* src_mac, const uint8_t* data, int len
         }
     }
 
-    // 正文（短字符串走 SSO，不在 WiFi 任务里分配堆内存）
-    std::string body(reinterpret_cast<const char*>(data + i + 1),
-                     static_cast<size_t>(len - i - 1));
+    // 正文拷到栈缓冲（200B），后续全用 C 字符串处理，不在 WiFi 任务里分配堆内存
+    size_t body_len = static_cast<size_t>(len - i - 1);
+    char body[kMaxPacketLen];
+    if (body_len >= sizeof(body)) {
+        return;
+    }
+    memcpy(body, data + i + 1, body_len);
+    body[body_len] = '\0';
 
-    if (body.compare(0, 4, "evt ") == 0) {
-        std::string rest = body.substr(4);
-        size_t sp = rest.find(' ');
-        std::string name = (sp == std::string::npos) ? rest : rest.substr(0, sp);
-        std::string arg = (sp == std::string::npos) ? std::string() : rest.substr(sp + 1);
-        if (name.empty() || name.size() > 15) {
-            return;
-        }
-        if (!ShouldDeliver(node_id, name, now)) {
-            return;
-        }
-        if (callback_) {
-            callback_(node_id, name, arg, now);
+    // 能力自描述：幂等覆盖，不去重（节点每次收到 beacon 都会重报）、不回调（无需业务动作）
+    if (strncmp(body, "info ", 5) == 0) {
+        if (dev != nullptr) {
+            HandleInfo(*dev, body + 5);
         }
         return;
     }
-    // "ack ..." / "err ..."：只刷新在线状态（上面已做），不做业务处理
+
+    // do 是下行专用；节点若把它发上来说明状态错乱，忽略（防回环）
+    if (strncmp(body, "do ", 3) == 0) {
+        return;
+    }
+
+    // 执行回执：ok <能力> <结果>
+    if (strncmp(body, "ok ", 3) == 0) {
+        const char* cap = body + 3;
+        const char* sp = strchr(cap, ' ');
+        if (sp == nullptr || sp == cap) {
+            return;
+        }
+        char key[kCapNameLen];
+        snprintf(key, sizeof(key), "%.*s", static_cast<int>(sp - cap), cap);
+        if (dev != nullptr) {
+            UpsertState(*dev, key, sp + 1);
+        }
+        return;
+    }
+
+    // 错误：err <原因> [细节]
+    if (strncmp(body, "err ", 4) == 0) {
+        if (dev != nullptr) {
+            UpsertState(*dev, "err", body + 4);
+        }
+        return;
+    }
+
+    // 播报请求：say <名字> → 板级播 <名字>.mp3（本层不关心名字含义）
+    if (strncmp(body, "say ", 4) == 0) {
+        const char* name = body + 4;
+        size_t name_len = strlen(name);
+        if (name_len == 0 || name_len > 15) {
+            return;
+        }
+        if (!ShouldDeliver(node_id, "say", name, now)) {
+            return;
+        }
+        if (callback_) {
+            callback_(node_id, "say", name, std::string(), now);
+        }
+        return;
+    }
+
+    // 状态上报：evt <名字> <值> → 只进状态缓存，不触发播报
+    // （若走播报通道，dist 这类 5 秒一次的高频项会反复做 SD 卡文件查找）
+    if (strncmp(body, "evt ", 4) == 0) {
+        const char* name = body + 4;
+        const char* sp = strchr(name, ' ');
+        size_t name_len = (sp == nullptr) ? strlen(name) : static_cast<size_t>(sp - name);
+        if (name_len == 0 || name_len > 15) {
+            return;
+        }
+        char nm[16];
+        snprintf(nm, sizeof(nm), "%.*s", static_cast<int>(name_len), name);
+        const char* value = (sp == nullptr) ? "" : sp + 1;
+        if (dev != nullptr) {
+            UpsertState(*dev, nm, value);
+        }
+        if (!ShouldDeliver(node_id, "evt", nm, now)) {
+            return;
+        }
+        if (callback_) {
+            callback_(node_id, "evt", nm, value, now);
+        }
+        return;
+    }
+
+    // 其它正文：只刷新在线状态（上面已做），不做业务处理
 }
 
 void EspNowHome::RecvCb(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
