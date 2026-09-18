@@ -212,7 +212,8 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn("WIFI_IF_STA", self.ino)
 
     def test_node_uses_official_espnow_class(self):
-        self.assertIn('#include "ESP32_NOW.h"', self.ino)
+        # 尖括号/双引号两种写法都接受（核心自带库两种都能解析）
+        self.assertRegex(self.ino, r'#include\s*[<"]ESP32_NOW\.h[>"]')
         self.assertIn("onNewPeer", self.ino)
         self.assertIn("WiFi.setChannel", self.ino)
 
@@ -226,9 +227,18 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn("不要重复调用", self.board)
 
     def test_no_debounce_wording_in_results(self):
-        """踩坑 15：回执不得出现会被读成"没成功"的字样。"""
+        """踩坑 15：self.home.* 的回执不得出现会被读成"没成功"的字样。
+
+        范围必须精确到 InitializeEspNowHome() 函数体：该文件既有的 UNO 串口防抖逻辑
+        本来就用"防抖/已忽略"描述自己（那是合法的），扫全文件会误报。
+        """
+        start = self.board.find("void InitializeEspNowHome()")
+        self.assertGreater(start, -1, "板级必须有 InitializeEspNowHome()")
+        end = self.board.find("// 网络状态查询工具", start)
+        self.assertGreater(end, start, "找不到 InitializeEspNowHome 的结束锚点")
+        body = self.board[start:end]
         for bad in ("防抖", "已忽略"):
-            self.assertNotIn(bad, self.board)
+            self.assertNotIn(bad, body)
 
     def test_light_tool_returns_descriptive_text(self):
         self.assertIn("已完成", self.board)
