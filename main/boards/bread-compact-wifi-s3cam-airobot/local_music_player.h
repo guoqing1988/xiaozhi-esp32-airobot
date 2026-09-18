@@ -35,6 +35,11 @@ public:
     std::string ResolveSong(const std::string& name);
     bool IsPlaying() const { return playing_.load(); }
 
+    // 播放 /sdcard/announce/<name>.mp3（传感器事件播报）。
+    // 独立于歌曲队列：清空队列，播完即停，不接力播歌。
+    // 返回 true=已启动播放；false=文件不存在/参数非法/线程创建失败。
+    bool PlayAnnounce(const std::string& name);
+
 private:
     void PlayTask();
     void PlayOneSong(const std::string& path);
@@ -48,6 +53,7 @@ private:
     std::atomic<bool> paused_{false};
     std::atomic<bool> stop_requested_{false};
     std::string pending_song_;                    // 指定要播的歌曲(下一首优先)
+    std::string pending_path_;                    // 指定要播的绝对路径(播报用, 优先于 pending_song_)
     std::vector<std::string> play_queue_;         // 本次播放队列(顺序=字典序 / 随机=洗牌)
     size_t queue_pos_ = 0;                        // 队列当前位置(播完队列即停止)
     std::mutex state_mutex_;

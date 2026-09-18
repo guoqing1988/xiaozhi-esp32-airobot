@@ -23,6 +23,9 @@
 
 #define MUSIC_DIR "/sdcard/music"
 
+// 预录播报音频目录（独立于 MUSIC_DIR：不进歌曲列表/播放队列，避免被 self.music.list 当成歌）
+#define ANNOUNCE_DIR "/sdcard/announce"
+
 namespace {
 // std::thread 底层 pthread 默认栈仅 3KB(CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=3072)，
 // esp_mp3_dec(Helix) 解码需要约 20KB 栈(esp_audio_codec 文档要求)，不加大会栈溢出导致设备重启。
@@ -326,6 +329,45 @@ std::string LocalMusicPlayer::PlaySong(const std::string& name) {
     return "已开始播放: " + found;
 }
 
+bool LocalMusicPlayer::PlayAnnounce(const std::string& name) {
+    if (name.empty() || name.find('/') != std::string::npos ||
+        name.find("..") != std::string::npos) {
+        return false;   // 拒绝路径穿越：只接受纯名文件名
+    }
+    std::string path = std::string(ANNOUNCE_DIR) + "/" + name + ".mp3";
+    FILE* f = fopen(path.c_str(), "rb");
+    if (f == nullptr) {
+        return false;   // 未插卡 / 未放播报音频：静默跳过(不刷日志, 串口与下位机共享)
+    }
+    fclose(f);
+
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        play_queue_.clear();     // 播报不接力播歌
+        queue_pos_ = 0;
+        pending_song_.clear();
+        pending_path_ = path;
+    }
+    if (playing_.load()) {
+        return true;             // 正在播(歌或播报)：下一轮 loop 切到播报
+    }
+    playing_ = true;
+    paused_ = false;
+    stop_requested_ = false;
+    if (play_thread_.joinable()) {
+        play_thread_.join();
+    }
+    try {
+        play_thread_ = CreatePlayThread(&LocalMusicPlayer::PlayTask, this);
+    } catch (const std::exception& e) {
+        playing_ = false;
+        LogMemStats("PlayAnnounce create thread failed");
+        ESP_LOGE(TAG, "Failed to start announce thread: %s", e.what());
+        return false;
+    }
+    return true;
+}
+
 void LocalMusicPlayer::Pause() {
     paused_ = true;
 }
@@ -352,21 +394,25 @@ void LocalMusicPlayer::PlayTask() {
             continue;
         }
         std::string song;
+        std::string path;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            if (!pending_song_.empty()) {
+            if (!pending_path_.empty()) {
+                path = pending_path_;      // 播报(绝对路径)优先
+                pending_path_.clear();
+            } else if (!pending_song_.empty()) {
                 song = pending_song_;
                 pending_song_.clear();
             } else {
                 song = PickNextSong();
             }
         }
-        if (song.empty()) {
-            // 队列播完(顺序/随机均到末尾)或没有任何歌曲
+        if (song.empty() && path.empty()) {
+            // 队列播完(顺序/随机均到末尾)、或没有任何歌曲/播报
             playing_ = false;
             break;
         }
-        PlayOneSong(std::string(MUSIC_DIR) + "/" + song);
+        PlayOneSong(path.empty() ? (std::string(MUSIC_DIR) + "/" + song) : path);
     }
     playing_ = false;
     // 自然播完(非外部停止)且状态仍是我们钉住的 Speaking -> 回到待命；
