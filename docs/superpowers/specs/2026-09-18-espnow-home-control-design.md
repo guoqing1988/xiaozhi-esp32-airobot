@@ -3,7 +3,7 @@
 - 日期：2026-09-18
 - 分支：`feature/espnow-home-control`
 - 板级：`main/boards/bread-compact-wifi-s3cam-airobot/`
-- 状态：**待用户审查**
+- 状态：**设计已获批准，已实现**（实现期有 3 处规格修正，见 §2.1）
 - 前置依赖：无（不复用未实现的改动）
 
 ## 1. 背景与目标
@@ -40,6 +40,25 @@
 | 12 | 引脚分配 | 由本设计指定（§3.1） |
 | 13 | 协议格式 | 复用现有 `@`-文本行风格，与 UART 下位机同构 |
 
+## 2.1 实现期修正（已按此落地）
+
+实现过程中发现 3 处原设计不可取，已按下面修正落地，正文相关章节同步更新：
+
+| # | 原设计 | 修正为 | 原因 |
+|---|---|---|---|
+| 1 | 关键报文**两侧**都连发 3 次（§4.1） | **只有上行 `evt` 连发 3 次**；下行 `light` 单次发送 | 下行在 MCP 工具回调里连发需阻塞约 (3-1)×150ms，直接卡住对话；而节点是**常醒**的（`WiFi.setSleep(false)` + USB 供电），不会因 DTIM 睡眠丢包，无需重发 |
+| 2 | `EspNowHome::SetControlWindow()` + 板级 `SetPowerSaveLevel()` 联动提频 | **不做**，待机省电保持原样 | 踩坑 7 确认待机省电是刻意设计；ESP-NOW 漏包用"上行 3 连发 + 主控去重"已能兜住，不值得为此侵入板级 override |
+| 3 | 初始化时调用 `esp_now_set_wake_window()` | **不调用**（保持官方默认最大值），仅列为现场实测调优项 | 默认窗口已是最大值；先按默认跑，实测丢包再调，避免凭空引入变量 |
+
+实现期另外踩到并已固化的 4 个坑：
+
+| # | 坑 | 处理 |
+|---|---|---|
+| 4 | 密钥字符串字面量含结尾 `\0` 共 17 字节；`uint8_t kPmk[16] = "xiaozhi-pmk-0001"` **编译报** `initializer-string for 'const uint8_t [16]' is too long` | 字符串最多 15 字符：实际用 `"xiaozhi-pmk-01"` / `"xiaozhi-lmk-01"`（14 字符 + `\0` + 1 字节补零） |
+| 5 | arduino-esp32 3.2.0 的 `ESP_NOW_Peer::add()` / `send()` 是 **protected**，且 `onReceive()` 返回 **void**（不是 bool） | 节点侧用子类 public 包装 `attach()` / `sendData()`，并严格按官方签名 override（对照官方示例 `ESP_NOW_Network`） |
+| 6 | 超声波每 100ms 上报一次距离（×3 连发 = 每秒 30 包），会占满 2.4G | 距离上报降频：变化 ≥3cm 或 5 秒保活才上报（`DIST_REPORT_DELTA_CM` / `DIST_REPORT_KEEPALIVE_MS`） |
+| 7 | 跑无 TF 卡变体编译会由 `build.py` 重建 `sdkconfig` 并**全量重编 2154 个目标**、把 `build/` 切到另一变体（且中断时 `sdkconfig` 只剩 `.old`） | **不跑**该变体（见 §7）；播报相关代码已用 `#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD` 完整包裹，风险很低 |
+
 ## 3. 架构与组件
 
 ### 3.1 硬件与引脚
@@ -64,16 +83,20 @@
 ```cpp
 class EspNowHome {
 public:
-    // 事件出口：节点上报的原始载荷（evt/arg 已解析）
+    // 事件出口：节点上报的原始载荷（evt/arg 已解析）；在 WiFi 任务上下文调用
     using EventCallback = std::function<void(int node_id, const std::string& evt,
-                                             const std::string& arg, uint32_t ts_ms)>;
+                                             const std::string& arg, int64_t ts_ms)>;
 
-    bool Begin(EventCallback cb);                     // esp_now_init + 广播 peer + beacon 定时器
-    bool SendTo(int node_id, const std::string& body); // 下行正文，内部加 "@n<id> " 前缀
-    bool IsOnline(int node_id, uint32_t within_ms = 15000) const;
-    std::string NodesJson() const;                    // 在线/最后上线时间(JSON)
-    void SetControlWindow(bool active);               // 由板级 SetPowerSaveLevel() 驱动
-    // 接收回调内部实现，不对外暴露
+    static constexpr int kMaxNodes = 4;
+    static constexpr int64_t kOfflineMs = 15000;     // 主控侧判离线（节点侧回 hop 是 5s）
+    static constexpr int64_t kDedupWindowMs = 1000;  // 上行事件去重窗口
+
+    bool Begin(EventCallback cb);                      // esp_now_init + 广播 peer + beacon 定时器
+    bool SendTo(int node_id, const std::string& body); // 下行正文，内部加 "@n<id> " 前缀（单次发送）
+    bool IsOnline(int node_id) const;
+    std::string NodesJson() const;                     // 在线/最后通信时间(JSON)
+    static int64_t NowMs();
+    // 接收回调、节点表、去重表均为内部实现，不对外暴露
 };
 ```
 
@@ -82,7 +105,7 @@ public:
 - **beacon**：`esp_timer` 周期任务（**不新建 FreeRTOS 任务**）广播 `@beacon 1`；启动后 500ms × 前 60 次（≈30 秒），之后降到 3000ms 稳态。
   - 广播报文 ≤ 16 字节，对音频链路无感。
 - **信道来源**：`WifiManager::GetInstance().GetChannel()`（`main/boards/common/wifi_board.cc:274` 已在用）。
-- **待机也要收得到上报**：待机态是 `WIFI_PS_MAX_MODEM`（station 只在 DTIM 醒来），ESP-NOW 收包会被漏掉。对策 = ① 初始化时调用官方 `esp_now_set_wake_window()`（IDF v6 API，头文件注释明确 "could work at connected status"），窗口值列为**现场实测调优项**（先用默认值）；② 上行事件由节点**连发 3 次**（间隔 150ms，见 §3.6），跨过 DTIM 周期。
+- **待机也要收得到上报**：待机态是 `WIFI_PS_MAX_MODEM`（station 只在 DTIM 醒来），ESP-NOW 收包会被漏掉。对策 = 上行事件由节点**连发 3 次**（间隔 150ms，见 §3.6）跨过 DTIM 周期，主控侧去重；**不动** WiFi 省电（见 §2.1 修正 2）；`esp_now_set_wake_window()` 仅作为现场实测丢包时的调优项（见 §2.1 修正 3）。
 - **去重**：主控按 `(node_id, evt)` 做 1 秒窗口去重，抵消节点的 3 次重发。
 - **内存**：节点表 + 收发缓冲各 1 个 ≤ 256B 的静态数组，总新增常量级，不动 PSRAM、不建队列。
 
@@ -179,7 +202,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 main/boards/bread-compact-wifi-s3
 | 节点→主控 | `@n1 ack light 1` | 执行确认 |
 | 节点→主控 | `@n1 err dht` | 传感器读取失败 |
 
-**重发策略（两侧统一）**：关键报文（下行 `light`、上行 `evt`）一律**连发 3 次、间隔 150ms**。命令是幂等的（重复执行无害），这样无需应用层 ACK 就能跨过待机 DTIM 唤醒窗口导致的漏包；`ack` 只作节点执行回执（供状态显示），**不作为可靠性依赖**。
+**重发策略（只在上行）**：节点把每条上行 `evt` **连发 3 次、间隔 150ms**（节点侧非阻塞状态机），主控按 `(node_id, evt)` 1 秒窗口**去重+续期**，把 3 次收敛成 1 次业务事件。下行 `light` **单次发送**：节点常醒（不会因 DTIM 睡眠丢包），且在 MCP 工具回调里连发会阻塞对话（见 §2.1 修正 1）。两侧都**不使用**应用层 ACK 作为可靠性依赖；`ack` 只作节点执行回执（供状态显示）。
 
 ### 4.2 三条链路
 
@@ -211,14 +234,14 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 main/boards/bread-compact-wifi-s3
 
 1. **内部 SRAM 仅 20~25KB 空闲**（踩坑 16）→ 不建常驻任务（beacon 用 `esp_timer` 回调）、缓冲全部静态定长、ESP-NOW 接收回调只做解析+更新缓存。
 2. **UART0 与 Arduino 下位机共用**（AGENTS.md + 踩坑记录）→ 新代码**一律不加 `ESP_LOG`**，失败通过返回值/工具文本表达。
-3. **待机 `WIFI_PS_MAX_MODEM`**（踩坑 7）→ 控制期间把 WiFi 提到 `PERFORMANCE`：复用板级已有的 `SetPowerSaveLevel()` override，由 `EspNowHome::SetControlWindow()` 驱动（与现有 `web_control_active_` 同法、同处）。
+3. **待机 `WIFI_PS_MAX_MODEM`**（踩坑 7）**保持原样不动**：早期草案曾计划由 `EspNowHome::SetControlWindow()` 驱动板级 `SetPowerSaveLevel()` 提频，实现期判定不值得（见 §2.1 修正 2）。
 4. **单 2.4G radio 与云端音频共存** → 控制报文 <40B；稳态 beacon 3 秒一次；**不做周期性心跳刷屏**（只按需 `@n1 ping`，默认 5 秒且仅在有控制窗口时启用）。
 5. **官方 API 事实**（已核对本机源码）：
    - IDF v6.0.2：`esp_now_register_recv_cb()` 用 `esp_now_recv_info_t*`；`esp_now_add_peer()` 的 `ifidx` 两侧必须都是 `WIFI_IF_STA`；
    - arduino-esp32 3.2.0：官方 `ESP_NOW` 类 + `onNewPeer()` 是节点发现的官方机制；`neopixelWrite()` 已废弃（本设计不用它，用 `ledc`）。
 6. **播报为什么必须本地预录**：项目协议层可主动发送的只有 `SendWakeWordDetected / SendStartListening / SendStopListening / SendAbortSpeaking / SendMcpMessage`，**没有"设备主动请求 TTS"的接口**；`NotifyPlayer` 播的是**服务端下发的音频 URL**。所以设备侧无法自行生成语音 → 预录 MP3 是唯一场内可控方案。
 7. **协议与下位机同构**的理由：现有 `@`-文本 + 回执 + 防抖 + 回执语义的踩坑经验（踩坑 2/5/15）可**直接复用**，降低重复踩坑概率。
-8. **待机省电与事件上报的矛盾（本设计的关键取舍）**：待机 `WIFI_PS_MAX_MODEM` 下 station 只在 DTIM 醒来，ESP-NOW 上报会漏；但演示又要"手一挥就播报"。取舍 = **不做全局提频**（会牺牲待机功耗，且踩坑 7 已确认省电是刻意设计），改由 `esp_now_set_wake_window()` + 节点连发 3 次 + 主控去重兜住（§3.2 / §6）；仅当现场实测仍丢包时，才把 wake window 调大。
+8. **待机省电与事件上报的矛盾（本设计的关键取舍）**：待机 `WIFI_PS_MAX_MODEM` 下 station 只在 DTIM 醒来，ESP-NOW 上报会漏；但演示又要"手一挥就播报"。取舍 = **不做全局提频**（会牺牲待机功耗，且踩坑 7 已确认省电是刻意设计），改由**节点连发 3 次 + 主控去重**兜住（§3.2 / §6）；`esp_now_set_wake_window()` 只在现场实测仍丢包时才调大。
 
 ## 6. 错误处理
 
@@ -246,7 +269,8 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 main/boards/bread-compact-wifi-s3
    - 静态断言：`espnow_home.cc` 内**不得出现 `ESP_LOG`**（本板 UART0 共享约定）；
    - 静态断言：`self.home.light` 工具描述含"不要重复调用"，且返回文本不含"防抖/已忽略"字样（踩坑 15 回归防护）。
 2. 节点固件编译门禁：`arduino-cli compile --fqbn esp32:esp32:esp32s3 .../arduino/EspNowNode` 必须 0 错误 0 警告。
-3. 主控固件：`python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot` 通过。
+3. 主控固件：`python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot` 通过（**只编主变体**）。
+   > ⚠️ **不要为验证 `#ifdef` 去编无 TF 卡变体**：`build.py` 会重建 `sdkconfig` 并触发全量重编（实测 2154 个目标）、把 `build/` 切到另一变体；中断时还会留下"`sdkconfig` 缺失 + 只剩 `sdkconfig.old`"的中间状态（见 §2.1 修正 7）。播报代码已完整 `#ifdef` 包裹，需要时再编该变体。
 4. 真机验证清单见 §9。
 
 ## 8. 不做的（YAGNI）
