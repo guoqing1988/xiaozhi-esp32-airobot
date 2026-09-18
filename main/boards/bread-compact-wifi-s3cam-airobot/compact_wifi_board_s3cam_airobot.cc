@@ -8,6 +8,7 @@
 #include "button.h"
 #include "config.h"
 #include "log_capture.h"
+#include "espnow_home.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
 #include "led/single_led.h"
@@ -113,6 +114,24 @@ private:
     TaskHandle_t uno_status_task_ = nullptr;  // UART0 RX 解析任务
     // web 控制页是否有 WS 连接: 有连接期间强制 WiFi 性能模式(见 SetPowerSaveLevel override)
     std::atomic<bool> web_control_active_{false};
+
+    // ---- ESP-NOW 居家节点（灯/传感器，见 espnow_home.h）----
+    std::unique_ptr<EspNowHome> espnow_home_;
+    struct HomeNodeState {
+        bool valid = false;
+        int temp = 0;      // DHT11 温度 ℃
+        int hum = 0;       // DHT11 湿度 %
+        int dist = 0;      // 超声波距离 cm
+        int beam = 0;      // 激光 0=通 1=遮挡
+        int64_t ts_ms = 0;
+    };
+    HomeNodeState home_state_[EspNowHome::kMaxNodes + 1];
+    int64_t home_announce_ms_[EspNowHome::kMaxNodes + 1] = {0};  // 同节点播报冷却
+    int home_hot_state_ = 0;                                     // 温度告警迟滞: 0=正常 1=已告警
+    static constexpr int64_t kAnnounceCooldownMs = 10000;        // 播报冷却窗口
+    static constexpr int kHomeHotTrigger = 28;                   // ≥28℃ 触发
+    static constexpr int kHomeHotRelease = 26;                   // ≤26℃ 复位
+    static constexpr int64_t kHomeStaleMs = 30000;               // 读数过期阈值
 
     // ---- 待机全屏大时钟（AI 可控: self.clock.set(开关+主题合一) / self.clock.current, NVS 持久化）----
     bool clock_mode_ = false;                // 时钟显示开关
@@ -1120,6 +1139,175 @@ private:
         ApplyServoHome();   // 开机把 NVS 保存的回正角度下发给下位机
     }
 
+    // ---- ESP-NOW 居家节点 ----
+
+    // 事件播报：仅待机时播（不打断对话），同节点 10 秒冷却
+    void Announce(int node_id, const char* name) {
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+        if (!music_player_ || node_id < 1 || node_id > EspNowHome::kMaxNodes) {
+            return;
+        }
+        // 对话/播报中不插嘴：本地播放本身会把状态钉在 Speaking，天然串行
+        if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+            return;
+        }
+        int64_t now = EspNowHome::NowMs();
+        if (home_announce_ms_[node_id] != 0 &&
+            (now - home_announce_ms_[node_id]) < kAnnounceCooldownMs) {
+            return;
+        }
+        if (music_player_->PlayAnnounce(name)) {
+            home_announce_ms_[node_id] = now;   // 只有真的播起来才记冷却
+        }
+#else
+        (void)node_id;
+        (void)name;
+#endif
+    }
+
+    // 上行事件在主任务上下文处理（传输层回调里已用 Schedule 切回来）
+    void OnHomeEvent(int node_id, const std::string& evt, const std::string& arg, int64_t ts_ms) {
+        if (node_id < 1 || node_id > EspNowHome::kMaxNodes) {
+            return;
+        }
+        HomeNodeState& st = home_state_[node_id];
+        st.valid = true;
+        st.ts_ms = ts_ms;
+        int value = atoi(arg.c_str());
+        if (evt == "dist") {
+            st.dist = value;
+        } else if (evt == "temp") {
+            int t = 0, h = 0;
+            if (sscanf(arg.c_str(), "%d %d", &t, &h) == 2) {
+                st.temp = t;
+                st.hum = h;
+                // 温度告警迟滞：≥28℃ 播一次，≤26℃ 复位（避免在阈值上反复播报）
+                if (home_hot_state_ == 0 && st.temp >= kHomeHotTrigger) {
+                    home_hot_state_ = 1;
+                    Announce(node_id, "hot");
+                } else if (home_hot_state_ == 1 && st.temp <= kHomeHotRelease) {
+                    home_hot_state_ = 0;
+                }
+            }
+        } else if (evt == "beam") {
+            st.beam = value;
+            if (value == 1) {
+                Announce(node_id, "beam");
+            }
+        } else if (evt == "motion") {
+            if (value == 1) {
+                Announce(node_id, "motion");
+            }
+        }
+        // 其它事件类型：只刷新时间戳，不处理（协议向前兼容）
+    }
+
+    void InitializeEspNowHome() {
+        espnow_home_ = std::make_unique<EspNowHome>();
+        bool ok = espnow_home_->Begin(
+            [this](int node_id, const std::string& evt, const std::string& arg, int64_t ts_ms) {
+                // 传输层回调跑在 WiFi 任务上下文：必须切回主任务再动业务
+                // （AGENTS.md: callbacks may run outside the main task）
+                Application::GetInstance().Schedule(
+                    [this, node_id, evt, arg, ts_ms]() { OnHomeEvent(node_id, evt, arg, ts_ms); });
+            });
+        if (!ok) {
+            espnow_home_.reset();
+            return;
+        }
+
+        auto& mcp = McpServer::GetInstance();
+        mcp.AddTool(
+            "self.home.light",
+            "控制居家节点的灯(开关/颜色/亮度)。调用一次即完成并自动返回, 不要重复调用、也不要再调用本工具确认。"
+            "node: 节点号(1=客厅, 2=玄关); on: 1=开,0=关; r/g/b: 颜色分量0-255(可选, 省略=不改颜色); "
+            "brightness: 亮度0-255(可选, 省略=不改亮度)",
+            PropertyList({Property("node", kPropertyTypeInteger, 1, 1, EspNowHome::kMaxNodes),
+                          Property("on", kPropertyTypeInteger, 1, 0, 1),
+                          Property("r", kPropertyTypeInteger, -1, -1, 255),
+                          Property("g", kPropertyTypeInteger, -1, -1, 255),
+                          Property("b", kPropertyTypeInteger, -1, -1, 255),
+                          Property("brightness", kPropertyTypeInteger, -1, -1, 255)}),
+            [this](const PropertyList& p) -> ReturnValue {
+                int node = p["node"].value<int>();
+                char body[64];
+                snprintf(body, sizeof(body), "light %d %d %d %d %d", p["on"].value<int>(),
+                         p["r"].value<int>(), p["g"].value<int>(), p["b"].value<int>(),
+                         p["brightness"].value<int>());
+                if (!espnow_home_ || !espnow_home_->SendTo(node, body)) {
+                    return "节点 " + std::to_string(node) +
+                           " 未连接, 指令未发出; 请检查该节点电源与距离后重试";
+                }
+                return "已完成: 节点 " + std::to_string(node) + " 的灯已" +
+                       (p["on"].value<int>() != 0 ? "打开" : "关闭");
+            });
+
+        mcp.AddTool(
+            "self.home.sensor",
+            "查询居家节点传感器读数: 温度(℃)/湿度(%)/距离(cm)/激光遮挡(0/1)。"
+            "node 省略或为 0 时返回全部在线节点。返回 JSON, 每项含 stale 字段"
+            "(true=读数超过30秒未更新)。用于回答\"室内多少度\"\"门口有人吗\"这类问题; "
+            "读到 stale=true 时应说明数据可能已过期",
+            PropertyList({Property("node", kPropertyTypeInteger, 0, 0, EspNowHome::kMaxNodes)}),
+            [this](const PropertyList& p) -> ReturnValue {
+                int want = p["node"].value<int>();
+                int64_t now = EspNowHome::NowMs();
+                std::string json = "{\"nodes\":[";
+                bool first = true;
+                for (int i = 1; i <= EspNowHome::kMaxNodes; i++) {
+                    if (want != 0 && want != i) {
+                        continue;
+                    }
+                    const HomeNodeState& st = home_state_[i];
+                    bool online = espnow_home_ && espnow_home_->IsOnline(i);
+                    if (!st.valid && !online) {
+                        continue;
+                    }
+                    if (!first) {
+                        json += ",";
+                    }
+                    first = false;
+                    char item[192];
+                    snprintf(item, sizeof(item),
+                             "{\"id\":%d,\"online\":%s,\"valid\":%s,\"temp\":%d,\"hum\":%d,"
+                             "\"dist\":%d,\"beam\":%d,\"age_ms\":%lld,\"stale\":%s}",
+                             i, online ? "true" : "false", st.valid ? "true" : "false", st.temp,
+                             st.hum, st.dist, st.beam,
+                             static_cast<long long>(st.valid ? (now - st.ts_ms) : -1),
+                             (st.valid && (now - st.ts_ms) < kHomeStaleMs) ? "false" : "true");
+                    json += item;
+                }
+                json += "]}";
+                return json;
+            });
+
+        mcp.AddTool(
+            "self.home.status",
+            "查询居家节点的连接状态(在线/最后通信时间)。用于排查\"为什么控制不了灯\"——"
+            "返回里某个节点 online=false 就说明该节点掉线或未上电",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                if (!espnow_home_) {
+                    return std::string("{\"nodes\":[],\"error\":\"ESP-NOW 未启动\"}");
+                }
+                return espnow_home_->NodesJson();
+            });
+
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+        mcp.AddTool(
+            "self.home.announce",
+            "播放预录播报语音(演示/自测用)。name: motion=有人靠近, beam=门口有人经过, hot=温度偏高",
+            PropertyList({Property("name", kPropertyTypeString, std::string("motion"))}),
+            [this](const PropertyList& p) -> ReturnValue {
+                std::string name = p["name"].value<std::string>();
+                if (!music_player_ || !music_player_->PlayAnnounce(name)) {
+                    return "未找到播报文件 " + name + ".mp3(需放在 TF 卡 /sdcard/announce/)";
+                }
+                return "已开始播报: " + name;
+            });
+#endif
+    }
+
     // 网络状态查询工具（可扩展的网络信息入口，当前返回 IP，后续可加 SSID/信号/MAC 等）
     void InitializeNetworkTools() {
         auto& mcp = McpServer::GetInstance();
@@ -1199,6 +1387,7 @@ public:
         InitializeUnoTools();
         InitializeCameraTools();
         InitializeClockTools();
+        InitializeEspNowHome();
         InitializeNetworkTools();
         InitializeDebugTools();
         // 默认把日志压到 ERROR, 避免 GPIO43 日志污染 Arduino 串口(平时命令更稳定)

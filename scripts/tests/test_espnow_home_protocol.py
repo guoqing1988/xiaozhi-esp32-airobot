@@ -243,7 +243,7 @@ class TestSourceContracts(unittest.TestCase):
         idx = player.find("PlayAnnounce")
         self.assertGreater(idx, -1, "local_music_player.cc 必须有 PlayAnnounce")
         body = player[idx:idx + 900]
-        self.assertIn('find("/")', body)
+        self.assertIn("find('/')", body)
         self.assertIn('find("..")', body)
 
     def test_announce_only_when_idle(self):
