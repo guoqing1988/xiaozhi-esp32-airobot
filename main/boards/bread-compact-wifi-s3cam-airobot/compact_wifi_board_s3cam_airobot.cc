@@ -1208,9 +1208,20 @@ private:
                           Property("args", kPropertyTypeString, std::string())}),
             [this](const PropertyList& p) -> ReturnValue {
                 int id = p["id"].value<int>();
-                std::string cap = p["cap"].value<std::string>();
-                std::string action = p["action"].value<std::string>();
-                std::string args = p["args"].value<std::string>();
+                // AI 生成的字符串常带首尾空格；而空格是本协议的分隔符，
+                // 不 trim 会拼出 "do light  rgb"（空字段）→ 节点侧无法解析。
+                auto trim = [](std::string s) {
+                    size_t b = s.find_first_not_of(" \t\r\n");
+                    if (b == std::string::npos) {
+                        return std::string();
+                    }
+                    size_t e = s.find_last_not_of(" \t\r\n");
+                    return s.substr(b, e - b + 1);
+                };
+                std::string cap = trim(p["cap"].value<std::string>());
+                std::string action = trim(p["action"].value<std::string>());
+                // args 内部的分隔符原样保留（节点侧宽容解析数字）
+                std::string args = trim(p["args"].value<std::string>());
                 // 失败时一律附上设备清单：AI 不必先查后控，一次失败即可自愈
                 auto with_list = [this](const std::string& why) {
                     return why + "; 当前设备清单: " +

@@ -131,14 +131,52 @@ static void applyLight() {
     ledcWrite(PIN_RGB_B, duty(light_b));
 }
 
+// ===================== 参数解析小工具 =====================
+// AI 生成的参数格式并不统一（"0 0 255" / "0,0,255" / "[0,0,255]" 都可能出现），
+// 所以这里不依赖 sscanf 的固定格式，而是“把任何非数字字符都当分隔符”。
+// 返回解析出的整数个数。
+static int parseNums(const char* s, int* out, int maxn) {
+    int n = 0;
+    while (s != nullptr && *s != '\0' && n < maxn) {
+        while (*s != '\0' && !((*s >= '0' && *s <= '9') || *s == '-')) {
+            s++;
+        }
+        if (*s == '\0') {
+            break;
+        }
+        out[n++] = atoi(s);
+        while ((*s >= '0' && *s <= '9') || *s == '-') {
+            s++;
+        }
+    }
+    return n;
+}
+
+// 取空格分隔的下一个字段：跳过前导/连续空格（主控也会 trim，这里再兜一层，
+// 避免“AI 多打一个空格就整条命令被静默丢弃”）。返回下一个字段的起点。
+static const char* nextField(const char* p, char* out, size_t out_len) {
+    while (*p == ' ') {
+        p++;
+    }
+    const char* sp = strchr(p, ' ');
+    size_t n = (sp == nullptr) ? strlen(p) : static_cast<size_t>(sp - p);
+    if (n >= out_len) {
+        n = out_len - 1;
+    }
+    snprintf(out, out_len, "%.*s", static_cast<int>(n), p);
+    return (sp == nullptr) ? (p + strlen(p)) : (sp + 1);
+}
+
 // ===================== 能力处理函数（动作 → 结果文本）=====================
 // 约定：成功把结果写进 out 并返回 true；动作不认识则返回 false（上层回 unknown-action）。
 // 动作名建议用标准词汇 on/off/set/rgb/read —— AI 首次调用命中率最高；
 // 自定义动作名同样可以（主控原样透传，不校验）。
 
 static bool capLight(const char* action, const char* args, char* out, size_t out_len) {
+    int v[3] = {0, 0, 0};
+    int n = parseNums(args, v, 3);
     if (strcmp(action, "on") == 0) {
-        light_on = (atoi(args) != 0);
+        light_on = (n > 0) ? (v[0] != 0) : 1;   // "on" 不带参数时默认开
         applyLight();
         snprintf(out, out_len, "%d", light_on);
         return true;
@@ -150,19 +188,21 @@ static bool capLight(const char* action, const char* args, char* out, size_t out
         return true;
     }
     if (strcmp(action, "rgb") == 0) {
-        int r = 0, g = 0, b = 0;
-        if (sscanf(args, "%d %d %d", &r, &g, &b) != 3) {
-            return false;
+        if (n < 3) {
+            return false;   // 参数不足：回 unknown-action，AI 看规格后能重试
         }
-        light_r = r;
-        light_g = g;
-        light_b = b;
+        light_r = v[0];
+        light_g = v[1];
+        light_b = v[2];
         applyLight();
-        snprintf(out, out_len, "%d %d %d", r, g, b);
+        snprintf(out, out_len, "%d %d %d", v[0], v[1], v[2]);
         return true;
     }
     if (strcmp(action, "bright") == 0 || strcmp(action, "set") == 0) {
-        light_bright = atoi(args);
+        if (n < 1) {
+            return false;
+        }
+        light_bright = v[0];
         applyLight();
         snprintf(out, out_len, "%d", light_bright);
         return true;
@@ -346,29 +386,22 @@ private:
         if (strncmp(body, "do ", 3) != 0) {
             return;   // 其它命令（ping 等）：收到即刷新在线（onReceive 已做）
         }
-        const char* rest = body + 3;
         char cap[16] = {0};
         char action[16] = {0};
 
-        const char* sp = strchr(rest, ' ');
-        size_t n = (sp == nullptr) ? strlen(rest) : static_cast<size_t>(sp - rest);
-        if (n == 0 || n >= sizeof(cap)) {
-            return;
+        const char* rest = nextField(body + 3, cap, sizeof(cap));
+        if (cap[0] == '\0') {
+            return;   // 连能力名都没有：丢弃（无法回答是哪个能力出错）
         }
-        snprintf(cap, sizeof(cap), "%.*s", static_cast<int>(n), rest);
-        if (sp == nullptr) {
+        rest = nextField(rest, action, sizeof(action));
+        if (action[0] == '\0') {
             qCap("err", "missing-action", cap);
             return;
         }
-
-        rest = sp + 1;
-        sp = strchr(rest, ' ');
-        n = (sp == nullptr) ? strlen(rest) : static_cast<size_t>(sp - rest);
-        if (n == 0 || n >= sizeof(action)) {
-            return;
+        while (*rest == ' ') {
+            rest++;   // args 原样交给 handler（它自己做宽容解析）
         }
-        snprintf(action, sizeof(action), "%.*s", static_cast<int>(n), rest);
-        const char* args = (sp == nullptr) ? "" : sp + 1;
+        const char* args = rest;
 
         for (int i = 0; i < node_def->cap_count; i++) {
             if (strcmp(node_def->caps[i].name, cap) != 0) {

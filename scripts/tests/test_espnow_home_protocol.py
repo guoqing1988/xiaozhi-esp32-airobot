@@ -593,6 +593,26 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn("unknown-cap", body)
         self.assertIn("readonly", body)
 
+    def test_node_parses_args_tolerantly(self):
+        """参数格式必须宽容：AI 会传 "0,0,255"、"[0,0,255]" 或带多余空格。
+
+        sscanf 的固定格式会拒掉这些写法，所以节点侧用“任何非数字字符即分隔符”的
+        parseNums()，并用 nextField() 跳过连续空格——
+        否则 "do light  rgb" 这种空字段会让命令被静默丢弃。
+        """
+        self.assertIn("parseNums", self.ino)
+        self.assertIn("nextField", self.ino)
+        self.assertRegex(self.ino, r"while \(\*p == ' '\)")
+
+    def test_board_trims_ai_strings(self):
+        """主控侧必须 trim cap/action/args。
+
+        空格是协议分隔符，AI 传 "light " 会拼出 "do light  rgb"，
+        节点侧会解析出空字段，导致命令被静默丢弃。
+        """
+        self.assertIn("find_first_not_of", self.board)
+        self.assertIn("auto trim = [](std::string s)", self.board)
+
     def test_node_old_protocol_retired(self):
         """旧协议 ack/light 下行必须退役，避免两套语义并存。"""
         self.assertNotIn("ack light", self.ino)
