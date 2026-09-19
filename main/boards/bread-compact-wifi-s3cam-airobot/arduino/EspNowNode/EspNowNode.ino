@@ -28,8 +28,11 @@
 // 注意：这些宏必须在下面的 #if 之前定义（预处理按顺序求值）。
 
 #define NODE_ID 3                    // 1=客厅灯(RGB+超声波) 2=玄关感应(DHT11+激光) 3=融合节点(四件套)
-#define HOP_INTERVAL_MS 200          // 未锁定信道时的换信道间隔
-#define LOST_TIMEOUT_MS 5000         // 锁定后多久收不到主控包就回到 hop
+#define HOP_INTERVAL_MS 2000   // 每个信道停留时长。主控每 3000ms 才广播一次，停太短会大部分
+                               // 时间错过广播：1200ms 时命中率仅 40%，要转两三圈才撞上一次；
+                               // 2000ms 提到 67%，一圈（26 秒）内基本能锁上
+#define LOST_TIMEOUT_MS 12000        // 锁定后多久收不到主控包才回 hop。主控 3 秒一次广播，
+                                     // 偶尔丢两三个很正常；原来 5 秒就掉线会反复重连
 #define HOP_CHANNEL_MIN 1
 #define HOP_CHANNEL_MAX 13
 
@@ -103,6 +106,7 @@ static const uint8_t kLmk[16] = "xiaozhi-lmk-01";
 
 // ============================== include ==============================
 
+#include <esp_wifi.h>   // esp_wifi_get_channel/set_channel 需要它（WiFi.h 不会间接包含）
 #include <ESP32_NOW.h>
 #include <WiFi.h>
 #include <esp_mac.h>
@@ -134,6 +138,14 @@ static bool motion_active = false;
 // auto_off_due_ms = 自动关灯的到点时刻（0 = 没在排队）
 static bool auto_lit = false;
 static uint32_t auto_off_due_ms = 0;
+// motion_suppress = 人工（语音/AI）接管过灯之后，就抑制“人来自动开灯”。
+// 解除条件必须是“人离开并持续 MOTION_SUPPRESS_HOLD_MS”，不能写成“距离一超
+// 过释放阀值就解除”：手在传感器前晃动时距离会在 30~45cm 之间来回跳，
+// 那样抑制会被反复清掉，人就一直开灯，现象是“AI 关灯永远关不掉”。
+#define MOTION_SUPPRESS_HOLD_MS 10000
+static bool motion_suppress = false;
+static uint32_t motion_clear_ms = 0;   // 变成“人不在”的时刻（用于计时解除抑制）
+
 static int last_dist = -1;
 static uint32_t last_dist_ms = 0;
 static uint32_t sonar_ms = 0;
@@ -259,6 +271,9 @@ static bool capLight(const char* action, const char* args, char* out, size_t out
     if (strcmp(action, "read") != 0) {
         auto_lit = false;
         auto_off_due_ms = 0;
+        // 人工已接管：别再自动开灯。人不在时就从现在开始计时解除
+        motion_suppress = true;
+        motion_clear_ms = motion_active ? 0 : millis();
     }
     int v[3] = {0, 0, 0};
     int n = parseNums(args, v, 3);
@@ -508,15 +523,27 @@ static void sendInfo() {
 
 // ============================== 主控 peer ==============================
 
-static class HomePeer* peer = nullptr;
+static class HomePeer* peer = nullptr;      // 主控（加密）：接收下行命令
+static class HomePeer* tx_peer = nullptr;   // 广播（明文）：发送上行数据
+
+// 广播地址：ESP-NOW 的广播帧不能加密，只能明文发
+static const uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 class HomePeer : public ESP_NOW_Peer {
 public:
-    HomePeer(const uint8_t* mac, uint8_t channel)
-        : ESP_NOW_Peer(mac, channel, WIFI_IF_STA, kLmk) {}
+    // lmk 传 nullptr 表示明文（广播只能用明文）；不传就用 kLmk 加密
+    HomePeer(const uint8_t* mac, uint8_t channel, const uint8_t* lmk = kLmk)
+        : ESP_NOW_Peer(mac, channel, WIFI_IF_STA, lmk) {}
 
-    // add()/send() 在基类里是 protected，需由子类公开包装（官方示例同法）
+    // add()/send()/remove() 在基类里是 protected，需由子类公开包装（官方示例同法）
     bool attach() { return add(); }
+    // 从 ESP-NOW 的对端表里摘掉自己。这一步不能省：基类的析构函数是空的，
+    // 只 delete 只会释放内存，对端表里仍然留着这个 MAC。后果有两个：
+    // 1) 主控的广播会被当成“已注册对端”处理，不再触发 onNewPeerCb，
+    //    节点就再也锁不上主控（表现为“收到了 beacon 却永远不 LOCKED”）；
+    // 2) 内部对端数组会留下指向已释放对象的悬空指针，之后主控下发的
+    //    命令走到 onReceive 就是访问已释放内存，命令会静默丢掉。
+    bool detach() { return remove(); }
     bool sendData(const char* text) {
         return send(reinterpret_cast<const uint8_t*>(text), strlen(text)) > 0;
     }
@@ -557,8 +584,7 @@ private:
         if (strncmp(body, "do ", 3) != 0) {
             return;   // 其它命令（ping 等）：收到即刷新在线（onReceive 已做）
         }
-        // 下行指令由人工/语音触发、频率极低，回调内直接打印不影响实时性
-        LOGF("[espnow] RX  %s\n", body);
+        LOGF("[cmd] %s\n", body);   // 下行指令低频，直接打印不影响实时性
         char cap[16] = {0};
         char action[16] = {0};
 
@@ -608,22 +634,24 @@ static void onNewPeerCb(const esp_now_recv_info_t* info, const uint8_t* data, in
         return;
     }
     if (!locked) {
-        // beacon 能收到，说明此刻就停在这个信道上。但 cur_channel 只是"打算切到哪"，
-        // 与真实信道可能有偏差（WiFi.setChannel 失敗/异步），而 peer 的信道一旦登记就
-        // 不再改变——偏差会被永久固化，之后每次发送都报
-        // "Peer channel is not equal to the home channel, send fail!"。
-        // 实测现象：beacon 收得到、LOCKED 也成功，但上行全部 SEND FAILED，主控永远看不到节点。
+        // 登记主控为对端时，信道这一项必须填 0 —— 意思是"跟着当前信道走"，
+        // 以后换信道找主控时会自动跟上。
+        // 以前这里填的是 cur_channel（我们自己数的信道号），隐患很大：万一它和实际
+        // 信道对不上，错误就被永久写进对端信息里再也改不掉，结果是——
+        // 广播收得到、锁定也成功，但数据每次发送都失败
+        // （串口报 Peer channel is not equal to the home channel），主控永远看不到本节点。
         uint8_t real_ch = cur_channel;
         wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
         if (esp_wifi_get_channel(&real_ch, &second) != ESP_OK) {
-            real_ch = cur_channel;   // 读不到就退回变量值，至少不改坏现有行为
-        }
-        if (real_ch != cur_channel) {
-            LOGF("[espnow] channel mismatch: cur=%u real=%u -> use real\n", cur_channel, real_ch);
+            real_ch = cur_channel;   // 仅用于日志
         }
         locked = true;
-        delete peer;
-        peer = new HomePeer(info->src_addr, real_ch);
+        if (peer != nullptr) {   // 重新锁定时先摘掉旧对端（原因见 detach 的注释）
+            peer->detach();
+            delete peer;
+            peer = nullptr;
+        }
+        peer = new HomePeer(info->src_addr, 0);
         if (!peer->attach()) {
             delete peer;
             peer = nullptr;
@@ -631,7 +659,7 @@ static void onNewPeerCb(const esp_now_recv_info_t* info, const uint8_t* data, in
             LOGF("[espnow] peer add failed, keep hopping\n");
         } else {
             info_due_ms = millis();   // 锁定成功：立刻上报能力
-            LOGF("[espnow] LOCKED master %s on ch %u (cur=%u)\n", fmtMac(info->src_addr), real_ch,
+            LOGF("[espnow] LOCKED master %s (real ch %u, cur=%u)\n", fmtMac(info->src_addr), real_ch,
                  cur_channel);
         }
     }
@@ -644,21 +672,28 @@ static void hopTick() {
     if (locked || millis() - last_hop_ms < HOP_INTERVAL_MS) {
         return;
     }
+    // 连上路由器会让下面切换信道必失败（信道被 AP 锁定），只提醒一次，不刷屏
+    static bool warned_ap = false;
+    if (!warned_ap && WiFi.isConnected()) {
+        warned_ap = true;
+        LOGF("[espnow] WARNING: connected to AP, channel is locked -> hop cannot work\n");
+    }
     last_hop_ms = millis();
     if (cur_channel >= HOP_CHANNEL_MAX) {
         cur_channel = HOP_CHANNEL_MIN;
-        // 每轮(13*200ms ≈ 2.6s)打一行：现场据此判断"确实在找信道但没收到 beacon"
+        // 每轮(13*2000ms = 26s)打一行：现场据此判断"确实在找信道但没收到 beacon"
         LOGF("[espnow] hopping... (no @beacon yet)\n");
     } else {
         cur_channel++;
     }
-    bool ch_ok = WiFi.setChannel(cur_channel);
-    if (!ch_ok) {
-        // 切信道失败会被 peer 登记固化成永久故障（见 onNewPeerCb），必须能看见
-        uint8_t now_ch = cur_channel;
-        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
-        esp_wifi_get_channel(&now_ch, &second);
-        LOGF("[espnow] setChannel(%u) failed (still ch %u)\n", cur_channel, now_ch);
+    // 换信道找主控：主控固定停在某个信道，本节点靠逐个信道试来找到它。
+    // 用 ESP-IDF 的 esp_wifi_set_channel() 而不是 Arduino 的 WiFi.setChannel()：
+    // 前者会返回错误码，切换失败能立刻从日志里看出来。
+    // 为什么必须能看出来：一旦切换失败却没人察觉，对端记的信道就会和真实信道
+    // 永久错位，现象是"广播收得到、数据发不出去"，非常难查。
+    esp_err_t ch_err = esp_wifi_set_channel(cur_channel, WIFI_SECOND_CHAN_NONE);
+    if (ch_err != ESP_OK) {
+        LOGF("[espnow] setChannel(%u) failed: %d\n", cur_channel, (int)ch_err);
     }
 }
 
@@ -690,7 +725,7 @@ static void evtTick() {
     if (!ready) {
         return;
     }
-    bool ok = (peer != nullptr) && peer->sendData(buf);
+    bool ok = (tx_peer != nullptr) && tx_peer->sendData(buf);   // 走广播，见 setup 里的说明
     // 连发只在首包打印完整报文，重发仅在失败时补一行（同一事件不刷三行）
     if (left == EVENT_RESEND - 1) {
         LOGF("[espnow] TX  (%d/%d) %s%s\n", EVENT_RESEND - left, EVENT_RESEND, buf,
@@ -758,20 +793,43 @@ static void sonarTick() {
     // 用户语音开的灯（或又调了颜色的灯）已经交回人工，不再自动动它。
     if (!motion_active && cm < MOTION_TRIGGER_CM) {
         motion_active = true;
-        if (!light_on) {
-            auto_lit = true;   // 只接管“本来就是灭的”灯；用户自己开的灯不标记
-        }
         auto_off_due_ms = 0;   // 又有人了：取消排队中的自动关灯
-        light_on = 1;
-        applyLight();
+        // 被人工接管过就不开灯；但上报和播报照旧——人来了依旧要播“检测到有人靠近”
+        if (!motion_suppress) {
+            if (!light_on) {
+                auto_lit = true;   // 只接管“本来就是灭的”灯；用户自己开的灯不标记
+            }
+            light_on = 1;
+            applyLight();
+            LOGF("[motion] auto light on\n");
+        } else {
+            LOGF("[motion] suppressed, light untouched\n");   // 人工已接管，不自作主张开灯
+        }
         queueEvt("motion", "1");
         queueSay("motion");
     } else if (motion_active && cm > MOTION_RELEASE_CM) {
         motion_active = false;
+        motion_clear_ms = millis();   // 记录“人走了”，满 MOTION_SUPPRESS_HOLD_MS 才解除抑制
         queueEvt("motion", "0");
         if (MOTION_AUTO_OFF_MS > 0 && auto_lit) {
             auto_off_due_ms = millis() + MOTION_AUTO_OFF_MS;
             LOGF("[motion] released, auto-off in %d ms\n", MOTION_AUTO_OFF_MS);
+        }
+    }
+
+    // 抑制解除：只在“连续一段时间没检测到人”之后才解除。
+    // 关键在“连续”：一旦又测到人，计时就清零重来。不然手在传感器前晃动时，
+    // 每晃到 40cm 外就开始计时、满 5 秒就解除抑制，灯又被自动点亮——
+    // 外面看到的就是“AI 关灯永远关不掉”。
+    if (motion_suppress) {
+        if (motion_active) {
+            motion_clear_ms = 0;   // 有人在：不解除，计时清零重来
+        } else if (motion_clear_ms == 0) {
+            motion_clear_ms = millis();
+        } else if (millis() - motion_clear_ms >= MOTION_SUPPRESS_HOLD_MS) {
+            motion_suppress = false;
+            motion_clear_ms = 0;
+            LOGF("[motion] suppress cleared, auto light back on\n");
         }
     }
 
@@ -920,13 +978,25 @@ void setup() {
 
     // 2) WiFi/ESP-NOW：不连接任何 AP，只用 ESP-NOW
     WiFi.mode(WIFI_STA);
+    // 千万不能连路由器：一旦连上 AP，信道就被 AP 锁死，而本节点要靠"逐个信道试"找主控，
+    // 信道锁死就永远找不到。有些板子 NVS 里残留着以前存过的 WiFi（auto_connect=true），
+    // WiFi.mode() 之后驱动会自己连上去，所以这里显式断开并清掉保存的 AP。
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect(false, true);
     WiFi.setSleep(false);          // 节点常醒（USB 供电），保证随时收下行命令
     WiFi.setChannel(cur_channel);
     while (!WiFi.STA.started()) {
         delay(10);
     }
-    LOGF("[espnow] mac=%s hop ch %d..%d (pmk/lmk 必须与主控一致)\n", WiFi.macAddress().c_str(),
-         HOP_CHANNEL_MIN, HOP_CHANNEL_MAX);
+    // 开机打印真实状态：connected=1 说明节点偷偷连上了路由器（就是上面那个坑），
+    // ch 是实际生效的信道 —— 排查"连不上"时先看这一行。
+    {
+        uint8_t boot_ch = cur_channel;
+        wifi_second_chan_t boot_second = WIFI_SECOND_CHAN_NONE;
+        esp_wifi_get_channel(&boot_ch, &boot_second);
+        LOGF("[espnow] mac=%s hop ch %d..%d connected=%d ch=%u\n", WiFi.macAddress().c_str(),
+             HOP_CHANNEL_MIN, HOP_CHANNEL_MAX, WiFi.isConnected() ? 1 : 0, boot_ch);
+    }
 
     if (!ESP_NOW.begin(kPmk)) {    // 官方 ESP_NOW 类（核心自带）
         LOGF("[espnow] ESP_NOW.begin failed, restart\n");
@@ -934,6 +1004,19 @@ void setup() {
         ESP.restart();
     }
     ESP_NOW.onNewPeer(onNewPeerCb, nullptr);
+
+    // 上行一律用【明文广播】发，这是必须的：
+    // ESP-NOW 的加密包要求接收端【事先】注册好带同一把 LMK 的对端，否则驱动解不开、
+    // 直接把包丢掉；而主控是「收到包之后才注册本节点」，两边互相等待就成了死锁——
+    // 主控永远看不到本节点，AI 那边一个设备都没有（这正是之前一直连不上的原因）。
+    // 明文广播不需要预先注册，正好用来打破死锁；主控收到后会把本节点登记为加密对端，
+    // 之后主控下发的加密命令，本节点靠上面那个 peer 照样能解开。
+    tx_peer = new HomePeer(kBroadcastMac, 0, nullptr);
+    if (tx_peer == nullptr || !tx_peer->attach()) {
+        LOGF("[espnow] broadcast peer add failed, restart\n");
+        delay(1000);
+        ESP.restart();
+    }
     last_seen_ms = millis();
 }
 
@@ -943,8 +1026,13 @@ void loop() {
     // 锁定后失联 → 回 hop 重新发现（主控重启/换热点/换信道都能自恢复）
     if (locked && millis() - last_seen_ms > LOST_TIMEOUT_MS) {
         locked = false;
-        delete peer;
-        peer = nullptr;
+        // 必须先 detach 再 delete：只 delete 的话对端表里还留着主控 MAC，
+        // 之后广播不再走 onNewPeerCb，节点就永远锁不回来了
+        if (peer != nullptr) {
+            peer->detach();
+            delete peer;
+            peer = nullptr;
+        }
         LOGF("[espnow] lost master (%lu ms no packet), back to hop\n",
              (unsigned long)(millis() - last_seen_ms));
     }
