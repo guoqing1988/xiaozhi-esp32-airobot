@@ -118,6 +118,9 @@ private:
     // ---- ESP-NOW 居家节点（数据驱动：设备自描述能力，见 espnow_home.h）----
     // 主控不保存任何具体传感器字段/阈值：名字、能力、状态一律由节点上报后存进注册表。
     std::unique_ptr<EspNowHome> espnow_home_;
+    // ESP-NOW 必须等 WiFi 起来后再初始化（esp_now_init 在 WiFi 未初始化时空指针崩溃），
+    // 而构造函数阶段 WiFi 还没起 → 用每秒轮询等到就绪（与 http_upload_server.cc 同一做法）
+    esp_timer_handle_t espnow_wait_timer_ = nullptr;
     int64_t home_announce_ms_[EspNowHome::kMaxNodes + 1] = {0};  // 同节点播报冷却
     static constexpr int64_t kAnnounceCooldownMs = 10000;        // 播报冷却窗口
 
@@ -1165,7 +1168,52 @@ private:
         }
     }
 
+    // WiFi STA 是否已就绪（拿到 IP）：ESP-NOW 强依赖 WiFi 驱动，且连接后信道才确定
+    static bool EspNowWifiReady() {
+        esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (netif == nullptr) {
+            return false;
+        }
+        esp_netif_ip_info_t ip = {};
+        if (esp_netif_get_ip_info(netif, &ip) != ESP_OK) {
+            return false;
+        }
+        return ip.ip.addr != 0;
+    }
+
+    // 轮询回调：WiFi 就绪后把初始化切回主任务（esp_timer 回调不在主任务，
+    // 而 MCP 工具注册、定时器创建都在主任务上下文做最稳）
+    static void OnEspNowWifiWait(void* arg) {
+        auto* self = static_cast<CompactWifiBoardS3CamAirobot*>(arg);
+        Application::GetInstance().Schedule([self]() { self->InitializeEspNowHome(); });
+    }
+
     void InitializeEspNowHome() {
+        if (espnow_home_ != nullptr) {
+            return;   // 已启动（定时器重入 / 重复调用都安全）
+        }
+        if (!EspNowWifiReady()) {
+            // 板子构造函数阶段 WiFi 尚未初始化：此刻 esp_now_init() 会访问未初始化的
+            // WiFi 内部指针而崩溃（实测 LoadProhibited, EXCVADDR=0x4c → 重启循环），
+            // 所以每秒轮询等到 WiFi 拿到 IP 后再回来启动。
+            // 代价：配网模式下（未连路由器）self.home.* 工具不出现——本来也用不了。
+            if (espnow_wait_timer_ == nullptr) {
+                esp_timer_create_args_t args = {};
+                args.callback = &CompactWifiBoardS3CamAirobot::OnEspNowWifiWait;
+                args.arg = this;
+                args.name = "espnow_wifi_wait";
+                if (esp_timer_create(&args, &espnow_wait_timer_) == ESP_OK) {
+                    esp_timer_start_periodic(espnow_wait_timer_, 1000000);
+                }
+            }
+            return;
+        }
+        if (espnow_wait_timer_ != nullptr) {
+            esp_timer_stop(espnow_wait_timer_);
+            esp_timer_delete(espnow_wait_timer_);
+            espnow_wait_timer_ = nullptr;
+        }
+
         espnow_home_ = std::make_unique<EspNowHome>();
         bool ok = espnow_home_->Begin(
             [this](int node_id, const std::string& kind, const std::string& name,
