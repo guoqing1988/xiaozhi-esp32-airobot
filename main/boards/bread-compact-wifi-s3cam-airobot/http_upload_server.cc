@@ -40,6 +40,20 @@ static bool IsAnnounceDir(const char* dir) {
     return dir != nullptr && strcmp(dir, ANNOUNCE_DIR) == 0;
 }
 
+// 确保目录存在（对齐 photo_store.cc 的 EnsureDir）：/sdcard/music 通常早就有了，
+// 但 /sdcard/announce 可能从未被创建过——不建的话 fopen(..., "wb") 会直接失败
+//（页面报 "cannot create file on SD card"）。目录存在（且确实是目录）则返回 true。
+static bool EnsureDir(const char* dir) {
+    if (dir == nullptr || dir[0] == '\0') {
+        return false;
+    }
+    struct stat st = {};
+    if (stat(dir, &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+    return mkdir(dir, 0775) == 0;
+}
+
 // 上传成功回调（在 StartUploadServer 时注入），用于刷新上层歌曲列表缓存
 static std::function<void()> s_on_uploaded;
 // 等待 WiFi 就绪的轮询定时器
@@ -272,6 +286,10 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "announce dir only accepts .mp3");
         return ESP_OK;
     }
+
+    // 目录可能从未创建过（/sdcard/announce 不随固件生成）：先确保存在，
+    // 否则下面 fopen 会失败并返回 "cannot create file on SD card"
+    EnsureDir(target_dir);
 
     char path[320];
     snprintf(path, sizeof(path), "%s/%s", target_dir, name);
