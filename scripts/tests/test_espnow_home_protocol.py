@@ -719,6 +719,28 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn("auto_lit = false", body, "capLight 必须取消自动关灯排队")
         self.assertIn('strcmp(action, "read")', body, "read 只是查询，不该取消排队")
 
+    def test_node_sensor_blocks_are_independent_and_paired(self):
+        """超声波块与 DHT/激光块必须是两个独立 #if，且预处理块必须配对。
+
+        融合节点(3) 两块都要编译；曾把它写成 `#if(1||3) … #elif(2||3) …` ——
+        #elif 是互斥的，融合节点因此丢掉 dhtTick/laserTick，报
+        "'dht' was not declared in this scope"；而节点 1/2 各自只需要一块，照样能编过，
+        所以只有真的编译 NODE_ID=3 才会暴露（已实际踩过）。
+        """
+        self.assertNotIn("#elif NODE_ID == 2 || NODE_ID == 3", self.ino,
+                         "DHT/激光块必须是独立 #if，写成 #elif 会让融合节点缺代码")
+        depth = 0
+        for line in self.ino.splitlines():
+            t = line.strip()
+            if t.startswith("//"):
+                continue
+            if re.match(r"#(if|ifdef|ifndef)\b", t):
+                depth += 1
+            elif t.startswith("#endif"):
+                depth -= 1
+                self.assertGreaterEqual(depth, 0, "多余的 #endif")
+        self.assertEqual(depth, 0, "#if 与 #endif 不配对（还剩 %d 个未闭合）" % depth)
+
     def test_high_temp_threshold_moved_to_node(self):
         """温度阈值属于业务语义，必须在节点侧判定。"""
         self.assertRegex(self.ino, r"HOT_TRIGGER_C\s*28")

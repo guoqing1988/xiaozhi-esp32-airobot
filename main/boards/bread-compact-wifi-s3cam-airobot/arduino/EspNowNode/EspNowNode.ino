@@ -762,7 +762,12 @@ static void sonarTick() {
         }
     }
 }
-#elif NODE_ID == 2 || NODE_ID == 3
+#endif   // NODE_ID == 1 || NODE_ID == 3（超声波）
+
+// 玄关 / 融合节点：DHT11 + 激光。
+// ⚠️ 这里必须是**独立的 #if 块**，不能写成上面的 #elif —— 融合节点两块都要编译，
+// #elif 是互斥的，会让融合节点丢掉 dhtTick/laserTick（曾因此报 "'dht' was not declared"）。
+#if NODE_ID == 2 || NODE_ID == 3
 static DHT* dht = nullptr;
 
 static void dhtTick() {
