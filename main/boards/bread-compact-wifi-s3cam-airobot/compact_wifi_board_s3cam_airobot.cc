@@ -89,6 +89,9 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
 #endif
  
 #define TAG "CompactWifiBoardS3CamAirobot"
+// ESP-NOW 的排查日志单独用一个 TAG：全局日志级别被压到 ERROR 了，
+// 用独立 TAG 单独放开 INFO，网页日志面板就能看到“节点消息收到没有 / 播报卡在哪一步”。
+#define TAG_ESPNOW "ESP-NOW"
 
 class CompactWifiBoardS3CamAirobot : public WifiBoard {
 private:
@@ -122,8 +125,8 @@ private:
     // ESP-NOW 必须等 WiFi 起来后再初始化（esp_now_init 在 WiFi 未初始化时空指针崩溃），
     // 而构造函数阶段 WiFi 还没起 → 用每秒轮询等到就绪（与 http_upload_server.cc 同一做法）
     esp_timer_handle_t espnow_wait_timer_ = nullptr;
-    int espnow_wait_ticks_ = 0;  // 定时器回调次数（现场据此判断轮询是否真的在跑）
-    int espnow_wait_logs_ = 0;   // 等 WiFi 的日志已打印次数（只打前几条，不刷屏）
+    int espnow_wait_ticks_ = 0;  // 轮询次数（日志里能看到，用来确认轮询真的在跑）
+    int espnow_wait_logs_ = 0;   // 已经打过的等待日志条数（只打前几条，避免刷屏）
     int64_t home_announce_ms_[EspNowHome::kMaxNodes + 1] = {0};  // 同节点播报冷却
     static constexpr int64_t kAnnounceCooldownMs = 10000;        // 播报冷却窗口
 
@@ -1139,19 +1142,26 @@ private:
     void Announce(int node_id, const char* name) {
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
         if (!music_player_ || node_id < 1 || node_id > EspNowHome::kMaxNodes) {
+            ESP_LOGW(TAG_ESPNOW, "播报跳过: 播放器未就绪或节点号非法 (node=%d)", node_id);
             return;
         }
         // 对话/播报中不插嘴：本地播放本身会把状态钉在 Speaking，天然串行
         if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+            ESP_LOGI(TAG_ESPNOW, "播报跳过: 设备忙(非待机), %s", name);
             return;
         }
         int64_t now = EspNowHome::NowMs();
         if (home_announce_ms_[node_id] != 0 &&
             (now - home_announce_ms_[node_id]) < kAnnounceCooldownMs) {
+            ESP_LOGI(TAG_ESPNOW, "播报跳过: 冷却中(还剩 %lld ms), %s",
+                     (long long)(kAnnounceCooldownMs - (now - home_announce_ms_[node_id])), name);
             return;
         }
         if (music_player_->PlayAnnounce(name)) {
+            ESP_LOGI(TAG_ESPNOW, "播报开始: %s.mp3", name);
             home_announce_ms_[node_id] = now;   // 只有真的播起来才记冷却
+        } else {
+            ESP_LOGW(TAG_ESPNOW, "播报失败: 打不开 /sdcard/announce/%s.mp3 (文件不存在?)", name);
         }
 #else
         (void)node_id;
@@ -1164,7 +1174,9 @@ private:
     // "evt" 只是状态上报（缓存由传输层维护），无需动作。
     void OnHomeEvent(int node_id, const std::string& kind, const std::string& name,
                      const std::string& arg, int64_t ts_ms) {
-        (void)arg;
+        // 先把“收到了什么”记下来：排查时这是唯一的现场依据
+        ESP_LOGI(TAG_ESPNOW, "收到节点%d消息: kind=%s name=%s arg=%s", node_id, kind.c_str(),
+                 name.c_str(), arg.c_str());
         (void)ts_ms;
         if (kind == "say") {
             Announce(node_id, name.c_str());
@@ -1184,9 +1196,8 @@ private:
         return ip.ip.addr != 0;
     }
 
-    // 轮询回调：WiFi 就绪就直接启动 ESP-NOW（照 http_upload_server.cc 的 OnWifiReadyTimer）。
-    // 不在回调里切主任务：实测依赖 Application::Schedule 时，该路径只跑到构造函数里那一次，
-    // 之后定时器回调再无下文，ESP-NOW 永远不启动。
+    // 等 WiFi 拿到 IP 的轮询回调：直接在这里启动 ESP-NOW，不绕回主任务。
+    // （为什么必须先等 WiFi：开机时 WiFi 还没初始化好，那时启动 ESP-NOW 会直接崩溃重启。）
     static void OnEspNowWifiWait(void* arg) {
         auto* self = static_cast<CompactWifiBoardS3CamAirobot*>(arg);
         self->espnow_wait_ticks_++;
@@ -1198,12 +1209,11 @@ private:
             return;   // 已启动（定时器重入 / 重复调用都安全）
         }
         if (!EspNowWifiReady()) {
-            // 板子构造函数阶段 WiFi 尚未初始化：此刻 esp_now_init() 会访问未初始化的
-            // WiFi 内部指针而崩溃（实测 LoadProhibited, EXCVADDR=0x4c → 重启循环），
-            // 所以每秒轮询等到 WiFi 拿到 IP 后再回来启动。
-            // 代价：配网模式下（未连路由器）self.home.* 工具不出现——本来也用不了。
+            // 开机时 WiFi 还没初始化好，这时候启动 ESP-NOW 会访问到未初始化的东西
+            // 直接崩溃重启（实测过），所以先每秒轮询，等 WiFi 拿到 IP 再回来启动。
             //
-            // 这一路原先完全静默，现场“设备不上线”时无线索可查，故补日志（只打前几条，不刷屏）
+            // 这里原先一句日志都没有，出问题时只能靠猜，所以补上；
+            // 只打前几条，避免一秒一行刷屏。
             if (espnow_wait_logs_ < 5) {
                 espnow_wait_logs_++;
                 ESP_LOGI(TAG, "ESP-NOW: still waiting for WiFi IP (tick=%d, heap=%u)",
@@ -1245,8 +1255,8 @@ private:
         ESP_LOGI(TAG, "ESP-NOW: started");
     }
 
-    // MCP 工具注册放在主任务（构造函数阶段）执行：McpServer::AddTool 内部无锁
-    // （直接 tools_.push_back），不能在 esp_timer 回调任务里调用。
+    // 把 self.home.* 这些工具注册给 AI。必须在主任务里做（也就是构造函数阶段），
+    // 因为 McpServer 登记工具时没有加锁，从定时器回调那种别的任务里注册不安全。
     void RegisterHomeTools() {
         auto& mcp = McpServer::GetInstance();
         // 数据驱动：主控不知道任何能力名/动作名，只把设备自描述的清单给 AI。
@@ -1419,6 +1429,8 @@ public:
         InitializeDebugTools();
         // 默认把日志压到 ERROR, 避免 GPIO43 日志污染 Arduino 串口(平时命令更稳定)
         esp_log_level_set("*", ESP_LOG_ERROR);
+        // 只把 ESP-NOW 这一个 TAG 的日志放开到 INFO：网页日志面板能看到节点消息与播报结果
+        esp_log_level_set(TAG_ESPNOW, ESP_LOG_INFO);
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
