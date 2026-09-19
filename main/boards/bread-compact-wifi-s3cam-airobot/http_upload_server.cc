@@ -22,6 +22,23 @@
 #define TAG "HttpUpload"
 
 #define MUSIC_DIR "/sdcard/music"
+#define ANNOUNCE_DIR "/sdcard/announce"
+
+// 解析 "dir" 参数选择目标目录：缺省（或非 announce）=> 歌曲目录；announce => 提示音目录。
+// 两者差异只有两点：提示音只收 .mp3（无 .lrc 歌词），删除时不连带删歌词。
+static const char* DirFromQuery(const char* q) {
+    if (q != nullptr) {
+        char d[16] = {};
+        if (httpd_query_key_value(q, "dir", d, sizeof(d)) == ESP_OK && strcmp(d, "announce") == 0) {
+            return ANNOUNCE_DIR;
+        }
+    }
+    return MUSIC_DIR;
+}
+// 目录是否为提示音目录
+static bool IsAnnounceDir(const char* dir) {
+    return dir != nullptr && strcmp(dir, ANNOUNCE_DIR) == 0;
+}
 
 // 上传成功回调（在 StartUploadServer 时注入），用于刷新上层歌曲列表缓存
 static std::function<void()> s_on_uploaded;
@@ -240,6 +257,9 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     }
     UrlDecode(name, sizeof(name), name);
     SanitizeName(name);
+    // 目标目录由 dir 参数决定（缺省为歌曲目录，dir=announce 为提示音目录）
+    const char* target_dir = DirFromQuery(q);
+    bool is_announce = IsAnnounceDir(target_dir);
     bool is_mp3 = HasSuffix(name, ".mp3");
     bool is_lrc = HasSuffix(name, ".lrc");
     if (!is_mp3 && !is_lrc) {
@@ -247,9 +267,14 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "only .mp3 / .lrc files are allowed");
         return ESP_OK;  // 响应已通过 send_err 发送，返回 OK 避免 httpd 直接关闭 socket
     }
+    if (is_announce && !is_mp3) {
+        ESP_LOGE(TAG, "Upload: announce dir only accepts .mp3, name='%s'", name);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "announce dir only accepts .mp3");
+        return ESP_OK;
+    }
 
     char path[320];
-    snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
+    snprintf(path, sizeof(path), "%s/%s", target_dir, name);
 
     if (!overwrite) {
         FILE* exist = fopen(path, "rb");
@@ -315,9 +340,9 @@ static std::string MusicActionJson(const char* body);
 
 // 生成 /sdcard/music 下所有 .mp3 歌曲的 JSON 数组字符串(含大小/修改时间)。
 // 纯函数(不依赖 httpd_req)，供 HTTP GET /music 与 WebSocket music_list 共用。
-static std::string MusicListJson() {
+static std::string MusicListJson(const char* list_dir = MUSIC_DIR) {
     cJSON* arr = cJSON_CreateArray();
-    DIR* dir = opendir(MUSIC_DIR);
+    DIR* dir = opendir(list_dir);
     if (dir != nullptr) {
         struct dirent* entry = nullptr;
         while ((entry = readdir(dir)) != nullptr) {
@@ -329,7 +354,7 @@ static std::string MusicListJson() {
                 continue;  // 只列出歌曲，.lrc 作为同名附属不单独显示
             }
             char path[320];
-            snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
+            snprintf(path, sizeof(path), "%s/%s", list_dir, name);
             // 用 stat() 一次性取文件大小与修改时间(上传时刻)，避免再单独 fopen
             struct stat st = {};
             long size = 0;
@@ -358,7 +383,8 @@ static std::string MusicListJson() {
 // 注意: 文件修改时间依赖 FATFS 时间戳(FATFS_TIMESTAMP)与设备同步的系统时间；未启用时 mtime 可能为 0。
 static esp_err_t HandleMusicList(httpd_req_t* req) {
     SetCors(req);
-    std::string body = MusicListJson();
+    const char* q = strchr(req->uri, '?');
+    std::string body = MusicListJson(DirFromQuery(q ? q + 1 : nullptr));
     return SendJson(req, body);
 }
 
@@ -386,6 +412,10 @@ static std::string MusicActionJson(const char* body) {
 
     if (strcmp(action, "delete") == 0) {
         cJSON* c_name = cJSON_GetObjectItem(root, "name");
+        // dir 可选：缺省/其他值删歌曲，announce 删提示音（提示音无歌词，不连带删除）
+        cJSON* c_dir = cJSON_GetObjectItem(root, "dir");
+        bool del_announce = (c_dir && c_dir->valuestring) ? IsAnnounceDir(c_dir->valuestring) : false;
+        const char* dir_path = del_announce ? ANNOUNCE_DIR : MUSIC_DIR;
         if (c_name && c_name->valuestring && c_name->valuestring[0] != '\0') {
             char name[256] = {};
             snprintf(name, sizeof(name), "%s", c_name->valuestring);
@@ -393,15 +423,18 @@ static std::string MusicActionJson(const char* body) {
             size_t nlen = strlen(name);
             bool is_mp3 = HasSuffix(name, ".mp3");
             bool is_lrc = HasSuffix(name, ".lrc");
+            if (del_announce && !is_mp3) {
+                is_lrc = false;  // 提示音目录只认 .mp3
+            }
             if (is_mp3 || is_lrc) {
                 char path[320];
-                snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
+                snprintf(path, sizeof(path), "%s/%s", dir_path, name);
                 if (remove(path) == 0) {
-                    if (is_mp3) {
+                    if (is_mp3 && !del_announce) {
                         // 删除歌曲时连带删除同名歌词(如存在)
                         std::string base_name(name, nlen - 4);  // 去掉 .mp3 后缀
                         char lrc[320];
-                        snprintf(lrc, sizeof(lrc), "%s/%s.lrc", MUSIC_DIR, base_name.c_str());
+                        snprintf(lrc, sizeof(lrc), "%s/%s.lrc", dir_path, base_name.c_str());
                         remove(lrc);
                     }
                     resp = "{\"ok\":true}";
@@ -774,12 +807,15 @@ static std::string WsHandleMessage(const char* body) {
     } else if (strcmp(action, "uno_servo_home_get") == 0) {
         resp = s_uno_api.get_servo_home ? s_uno_api.get_servo_home() : std::string("{\"value\":82}");
     } else if (strcmp(action, "music_list") == 0) {
-        resp = MusicListJson();
+        cJSON* c_dir = cJSON_GetObjectItem(root, "dir");
+        resp = MusicListJson((c_dir && IsAnnounceDir(c_dir->valuestring)) ? ANNOUNCE_DIR : MUSIC_DIR);
     } else if (strcmp(action, "music_delete") == 0) {
         cJSON* del = cJSON_CreateObject();
         cJSON_AddStringToObject(del, "action", "delete");
         cJSON* c_name = cJSON_GetObjectItem(root, "name");
         if (c_name && c_name->valuestring) cJSON_AddStringToObject(del, "name", c_name->valuestring);
+        cJSON* c_dir = cJSON_GetObjectItem(root, "dir");
+        if (c_dir && c_dir->valuestring) cJSON_AddStringToObject(del, "dir", c_dir->valuestring);
         char* dstr = cJSON_PrintUnformatted(del);
         cJSON_Delete(del);
         if (dstr) { resp = MusicActionJson(dstr); free(dstr); }

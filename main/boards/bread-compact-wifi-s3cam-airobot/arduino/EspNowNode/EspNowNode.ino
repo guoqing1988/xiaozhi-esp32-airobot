@@ -69,6 +69,10 @@
 
 // 激光采样：数字输出，两次读数一致才认变化（去抖）
 #define LASER_PERIOD_MS 50
+// 障碍传感器极性：1 = 红外避障模块（FC-51 类，**检测到障碍 = 低电平**）；
+//                 0 = 激光接收模块（被遮断 = 高电平）。
+// 现象是“没东西也说有人 / 挡住反而说通畅”时，把这一行取反。
+#define OBSTACLE_ACTIVE_LOW 1
 
 // ---- 引脚（与设计文档一致，两节点同编号便于接线）----
 #define PIN_RGB_R 4
@@ -364,7 +368,7 @@ static const char kNodeName[] = "客厅灯";
 // 玄关：DHT11 + 激光
 static const CapDef kCaps[] = {
     {"temp", "(温湿度℃/%,只读):read()", capTempRead},
-    {"beam", "(激光遮挡0=通1=挡,只读):read()", capBeamRead},
+    {"beam", "(红外避障0=无1=有,只读):read()", capBeamRead},
 };
 static const char kNodeName[] = "玄关感应";
 
@@ -375,7 +379,7 @@ static const CapDef kCaps[] = {
     {"light", "(RGB灯):on(0|1),off(),rgb(r,g,b),bright(0-255),read()", capLight},
     {"dist", "(超声波距离cm,只读):read()", capDistRead},
     {"temp", "(温湿度℃/%,只读):read()", capTempRead},
-    {"beam", "(激光遮挡0=通1=挡,只读):read()", capBeamRead},
+    {"beam", "(红外避障0=无1=有,只读):read()", capBeamRead},
 };
 static const char kNodeName[] = "融合节点";
 
@@ -804,25 +808,52 @@ static void dhtTick() {
     queueEvt("err", "dht");
 }
 
+// 读一次原始引脚电平（HIGH/LOW），仅用于日志显示：能一眼看出接线是否正常
+static int readObstacleRaw() {
+    return digitalRead(PIN_LASER);
+}
+
+// 归一化：1 = 检测到障碍；极性由 OBSTACLE_ACTIVE_LOW 决定
+static int readObstacle() {
+#if OBSTACLE_ACTIVE_LOW
+    return (readObstacleRaw() == LOW) ? 1 : 0;
+#else
+    return (readObstacleRaw() == HIGH) ? 1 : 0;
+#endif
+}
+
 static void laserTick() {
     if (millis() - laser_ms < LASER_PERIOD_MS) {
         return;
     }
     laser_ms = millis();
-    int v = (digitalRead(PIN_LASER) == HIGH) ? 1 : 0;
+    int v = readObstacle();
     if (v == last_beam) {
         return;
     }
     delay(2);
-    if (((digitalRead(PIN_LASER) == HIGH) ? 1 : 0) != v) {
+    if (readObstacle() != v) {
         return;   // 两次读数不一致：当作抖动，丢弃
     }
+
+    // 上电后第一次读到只记录、不上报不播报：否则模块前面本来就挡着东西时，
+    // 一上电就会误播一次“有人经过”。
+    bool first_read = (last_beam < 0);
     last_beam = v;
-    // 只在状态变化时打印（采样周期 50ms，不能每次都打）；上电后第一次读到也会打一行
-    LOGF("[laser] %s (DO=%d)\n", v ? "blocked" : "clear", v);
+    // 日志同时打“逻辑结论”和“引脚真实电平”：之前写成 (DO=1) 是把归一化后的
+    // 逻辑值当成了引脚电平，而红外避障是低电平有效，导致“检测到障碍”却显示 DO=1，误导排查
+    if (first_read) {
+        LOGF("[obstacle] init %s (pin=%s)\n", v ? "detected" : "clear",
+             readObstacleRaw() ? "HIGH" : "LOW");
+        return;
+    }
+
+    // 只在状态变化时打印（采样周期 50ms，不能每次都打）
+    LOGF("[obstacle] %s (pin=%s)\n", v ? "detected" : "clear",
+         readObstacleRaw() ? "HIGH" : "LOW");
     queueEvt("beam", v ? "1" : "0");
     if (v == 1) {
-        queueSay("beam");   // 只有"被挡住"这个边沿才播报
+        queueSay("beam");   // 只有“检测到障碍”这个边沿才播报
     }
 }
 #endif

@@ -34,6 +34,8 @@ ESPNOW_H = os.path.join(BOARD_DIR, "espnow_home.h")
 NODE_INO = os.path.join(BOARD_DIR, "arduino", "EspNowNode", "EspNowNode.ino")
 BOARD_CC = os.path.join(BOARD_DIR, "compact_wifi_board_s3cam_airobot.cc")
 PLAYER_CC = os.path.join(BOARD_DIR, "local_music_player.cc")
+WEB_INDEX = os.path.join(BOARD_DIR, "web", "index.html")
+UPLOAD_CC = os.path.join(BOARD_DIR, "http_upload_server.cc")
 
 MAX_NODES = 4               # 与 EspNowHome::kMaxNodes 一致
 MAX_CAPS = 4                # 与 EspNowHome::kMaxCaps 一致（融合节点有 4 个能力）
@@ -456,13 +458,53 @@ class TestSourceContracts(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        missing = [p for p in (ESPNOW_CC, ESPNOW_H, NODE_INO, BOARD_CC) if not os.path.exists(p)]
+        missing = [p for p in (ESPNOW_CC, ESPNOW_H, NODE_INO, BOARD_CC, WEB_INDEX, UPLOAD_CC)
+                   if not os.path.exists(p)]
         if missing:
             raise AssertionError("缺少实现文件：%s" % missing)
         cls.cc = read(ESPNOW_CC)
         cls.h = read(ESPNOW_H)
         cls.ino = read(NODE_INO)
         cls.board = read(BOARD_CC)
+        cls.web = read(WEB_INDEX)
+        cls.upload = read(UPLOAD_CC)
+
+    # ---------- 障碍检测：红外避障模块 ----------
+
+    def test_obstacle_uses_infrared_module_with_configurable_polarity(self):
+        """障碍检测用红外避障模块（低电平有效），极性可配置，且上电首次不播报。
+
+        红外避障（FC-51 类）是“检测到障碍 = 低电平”，与激光接收模块（高电平）相反，
+        所以极性抽成 OBSTACLE_ACTIVE_LOW；另外上电第一次读到的值只能记录，
+        否则模块前方本来就挡着东西时，一上电就误播一次“有人经过”。
+        """
+        self.assertIn("#define OBSTACLE_ACTIVE_LOW", self.ino)
+        self.assertRegex(self.ino, r"readObstacleRaw\(\) == LOW")   # 低电平有效分支
+        self.assertIn("[obstacle]", self.ino)
+        self.assertNotIn("[laser]", self.ino)
+        # 日志必须打真实引脚电平：早期把归一化后的 0/1 当成了 DO 电平，拿万用表一对就矛盾
+        self.assertIn("(pin=%s)", self.ino)
+        self.assertNotIn("(DO=%d)", self.ino)
+        self.assertIn("[obstacle] init", self.ino)   # 上电首帧只记录、不播报
+
+    # ---------- Web 提示音（/sdcard/announce） ----------
+
+    def test_web_manages_announce_files_via_dir_parameter(self):
+        """提示音与歌曲共用一套上传/列表/删除接口，靠 dir 参数区分。"""
+        self.assertIn("ANNOUNCE_DIR", self.upload)
+        self.assertIn("DirFromQuery", self.upload)
+        self.assertIn("IsAnnounceDir", self.upload)
+        # 提示音目录只收 .mp3（没有 .lrc 歌词）
+        self.assertIn("announce dir only accepts .mp3", self.upload)
+        # 前端：固定槽位（名字必须与节点上报的事件名一致），一个都不能少
+        self.assertIn("ANNOUNCE_SLOTS", self.web)
+        for slot in ("motion", "hot", "beam"):
+            self.assertIn("'" + slot + "'", self.web,
+                          "提示音槽位 %s 缺失：它对应节点上报的 say %s" % (slot, slot))
+        self.assertIn("openUpload('announce'", self.web)
+        self.assertIn("dir: 'announce'", self.web)
+        # 非 MP3（wav/m4a/flac 等）也要能上传：一律转码成 MP3
+        self.assertIn("'audio'", self.web)
 
     # ---------- 沿用首版的有效约束 ----------
 

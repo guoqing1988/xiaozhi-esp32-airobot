@@ -700,7 +700,7 @@
       <div class="hint">TF 卡「歌曲」目录下的 MP3 列表；删除会同时删除同名歌词(.lrc)。</div>
       <div class="row">
         <button class="btn" onclick="openUpload()">⬆️ 上传歌曲</button>
-        <button class="btn" onclick="loadSongs()">🔄 刷新列表</button>
+        <button class="btn" onclick="loadSongs();loadAnnounces()">🔄 刷新列表</button>
       </div>
       <table class="card-table">
         <thead>
@@ -714,21 +714,37 @@
         <tbody></tbody>
       </table>
       <div id="muslog"></div>
+
+      <h3 style="margin-top:26px">🔊 提示音（传感器播报）</h3>
+      <div class="hint">放在 TF 卡 <code>/sdcard/announce/</code>，节点上报事件时由主控播放。
+        文件名<b>固定</b>（必须与节点上报的名字一致），点槽位上传即可，不用管本地文件叫什么；上传同样会自动转码。</div>
+      <table class="card-table" id="announceTable">
+        <thead>
+          <tr>
+            <th>提示音</th>
+            <th>什么时候播</th>
+            <th>状态</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="annlog"></div>
     </div>
 
     <!-- 上传弹窗 -->
     <div class="modal" id="uploadModal">
       <div class="modal-box">
         <div class="modal-head">
-          <h3>🎵 上传歌曲到 TF 卡</h3>
+          <h3 id="uploadTitle">🎵 上传歌曲到 TF 卡</h3>
           <button class="modal-close" onclick="closeUpload()" title="关闭">×</button>
         </div>
-        <div class="hint">选好文件会自动检测参数：<b>单声道 + ≤24kHz + ≤128kbps</b> 的歌直接上传，
-          其余自动转码为 24000Hz 单声道 96kbps（避免设备端解码卡顿、唤醒失灵）；歌词自动转为 UTF-8。<br>
+        <div class="hint" id="uploadHint">选好文件会自动检测参数：<b>单声道 + ≤24kHz + ≤128kbps</b> 的歌直接上传，
+          其余（wav/m4a/flac 等非 MP3）自动转码为 24000Hz 单声道 96kbps（避免设备端解码卡顿、唤醒失灵）；歌词自动转为 UTF-8。<br>
           转码组件按需从 CDN 加载（首次需联网，之后走浏览器缓存；无网时仍可上传本来合格的文件）。
         </div>
         <div class="row">
-          <input type="file" id="f" accept=".mp3,.lrc" multiple onchange="onFilesPicked()">
+          <input type="file" id="f" accept=".mp3,.lrc,.wav,.m4a,.aac,.flac,.ogg,.opus,.weba" multiple onchange="onFilesPicked()">
         </div>
         <div id="flist"></div>
         <div class="row">
@@ -1189,7 +1205,7 @@
         }
       }
       if (id === 'alarm') loadAlarms();
-      if (id === 'upload') loadSongs();
+      if (id === 'upload') { loadSongs(); loadAnnounces(); }
       if (id === 'photos') loadPhotos();
       if (id === 'uno') { startUnoPolling(); }   // 由 WS 推送更新状态, 此处只主动问一次
       else { stopUnoPolling(); unoStop(); }
@@ -1368,13 +1384,37 @@
     function loadActivePanel() {
       const p = document.querySelector('.panel.active');
       if (!p) return;
-      if (p.id === 'panel-upload') loadSongs();
+      if (p.id === 'panel-upload') { loadSongs(); loadAnnounces(); }
       else if (p.id === 'panel-alarm') loadAlarms();
       else if (p.id === 'panel-uno') { loadServoHome(); startLogPolling(); }
       else if (p.id === 'panel-photos') loadPhotos();
     }
     // ===== 上传弹窗 =====
-    function openUpload() { document.getElementById('uploadModal').classList.add('show'); }
+    // dir: 'music'(默认) | 'announce'；fixedName: 提示音槽位名(不含 .mp3)，上传时强制用它当文件名
+    let uploadTarget = { dir: 'music', fixedName: '' };
+    function openUpload(dir, fixedName) {
+      uploadTarget = { dir: (dir === 'announce') ? 'announce' : 'music', fixedName: fixedName || '' };
+      const isAnn = uploadTarget.dir === 'announce';
+      const t = document.getElementById('uploadTitle');
+      const h = document.getElementById('uploadHint');
+      if (t) t.textContent = isAnn ? ('🔊 上传提示音：' + uploadTarget.fixedName + '.mp3') : '🎵 上传歌曲到 TF 卡';
+      if (h) {
+        if (!h.dataset.orig) h.dataset.orig = h.innerHTML;   // 首次记录歌曲模式的原文案
+        if (isAnn) {
+          h.innerHTML = '选一个音频文件（mp3 / wav / m4a / flac 等均可），会自动转码为 24000Hz 单声道 96kbps，'
+            + '并保存为 <b>/sdcard/announce/' + escHtml(uploadTarget.fixedName) + '.mp3</b>（文件名固定，不用管本地叫什么）。';
+        } else {
+          h.innerHTML = h.dataset.orig;   // 从提示音模式切回来时恢复原文案
+        }
+      }
+      uploadItems = [];
+      renderFileList();
+      const lg = document.getElementById('log');
+      if (lg) lg.innerHTML = '';
+      const bar = document.getElementById('bar');
+      if (bar) { bar.style.width = '0%'; bar.textContent = '0%'; }
+      document.getElementById('uploadModal').classList.add('show');
+    }
     function closeUpload() { document.getElementById('uploadModal').classList.remove('show'); }
     // 点击遮罩空白处关闭弹窗
     (function () {
@@ -1625,8 +1665,17 @@
       });
     }
 
+    // 最终保存到设备上的文件名：提示音槽位强制固定名；非 MP3 转码后统一存为 .mp3
+    function uploadTargetName(it) {
+      if (it.kind === 'lrc') return it.file.name;
+      if (uploadTarget.fixedName) return uploadTarget.fixedName + '.mp3';
+      if (it.kind === 'audio') return it.file.name.replace(/\.[^.]+$/, '') + '.mp3';
+      return it.file.name;
+    }
+
     // 最终是否转码: 手动选择优先, auto 时按探测结果(解析失败/VBR 保守转码)。
     function willTranscode(it) {
+      if (it.kind === 'audio') return true;   // 非 MP3 一律转码（设备只认 MP3）
       if (it.kind !== 'mp3') return false;
       if (it.mode === 'transcode') return true;
       if (it.mode === 'skip') return false;
@@ -1651,10 +1700,12 @@
       uploadItems.forEach(function (it, idx) {
         const will = willTranscode(it);
         const mark = it.kind === 'lrc' ? lrcMarkText(it.lrcEnc)
-          : (will ? '将转码 → 24kHz 单声道 96kbps' : '无需转码，直接上传');
+          : (it.kind === 'audio' ? '非 MP3 → 转码为 MP3' : (will ? '将转码 → 24kHz 单声道 96kbps' : '无需转码，直接上传'));
+        const savedAs = uploadTargetName(it);
         html += '<div class="fitem">'
-          + '<span class="fname">' + escHtml(it.file.name) + '</span>'
-          + '<span class="finfo">' + escHtml(it.kind === 'lrc' ? '' : mp3InfoText(it.info)) + '</span>'
+          + '<span class="fname">' + escHtml(it.file.name)
+          + (savedAs !== it.file.name ? ' → ' + escHtml(savedAs) : '') + '</span>'
+          + '<span class="finfo">' + escHtml(it.kind === 'mp3' ? mp3InfoText(it.info) : '') + '</span>'
           + '<span class="fmark' + (will ? ' work' : '') + '">' + mark + '</span>';
         if (it.kind === 'mp3') {
           html += '<select onchange="setFileMode(' + idx + ', this.value)">'
@@ -1676,9 +1727,14 @@
       renderFileList();
       if (!files.length) return;
       log.innerHTML = '<div>⏳ 正在检测文件参数 ...</div>';
-      for (const f of files) {
-        const isLrc = /\.lrc$/i.test(f.name);
-        if (!isLrc && !/\.mp3$/i.test(f.name)) {
+      // 提示音模式：一次只能传一个文件、且固定用槽位名（避免名字传错导致节点播报找不到文件）
+      const oneShot = uploadTarget.dir === 'announce';
+      const picked = oneShot ? (files.length ? [files[0]] : []) : Array.from(files);
+      for (const f of picked) {
+        const isLrc = !oneShot && /\.lrc$/i.test(f.name);
+        const isMp3 = /\.mp3$/i.test(f.name);
+        const isAudio = !isLrc && !isMp3 && /\.(wav|m4a|mp4|aac|flac|ogg|opus|weba|webm|mpeg|mpga)$/i.test(f.name);
+        if (!isLrc && !isMp3 && !isAudio) {
           log.innerHTML += '<div>⚠️ 跳过不支持的文件：' + escHtml(f.name) + '</div>';
           continue;
         }
@@ -1686,11 +1742,15 @@
         if (isLrc) {
           // 探测失败按 gbk 处理(保守: 转一遍总比设备端整篇不显示好)
           try { lrcEnc = await lrcProbe(f); } catch (e) { lrcEnc = 'gbk'; }
-        } else {
+        } else if (isMp3) {
           try { info = await mp3ProbeFile(f); } catch (e) { info = null; }
         }
         uploadItems.push({
-          file: f, kind: isLrc ? 'lrc' : 'mp3', info: info, mode: 'auto',
+          file: f,
+          kind: isLrc ? 'lrc' : (isMp3 ? 'mp3' : 'audio'),
+          info: info,
+          // 非 MP3 必须转码成 MP3 才能在设备上播放，不能走"直接上传"分支
+          mode: isAudio ? 'transcode' : 'auto',
           lrcEnc: lrcEnc
         });
       }
@@ -1704,6 +1764,7 @@
       return new Promise(function (resolve, reject) {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/upload?name=' + encodeURIComponent(name) +
+          '&dir=' + encodeURIComponent(uploadTarget.dir) +
           '&overwrite=' + (document.getElementById('ov').checked ? 1 : 0));
         xhr.upload.onprogress = function (e) {
           if (e.lengthComputable) { const p = Math.round(e.loaded / e.total * 100); bar.style.width = p + '%'; bar.textContent = p + '%'; }
@@ -1724,7 +1785,7 @@
       let ok = 0, fail = 0;
       try {
         for (const it of uploadItems) {
-          const name = it.file.name;
+          const name = uploadTargetName(it);
           let blob = it.file, note = '';
           try {
             if (it.kind === 'lrc') {
@@ -1745,11 +1806,20 @@
               note = '（无需转码）';
             }
           } catch (e) {
-            // 转码组件加载失败(通常是无网络)时回退为直接上传原文件, 不阻断整个流程
-            log.innerHTML += '<div>⚠️ 转码失败（' + escHtml(e && e.message ? e.message : e) +
-              '），改为直接上传原文件（设备端可能卡顿）</div>';
-            blob = it.file;
-            note = '（未转码）';
+            const msg = (e && e.message) ? e.message : e;
+            if (it.kind === 'mp3') {
+              // 转码组件加载失败(通常是无网络)时回退为直接上传原文件, 不阻断整个流程
+              log.innerHTML += '<div>⚠️ 转码失败（' + escHtml(msg) +
+                '），改为直接上传原文件（设备端可能卡顿）</div>';
+              blob = it.file;
+              note = '（未转码）';
+            } else {
+              // 非 MP3 无法回退：设备端只能播 MP3，传原文件等于传了个播不出来的东西
+              log.innerHTML += '<div>❌ ' + escHtml(name) + ' 转码失败（' + escHtml(msg) +
+                '），该格式必须转码后才能播放；请联网后重试，或先把文件转成 MP3</div>';
+              fail++;
+              continue;
+            }
           }
           log.innerHTML += '<div>⏳ 上传 ' + escHtml(name) + ' ' + note + ' ...</div>';
           try {
@@ -1764,7 +1834,7 @@
           bar.style.width = '0%'; bar.textContent = '0%';
         }
         log.innerHTML += '<div><b>全部完成</b>：成功 ' + ok + '，失败 ' + fail + '</div>';
-        loadSongs();
+        if (uploadTarget.dir === 'announce') loadAnnounces(); else loadSongs();
       } finally {
         uploading = false;
         bar.style.width = '0%'; bar.textContent = '0%';
@@ -1830,6 +1900,82 @@
         })
         .catch(() => { document.getElementById('muslog').innerHTML = '<div>❌ 删除失败（接口不可用）</div>'; });
     }
+    // ===== 提示音（TF 卡 /sdcard/announce）=====
+    // 文件名必须与节点上报的事件名一致（固件里 queueSay("motion"/"hot"/"beam")），
+    // 所以这里用固定槽位：用户只需点"上传"，不用关心本地文件叫什么，不可能传错名字。
+    const ANNOUNCE_SLOTS = [
+      { name: 'motion', desc: '有人靠近、自动开灯时' },
+      { name: 'hot', desc: '温度超过阈值时' },
+      { name: 'beam', desc: '红外避障检测到障碍时' }
+    ];
+    let announceFiles = null;   // null = 接口不可用；[] = 目录为空
+    function loadAnnounces() {
+      wsSend({ action: 'music_list', dir: 'announce' })
+        .then(t => {
+          announceFiles = (t && Array.isArray(t.data)) ? t.data : null;
+          renderAnnounces();
+          const log = document.getElementById('annlog');
+          if (log) log.innerHTML = '';
+        })
+        .catch(() => { announceFiles = null; renderAnnounces(); });
+    }
+    function renderAnnounces() {
+      const tb = document.querySelector('#announceTable tbody');
+      if (!tb) return;
+      tb.innerHTML = '';
+      ANNOUNCE_SLOTS.forEach(function (slot) {
+        const fname = slot.name + '.mp3';
+        const f = (announceFiles || []).find(function (x) {
+          return String(x.name).toLowerCase() === fname;
+        });
+        const tr = document.createElement('tr');
+        const tdN = document.createElement('td');
+        tdN.setAttribute('data-label', '提示音');
+        tdN.textContent = fname;
+        const tdD = document.createElement('td');
+        tdD.setAttribute('data-label', '什么时候播');
+        tdD.textContent = slot.desc;
+        const tdS = document.createElement('td');
+        tdS.setAttribute('data-label', '状态');
+        if (announceFiles === null) {
+          tdS.innerHTML = '<span class="finfo">接口不可用</span>';
+        } else if (f) {
+          tdS.textContent = '✅ 已上传 ' + fmtSize(f.size || 0);
+        } else {
+          tdS.innerHTML = '<b style="color:#c62828">未上传</b>';
+        }
+        const tdO = document.createElement('td');
+        tdO.setAttribute('data-label', '操作');
+        const btnUp = document.createElement('button');
+        btnUp.className = 'btn';
+        btnUp.textContent = f ? '替换' : '上传';
+        btnUp.onclick = function () { openUpload('announce', slot.name); };
+        tdO.appendChild(btnUp);
+        if (f) {
+          const btnDel = document.createElement('button');
+          btnDel.className = 'btn btn-danger';
+          btnDel.style.marginLeft = '6px';
+          btnDel.textContent = '删除';
+          btnDel.onclick = function () { delAnnounce(slot.name); };
+          tdO.appendChild(btnDel);
+        }
+        tr.appendChild(tdN); tr.appendChild(tdD); tr.appendChild(tdS); tr.appendChild(tdO);
+        tb.appendChild(tr);
+      });
+    }
+    function delAnnounce(name) {
+      if (!confirm('确定删除提示音「' + name + '.mp3」？')) return;
+      wsSend({ action: 'music_delete', name: name + '.mp3', dir: 'announce' })
+        .then(j => {
+          document.getElementById('annlog').innerHTML = '<div>' +
+            (j.ok ? '✅ 已删除 ' + name + '.mp3' : '❌ 删除失败: ' + (j.error || '未知错误')) + '</div>';
+          loadAnnounces();
+        })
+        .catch(() => {
+          document.getElementById('annlog').innerHTML = '<div>❌ 删除失败（接口不可用）</div>';
+        });
+    }
+
     // ===== 闹钟 =====
     function fmtSec(s) { var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return ('0' + h).slice(-2) + ':' + ('0' + m).slice(-2); }
     // 填充"选择铃声"下拉：每次切入闹钟 tab 都刷新，保证能选到刚上传的歌
