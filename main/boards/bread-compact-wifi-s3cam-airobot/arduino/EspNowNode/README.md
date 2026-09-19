@@ -12,10 +12,19 @@ ESP32-S3 节点固件，用 **arduino-esp32 核心自带**的 `ESP_NOW` 类（`E
 
 ### 1. 找主控 → 锁定 → 失联自愈（`setup()` / `hopTick()` / `onNewPeerCb()`）
 
-上电后**不连任何 AP**，直接在信道 1..13 之间每 200ms 跳一次，边跳边监听主控的 `@beacon`；
+上电后**不连任何 AP**，直接在信道 1..13 之间每 2000ms 跳一次，边跳边监听主控的 `@beacon`；
 收到就锁定当前信道、登记主控（日志 `LOCKED`），并立刻上报一次能力（`info`）。
 之后每收到一次 beacon 就重报一次 `info` —— 主控重启后注册表是空的，靠这个自愈。
-锁定后 5 秒收不到主控任何包 → 判定失联，回到跳信道模式。
+锁定后 12 秒收不到主控任何包 → 判定失联，回到跳信道模式。
+
+> **为什么每信道必须停 2000ms**：主控固定每 3000ms 广播一次，停得比它短就会大部分时间错过。
+> 早期写的 200ms 命中率只有约 7%，现场表现是“扫半天锁不上”。
+>
+> **重锁定（或换主控）时必须先 `peer->detach()` 再 `delete`**：ESP-NOW 基类
+> `~ESP_NOW_Peer()` 是**空的**，只 `delete` 不会把它从对端表里摘掉。后果两个：
+> ① 主控广播被当成“已注册对端”，不再触发 `onNewPeerCb`（锁定入口）→ 节点“收到
+> beacon 却永远不 LOCKED”；② 对端数组留下指向已释放对象的**悬空指针**，主控下发
+> 的命令走到 `onReceive` 时就是访问野内存 → **命令静默丢失**。
 
 ### 2. 下行：主控命令怎么走（`HomePeer::handleCommand()`）
 
@@ -53,7 +62,7 @@ ESP32-S3 节点固件，用 **arduino-esp32 核心自带**的 `ESP_NOW` 类（`E
 | 模块 | 节奏 | 逻辑 |
 |---|---|---|
 | 超声波 | 100ms | 量距 → 变化 ≥3cm 或 5 秒保活才上报 `evt dist`；**<30cm 判“有人”、>40cm 复位**（迟滞防抖） |
-| 自动灯 | 随超声波 | 有人 + 灯本来灭着 → 开灯、`evt motion 1`、`say motion`；人走后 30 秒自动关灯，**但用户动过这盏灯就不再自动关**（控制权交回人工） |
+| 自动灯 | 随超声波 | 有人 + 灯本来灭着 → 开灯、`evt motion 1`、`say motion`；人走后 30 秒自动关灯，**但用户动过这盏灯就不再自动关**（控制权交回人工）。**语音/AI 接管过灯后（`capLight` 非 `read` 动作）会置 `motion_suppress` 抑制自动开灯，连续 10 秒无人（`MOTION_SUPPRESS_HOLD_MS`）才恢复** —— 否则手在传感器前晃动会反复把灯点着，表现为“关灯关不掉” |
 | DHT11 | 5s | 失败重试 3 次仍失败 → `evt err dht`；≥28℃ 播 `hot` 一次，≤26℃ 复位（迟滞） |
 | 红外避障 | 50ms | 读 OUT + 二次采样去抖；**只在边沿变化**时 `evt beam`，检测到障碍才播 `beam`；上电首帧只记录、不播（避免前方已有东西时误播）|
 | RGB 灯 | 收到命令时 | 亮度 = `rgb × bright ÷ 255`，共阳模块再取反（低电平点亮） |
@@ -311,7 +320,7 @@ arduino-cli monitor -p COM11 -c baudrate=115200   # 看日志（波特率 = #def
 | `hopping... (no @beacon yet)` | 每轮（≈2.6s）一行：**在跳信道、还没收到主控广播** |
 | `LOCKED master <MAC> on ch <n>` | 锁定主控，随后立刻重报 `info` |
 | `lost master (5123 ms no packet), back to hop` | 失联回跳信道（主控重启/换热点时会这样，属正常自愈） |
-| `RX  do light rgb 0 0 255` | 收到下行指令——能到这一行说明 ESP-NOW 与密钥都正常 |
+| `[cmd] do light rgb 0 0 255` | 收到下行指令——能到这一行说明 ESP-NOW 与密钥都正常 |
 | `TX  (1/3) @n1 ok light 0 0 255` | 上行第 1/3 次连发（重发只在失败时补行） |
 | `TX  (2/3) SEND FAILED` | 发送失败（`peer` 为空或 `send()` 失败） |
 | `WARN tx queue full, dropped oldest` | 上行队列满：事件太密，丢了最旧一条 |
@@ -319,6 +328,9 @@ arduino-cli monitor -p COM11 -c baudrate=115200   # 看日志（波特率 = #def
 | `[sonar] no echo (timeout), keep last state` | 超声波无回波（限频 2 秒）：查接线/供电（3.3V） |
 | `[motion] released, auto-off in 30000 ms` | 人走开，开始自动关灯倒计时 |
 | `[motion] auto off (nobody for 30000 ms)` | 到点自动关灯（只关“人来到自动开的”那盏） |
+| `[motion] auto light on` | 人来到、自动开灯（未被人工接管） |
+| `[motion] suppressed, light untouched` | 人工接管过灯，这次检测到人**不开灯**（只上报/播报） |
+| `[motion] suppress cleared, auto light back on` | 连续 10 秒无人，解除抑制，恢复自动开灯 |
 | `[dht] 26 C 55 %` | DHT11 读数（5 秒一行） |
 | `[dht] read failed after 3 retries (last ok: …)` | DHT11 读取失败（同时会 `evt err dht`） |
 | `[obstacle] init clear (pin=HIGH)` | 上电后第一帧只记录：确认模块在工作（**不播报**，避免前方已有东西时误播）|
@@ -338,7 +350,8 @@ arduino-cli monitor -p COM11 -c baudrate=115200   # 看日志（波特率 = #def
 | `HOT_TRIGGER_C` / `HOT_RELEASE_C` | 28 / 26 | 高温播报的触发与复位阈值（**属于本节点的语义**） |
 | `DIST_REPORT_DELTA_CM` | 3 | 距离变化达 3cm 才上报（降频，避免占满 2.4G） |
 | `EVENT_RESEND` / `kEventResendGapMs` | 3 / 150 | 上行连发次数与间隔（对抗主控待机漏包） |
-| `HOP_INTERVAL_MS` / `LOST_TIMEOUT_MS` | 200 / 5000 | 信道 hop 间隔 / 失联回 hop 判定 |
+| `HOP_INTERVAL_MS` / `LOST_TIMEOUT_MS` | 2000 / 12000 | 信道 hop 间隔 / 失联回 hop 判定（须与主控 beacon 周期 3000ms 匹配，否则命中率过低扫不到主控） |
+| `MOTION_SUPPRESS_HOLD_MS` | 10000 | 人工接管过灯后，抑制自动开灯所需的“连续无人”时长 |
 | `SONAR_PERIOD_MS` / `DHT_PERIOD_MS` / `LASER_PERIOD_MS` | 100 / 5000 / 50 | 各传感器采样周期 |
 | `NODE_LOG` / `LOG_BAUD` | 1 / 115200 | 串口调试日志开关 / 波特率（见「串口调试」） |
 | `TXQ_SIZE`（在「上行发送」段，不在顶部） | 6 | 上行队列槽数，每槽约 232B 静态 RAM（4 路状态 + say/ok 要都放得下） |
@@ -366,6 +379,8 @@ static const uint8_t kLmk[16] = "xiaozhi-lmk-01";
 | 状态时有时无 | 同一事件 `TX (n/3)` 是否三条齐；有没有 `dropped oldest`（队列被高频事件占满） |
 | 颜色反相 / 关不掉 | 改 `RGB_COMMON_ANODE`（0/1 取反）；确认模块公共端接 3V3 而不是 5V（5V 会持续微亮） |
 | 灯不自动灭 | `MOTION_AUTO_OFF_MS` 是否为 0；这盏灯是否被语音动过（动过就交回人工，不再自动关） |
+| **对 AI 说「关灯」关不掉**（只能换颜色） | 手在传感器前晃动 → 距离在 30/40cm 之间反复穿越迟滞阀值 → 反复触发“人来自动开灯”，把人工关灯覆盖掉（换颜色看不出来是因为灯本来就亮）。节点已加 `motion_suppress` 抑制；排查时看有没有 `[motion] auto light on`（有 = 抑制没生效）与 `[motion] suppressed, light untouched`（有 = 抑制正常） |
+| 命令一条都到不了节点（连 `[cmd]` 都没有） | 先看 `LOCKED` 是否稳定、有无反复 `lost master`。若反复掉线 → 主控所在信道在变（路由器自动选信道），见板级 README 的 ESP-NOW 排错 |
 | 播报不响 | 主控需在**待机**状态（对话中不插嘴）；TF 卡 `/sdcard/announce/<名字>.mp3` 是否存在（可在网页「歌曲管理」页下方按槽位上传） |
 | 障碍检测反了（没东西也说有人 / 靠近反而说通畅）| 红外避障是低电平有效；拿万用表量 `DO` 对 GND（挡住应变 0V）。对不上就把 `OBSTACLE_ACTIVE_LOW` 取反；再看 `[obstacle] … (pin=…)` 是否跟实测一致 |
 | 障碍一直不触发 | 距离太远（>30cm）或物体太黑（吸光）；拧模块上的蓝色电位器调灵敏度；红外怕强光，别对着窗 |

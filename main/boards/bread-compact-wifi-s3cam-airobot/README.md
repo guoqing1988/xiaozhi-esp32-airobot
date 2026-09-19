@@ -627,7 +627,10 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
   当前节点用到的名字：`motion`（有人靠近，并自动开灯）、`beam`（红外避障检测到障碍）、`hot`（温度偏高）；
 - 生成：本板 `scripts/gen_announce_mp3.sh`（macOS `say -v Tingting` + `ffmpeg` → **24kHz 单声道 96kbps**，
   与网页上传的转码规范一致），也可以自己录真人声直接覆盖同名文件；
-- 只在**待机**状态播（不打断对话），同一节点 **10 秒冷却**；没插卡/没放音频则静默跳过（不刷日志）。
+- 只在**待机**状态播（不打断对话），同一节点 **10 秒冷却**；没插卡/没放音频则跳过播放。
+  跳过的原因会打在 **`ESP-NOW`** 这个 TAG 上（见下方「排错」表），不再静默：
+  `播报失败: 打不开 /sdcard/announce/motion.mp3 (文件不存在?)` / `播报跳过: 设备忙(非待机)` /
+  `播报跳过: 冷却中(还剩 N ms)` / `播报开始: motion.mp3`。
 - 实现：`LocalMusicPlayer::PlayAnnounce()`（**纯增量**：独立目录 + `pending_path_` 绝对路径优先 +
   清空歌曲队列，播完即停，不改动原有播放逻辑）。
 
@@ -729,10 +732,13 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 | AI 说没有这个能力 | 看 `self.home.devices` 里该设备的 `caps`；节点能力表里的能力名是否拼写一致（**大小写敏感**） |
 | `state` 里出现 `err=unknown-cap` | 节点能力表里没有这个名字，或主控发的能力名拼错 |
 | `state` 里出现 `err=unknown-action` | 动作名不在该能力的规格里（`spec` 要写全，如 `on(0\|1),rgb(r,g,b)`） |
-| 播报不响 | 是否正在**对话中**（对话不插嘴）；`/sdcard/announce/<名字>.mp3` 是否存在（节点 `say` 的名字要与文件名一致） |
+| 播报不响 | 先看网页日志里 **`ESP-NOW`** 这个 TAG（全局日志被压到 `ESP_LOG_ERROR`，这个 TAG 单独放开到 INFO）：`收到节点N消息: kind=say name=motion` → 上行到了；接着若 `播报失败: 打不开 …` → 文件不在卡上（名字要与节点 `say` 的一致）；`播报跳过: 设备忙(非待机)` → 正在对话/播音乐；`播报跳过: 冷却中` → 10 秒冷却未过；`播报开始:` → 播放在走，问题在音频输出链路。连 `收到节点N消息` 都没有 → 上行没到主控（ESP-NOW 侧） |
 | 播报刷屏 | 检查冷却（10 秒）；节点是否把高频状态也走了 `say`（高频项应走 `evt`） |
 | 温度有值但读取失败 | `state` 里同时有 `temp=..` 和 `err=dht` 属正常（保留旧读数），检查 DHT11 接线/供电 |
-| 网页日志查不出节点问题 | 节点不进主控日志：**看节点串口**（`hopping…`=没锁定/密钥、`LOCKED`=已锁定、`RX`=收到指令、`TX`=已回执），见节点 README「串口调试」 |
+| 网页日志查不出节点问题 | 主控侧只看 **`ESP-NOW`** TAG（`收到节点N消息`）；节点侧的收发细节仍需**看节点串口**（`hopping…`=没锁定/密钥、`LOCKED`=已锁定、`[cmd]`=收到指令、`TX`=已回执），见节点 README「串口调试」 |
+| **反复掉线**（AI 提示「节点已掉线」） | 先确认路由器 2.4G 信道是否**固定**：主控要连路由器上网，射频信道就被 AP 锁定，ESP-NOW 只能跟随；AP 一换信道节点就失联，`kOfflineMs`（15 秒）到期即判离线。关掉路由器的“自动信道选择/ACS”并固定信道（如 6）后重试 |
+| **命令偶发要等很久** | 同上：命令可能在节点掉出信道的窗口里打空（主控 `SendTo` 发完即返回、不重发）。对齐时间戳实测，链路正常时命令到达节点仅 5~30ms |
+| 设备永远不上线（主控重启循环）| `esp_now_init()` 必须在 WiFi 就绪**之后**调用，否则 `LoadProhibited` 重启循环；板级已用每秒轮询（`OnEspNowWifiWait`）等到 WiFi 拿到 IP 再启动 |
 
 ## AI 闹钟提醒（AI 语音 + 网页 + TF 卡持久化）
 
