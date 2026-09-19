@@ -608,9 +608,22 @@ static void onNewPeerCb(const esp_now_recv_info_t* info, const uint8_t* data, in
         return;
     }
     if (!locked) {
+        // beacon 能收到，说明此刻就停在这个信道上。但 cur_channel 只是"打算切到哪"，
+        // 与真实信道可能有偏差（WiFi.setChannel 失敗/异步），而 peer 的信道一旦登记就
+        // 不再改变——偏差会被永久固化，之后每次发送都报
+        // "Peer channel is not equal to the home channel, send fail!"。
+        // 实测现象：beacon 收得到、LOCKED 也成功，但上行全部 SEND FAILED，主控永远看不到节点。
+        uint8_t real_ch = cur_channel;
+        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+        if (esp_wifi_get_channel(&real_ch, &second) != ESP_OK) {
+            real_ch = cur_channel;   // 读不到就退回变量值，至少不改坏现有行为
+        }
+        if (real_ch != cur_channel) {
+            LOGF("[espnow] channel mismatch: cur=%u real=%u -> use real\n", cur_channel, real_ch);
+        }
         locked = true;
         delete peer;
-        peer = new HomePeer(info->src_addr, cur_channel);
+        peer = new HomePeer(info->src_addr, real_ch);
         if (!peer->attach()) {
             delete peer;
             peer = nullptr;
@@ -618,7 +631,8 @@ static void onNewPeerCb(const esp_now_recv_info_t* info, const uint8_t* data, in
             LOGF("[espnow] peer add failed, keep hopping\n");
         } else {
             info_due_ms = millis();   // 锁定成功：立刻上报能力
-            LOGF("[espnow] LOCKED master %s on ch %u\n", fmtMac(info->src_addr), cur_channel);
+            LOGF("[espnow] LOCKED master %s on ch %u (cur=%u)\n", fmtMac(info->src_addr), real_ch,
+                 cur_channel);
         }
     }
     last_seen_ms = millis();
@@ -638,7 +652,14 @@ static void hopTick() {
     } else {
         cur_channel++;
     }
-    WiFi.setChannel(cur_channel);
+    bool ch_ok = WiFi.setChannel(cur_channel);
+    if (!ch_ok) {
+        // 切信道失败会被 peer 登记固化成永久故障（见 onNewPeerCb），必须能看见
+        uint8_t now_ch = cur_channel;
+        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+        esp_wifi_get_channel(&now_ch, &second);
+        LOGF("[espnow] setChannel(%u) failed (still ch %u)\n", cur_channel, now_ch);
+    }
 }
 
 // 上行连发（非阻塞：靠时间戳推进，不 delay，避免堵 loop）
