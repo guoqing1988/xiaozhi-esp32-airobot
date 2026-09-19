@@ -122,6 +122,7 @@ private:
     // ESP-NOW 必须等 WiFi 起来后再初始化（esp_now_init 在 WiFi 未初始化时空指针崩溃），
     // 而构造函数阶段 WiFi 还没起 → 用每秒轮询等到就绪（与 http_upload_server.cc 同一做法）
     esp_timer_handle_t espnow_wait_timer_ = nullptr;
+    int espnow_wait_ticks_ = 0;  // 定时器回调次数（现场据此判断轮询是否真的在跑）
     int espnow_wait_logs_ = 0;   // 等 WiFi 的日志已打印次数（只打前几条，不刷屏）
     int64_t home_announce_ms_[EspNowHome::kMaxNodes + 1] = {0};  // 同节点播报冷却
     static constexpr int64_t kAnnounceCooldownMs = 10000;        // 播报冷却窗口
@@ -1183,11 +1184,13 @@ private:
         return ip.ip.addr != 0;
     }
 
-    // 轮询回调：WiFi 就绪后把初始化切回主任务（esp_timer 回调不在主任务，
-    // 而 MCP 工具注册、定时器创建都在主任务上下文做最稳）
+    // 轮询回调：WiFi 就绪就直接启动 ESP-NOW（照 http_upload_server.cc 的 OnWifiReadyTimer）。
+    // 不在回调里切主任务：实测依赖 Application::Schedule 时，该路径只跑到构造函数里那一次，
+    // 之后定时器回调再无下文，ESP-NOW 永远不启动。
     static void OnEspNowWifiWait(void* arg) {
         auto* self = static_cast<CompactWifiBoardS3CamAirobot*>(arg);
-        Application::GetInstance().Schedule([self]() { self->InitializeEspNowHome(); });
+        self->espnow_wait_ticks_++;
+        self->InitializeEspNowHome();
     }
 
     void InitializeEspNowHome() {
@@ -1201,10 +1204,10 @@ private:
             // 代价：配网模式下（未连路由器）self.home.* 工具不出现——本来也用不了。
             //
             // 这一路原先完全静默，现场“设备不上线”时无线索可查，故补日志（只打前几条，不刷屏）
-            if (espnow_wait_logs_ < 3) {
+            if (espnow_wait_logs_ < 5) {
                 espnow_wait_logs_++;
-                ESP_LOGI(TAG, "ESP-NOW: waiting for WiFi IP (heap=%u)",
-                         (unsigned)esp_get_free_heap_size());
+                ESP_LOGI(TAG, "ESP-NOW: still waiting for WiFi IP (tick=%d, heap=%u)",
+                         espnow_wait_ticks_, (unsigned)esp_get_free_heap_size());
             }
             if (espnow_wait_timer_ == nullptr) {
                 esp_timer_create_args_t args = {};
@@ -1240,7 +1243,11 @@ private:
             return;
         }
         ESP_LOGI(TAG, "ESP-NOW: started");
+    }
 
+    // MCP 工具注册放在主任务（构造函数阶段）执行：McpServer::AddTool 内部无锁
+    // （直接 tools_.push_back），不能在 esp_timer 回调任务里调用。
+    void RegisterHomeTools() {
         auto& mcp = McpServer::GetInstance();
         // 数据驱动：主控不知道任何能力名/动作名，只把设备自描述的清单给 AI。
         mcp.AddTool(
@@ -1407,6 +1414,7 @@ public:
         InitializeCameraTools();
         InitializeClockTools();
         InitializeEspNowHome();
+        RegisterHomeTools();            // MCP 注册必须在主任务（AddTool 无锁）
         InitializeNetworkTools();
         InitializeDebugTools();
         // 默认把日志压到 ERROR, 避免 GPIO43 日志污染 Arduino 串口(平时命令更稳定)
