@@ -26,6 +26,7 @@
 
 #include <esp_log.h>
 #include <esp_netif.h>
+#include <esp_system.h>
 #include <esp_timer.h>
 #include <driver/i2c_master.h>
 #include <driver/sdmmc_host.h>
@@ -121,6 +122,7 @@ private:
     // ESP-NOW 必须等 WiFi 起来后再初始化（esp_now_init 在 WiFi 未初始化时空指针崩溃），
     // 而构造函数阶段 WiFi 还没起 → 用每秒轮询等到就绪（与 http_upload_server.cc 同一做法）
     esp_timer_handle_t espnow_wait_timer_ = nullptr;
+    int espnow_wait_logs_ = 0;   // 等 WiFi 的日志已打印次数（只打前几条，不刷屏）
     int64_t home_announce_ms_[EspNowHome::kMaxNodes + 1] = {0};  // 同节点播报冷却
     static constexpr int64_t kAnnounceCooldownMs = 10000;        // 播报冷却窗口
 
@@ -1197,6 +1199,13 @@ private:
             // WiFi 内部指针而崩溃（实测 LoadProhibited, EXCVADDR=0x4c → 重启循环），
             // 所以每秒轮询等到 WiFi 拿到 IP 后再回来启动。
             // 代价：配网模式下（未连路由器）self.home.* 工具不出现——本来也用不了。
+            //
+            // 这一路原先完全静默，现场“设备不上线”时无线索可查，故补日志（只打前几条，不刷屏）
+            if (espnow_wait_logs_ < 3) {
+                espnow_wait_logs_++;
+                ESP_LOGI(TAG, "ESP-NOW: waiting for WiFi IP (heap=%u)",
+                         (unsigned)esp_get_free_heap_size());
+            }
             if (espnow_wait_timer_ == nullptr) {
                 esp_timer_create_args_t args = {};
                 args.callback = &CompactWifiBoardS3CamAirobot::OnEspNowWifiWait;
@@ -1214,6 +1223,7 @@ private:
             espnow_wait_timer_ = nullptr;
         }
 
+        ESP_LOGI(TAG, "ESP-NOW: WiFi ready, starting (heap=%u)", (unsigned)esp_get_free_heap_size());
         espnow_home_ = std::make_unique<EspNowHome>();
         bool ok = espnow_home_->Begin(
             [this](int node_id, const std::string& kind, const std::string& name,
@@ -1225,9 +1235,11 @@ private:
                 });
             });
         if (!ok) {
+            ESP_LOGE(TAG, "ESP-NOW: Begin() failed (esp_now_init/register/add_peer), disabled");
             espnow_home_.reset();
             return;
         }
+        ESP_LOGI(TAG, "ESP-NOW: started");
 
         auto& mcp = McpServer::GetInstance();
         // 数据驱动：主控不知道任何能力名/动作名，只把设备自描述的清单给 AI。
