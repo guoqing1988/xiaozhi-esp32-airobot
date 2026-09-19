@@ -63,6 +63,17 @@
 | 6 | 超声波每 100ms 上报一次距离（×3 连发 = 每秒 30 包），会占满 2.4G | 距离上报降频：变化 ≥3cm 或 5 秒保活才上报（`DIST_REPORT_DELTA_CM` / `DIST_REPORT_KEEPALIVE_MS`） |
 | 7 | 跑无 TF 卡变体编译会由 `build.py` 重建 `sdkconfig` 并**全量重编 2154 个目标**、把 `build/` 切到另一变体（且中断时 `sdkconfig` 只剩 `.old`） | **不跑**该变体（见 §7）；播报相关代码已用 `#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD` 完整包裹，风险很低 |
 
+后续修正（节点侧串口日志 + 上行可靠性，2026-09 落地）：
+
+| # | 原设计 | 修正为 | 原因 |
+|---|---|---|---|
+| 8 | §3.6「**不使用 `Serial`**（节点独立运行，不接串口）」 | 节点加**串口调试日志**：`#define NODE_LOG`（默认 `1`；置 `0` 则整段日志编译期消失），波特率 `LOG_BAUD`=115200 | 该约束是为**主控** UART0 与 Arduino 指令共用而立的；节点是独立 ESP32-S3、串口独占，两者不冲突。现场“设备不上线 / 控制无反应”只能靠日志定位（`hopping…` → `LOCKED` → `RX` → `TX` 四步） |
+| 9 | 上行单槽缓冲 `evt_buf`（§3.6 事件上报） | **4 槽队列（`TXQ_SIZE`）+ 同键合并**：键 = 去掉参数后的 `@n<id> <kind> <名字>`，同键只保留最新内容 | 同一 tick 会连续产生多条上行（`dist` + `motion` + `say`），单槽被后一条**静默覆盖** → 主控 `state` 缺字段、播报时有时无。只排队还不够：`dist` 抖动时每 100ms 就变，必须“同键合并”才不会被它占满队列把 `say` 挤掉 |
+| 10 | 每节点能力上限 `kMaxCaps = 3`（超出的静默忽略）；节点只有 1、2 两个（各 2 个能力）；上行队列 `TXQ_SIZE` = 4 | `kMaxCaps` 提到 **4**；新增**融合节点**（`NODE_ID 3`，一台板接全部四个传感器）；`TXQ_SIZE` 提到 **6**；节点侧 RGB 代码改为按 `NODE_ID` 条件编译 | 融合节点有 4 个能力（`light`/`dist`/`temp`/`beam`），正好用满新上限；只提升**平台容量**、不引入任何设备语义，因此不破坏“接新设备主控零改动”。`info` 报文实测 **188B**（未超 `kMaxPacketLen`=200B）；`TXQ_SIZE` 提到 6 是因为 4 路状态（dist/motion/temp/beam）各占一槽后还要放得下 `say`/`ok`。融合节点上 DHT11/激光改用 GPIO16/17（4/5 被 RGB 占用）——顺带修掉一个隐患：原先 `ledcAttach(GPIO4/5/6)` 无条件执行，会把玄关节点的 DHT11/激光脚一并配成 LEDC 输出 |
+| 11 | 自动动作：「人离开只复位标志，**不自动关灯**」（原为代码注释里的取舍，spec 未成文） | 新增 `MOTION_AUTO_OFF_MS`（默认 `30000`）：人离开后自动关灯，但**只关 `auto_lit` 标记为“人来到自动开的”那盏**；`capLight` 里除 `read` 外的任何动作都清该标记（控制权交回人工） | 演示完灯一直亮着不美观；但**无条件关灯**会把“刚用语音开的灯” 30 秒后偷偷关掉（与“自动动作不干扰人工操作”的原取舍冲突）。迟滞仍是 30/40cm；`MOTION_AUTO_OFF_MS = 0` 可整关该功能 |
+
+用法与排错见 `arduino/EspNowNode/README.md` 的「串口调试」与「上行可靠性」。
+
 ## 3. 架构与组件
 
 ### 3.1 硬件与引脚
@@ -71,14 +82,20 @@
 
 | 节点 | 器件 | 引脚 |
 |---|---|---|
-| 1「客厅」 | RGB 模块 R / G / B | GPIO4 / GPIO5 / GPIO6 |
-| 1「客厅」 | HC-SR04P Trig / Echo | GPIO7 / GPIO15 |
-| 2「玄关」 | DHT11 DATA | GPIO4 |
-| 2「玄关」 | 激光模块 DO | GPIO5 |
+| 1「客厅」 | RGB 模块（4 线共阳）：+ / R / G / B | 3V3 / GPIO4 / GPIO5 / GPIO6 |
+| 1「客厅」 | HC-SR04（宽电压 3.3–5V，**3.3V 供电**）：VCC / TRIG / ECHO / GND | 3V3 / GPIO7 / GPIO15 / GND |
+| 2「玄关」 | DHT11：VCC / DATA / GND | 3V3 / GPIO4 / GND |
+| 2「玄关」 | 激光模块：VCC / DO / GND | 3V3 / GPIO5 / GND |
+| 3「融合」 | RGB + HC-SR04（与节点 1 完全同接法） | 3V3 / GPIO4 / GPIO5 / GPIO6 / GPIO7 / GPIO15 / GND |
+| 3「融合」 | DHT11 / 激光 | 3V3 / **GPIO16** / **GPIO17** / GND（GPIO4/5 已被 RGB 占用） |
 
-- **HC-SR04P 是 3.3V 版本**，Echo 输出 3.3V，可直连 S3（普通 HC-SR04 的 5V Echo 会损伤芯片，不可直连）。
+- **超声波用 3.3V 供电**（宽电压模块，实测 3.3–5V 均可）：3.3V 供电时 ECHO 输出 ≈ 3.3V，可直连 S3。
+  **若改用 5V 供电（或换成 5V-only 的 HC-SR04）**，ECHO 必须先分压（串 1kΩ + 对地 2kΩ）再进 GPIO15——
+  5V 会顶开 GPIO 内部 ESD 钐位二极管把电流灌进 3.3V 轨（表现可能是 WiFi 不稳 / 偶发重启）。
 - **激光模块只接 DO**（数字输出，遮挡触发），AO 不接；演示时避免直射人眼。
-- RGB 模块共阳/共阴未知：固件用 `#define RGB_COMMON_ANODE 1` 宏切换极性；现象是"颜色反相或常亮"时改该宏。
+- **RGB 是 4 线共阳模块**（丝印 `+ / R / G / B`，**没有独立 GND 脚**）：`+`（公共阳极）接 3V3，
+  对应固件默认 `#define RGB_COMMON_ANODE 1`（低电平点亮）；现象是“颜色反相或常亮”时改该宏。
+  接线图见 `arduino/EspNowNode/wiring-node1.svg` / `wiring-node2.svg`。
 
 ### 3.2 主控侧新增 `espnow_home.h/.cc`（板级）
 
@@ -173,15 +190,16 @@ public:
   - 超声波：`pulseIn(Echo, HIGH, 30000)`（阻塞 ≤30ms，周期 100ms）；
   - DHT11：周期 **5000ms**（DHT11 本身 ≤1Hz），失败重试 3 次，仍失败则上报 `@n<id> err dht`；
   - 激光：周期 50ms 读 DO，**边沿触发**（0→1 或 1→0），并做 2 次采样确认去抖。
-- **事件上报**：`@n<id> evt <name> <arg>`（见 §4.1），**同一事件连发 3 次、间隔 150ms**（主控去重，见 §3.2）。
-- **不使用 `Serial`**（节点独立运行，不接串口）；可用一个 GPIO 接 LED 做在线指示（可选，不阻塞）。
+- **事件上报**：`@n<id> evt <name> <arg>`（见 §4.1），**同一事件连发 3 次、间隔 150ms**（主控去重，见 §3.2）；
+  上行统一入 6 槽队列（`TXQ_SIZE`；4→6 见 §2.1 修正 10）并按 `@n<id> <kind> <名字>` 同键合并（见 §2.1 修正 9）。
+- **不把 `Serial` 当业务通道**（协议只走 ESP-NOW）；**串口只用于调试日志**（`NODE_LOG` 默认开、115200，见 §2.1 修正 8）。
 - **失联自恢复**：回 hop 模式即可，无需重启。
 
 ### 3.7 节点依赖（需用户确认后安装）
 
 ```bash
 arduino-cli lib install "DHT sensor library"      # 自动带上 Adafruit Unified Sensor
-arduino-cli core list                              # 确认 esp32:esp32 3.2.0 已装
+arduino-cli core list                              # 确认 esp32:esp32 3.2.0+ 已装（实测 3.3.10）
 arduino-cli compile --fqbn esp32:esp32:esp32s3 main/boards/bread-compact-wifi-s3cam-airobot/arduino/EspNowNode
 ```
 - 除 DHT 库外**零新增依赖**；灯用核心自带 `ledc`，无线用核心自带 `ESP_NOW`。
@@ -237,7 +255,8 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 main/boards/bread-compact-wifi-s3
 ## 5. 关键约束与理由
 
 1. **内部 SRAM 仅 20~25KB 空闲**（踩坑 16）→ 不建常驻任务（beacon 用 `esp_timer` 回调）、缓冲全部静态定长、ESP-NOW 接收回调只做解析+更新缓存。
-2. **UART0 与 Arduino 下位机共用**（AGENTS.md + 踩坑记录）→ 新代码**一律不加 `ESP_LOG`**，失败通过返回值/工具文本表达。
+2. **UART0 与 Arduino 下位机共用**（AGENTS.md + 踩坑记录）→ **主控侧**新代码**一律不加 `ESP_LOG`**（`espnow_home.cc` 内零日志），失败通过返回值/工具文本表达；
+   **节点侧相反**——节点串口独占，调试日志默认开（见 §2.1 修正 8）。
 3. **待机 `WIFI_PS_MAX_MODEM`**（踩坑 7）**保持原样不动**：早期草案曾计划由 `EspNowHome::SetControlWindow()` 驱动板级 `SetPowerSaveLevel()` 提频，实现期判定不值得（见 §2.1 修正 2）。
 4. **单 2.4G radio 与云端音频共存** → 控制报文 <40B；稳态 beacon 3 秒一次；**不做周期性心跳刷屏**（只按需 `@n1 ping`，默认 5 秒且仅在有控制窗口时启用）。
 5. **官方 API 事实**（已核对本机源码）：

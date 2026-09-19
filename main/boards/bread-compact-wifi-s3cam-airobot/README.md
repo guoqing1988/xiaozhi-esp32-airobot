@@ -562,19 +562,23 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 **因此接入一个新设备只需改节点固件，主控零改动、无需重新烧录。**
 
 节点固件在 `arduino/EspNowNode/`（Arduino 架构，用核心自带 `ESP_NOW` 类，控灯用核心自带 `ledc`，
-**零第三方库**；仅节点 2 的 DHT11 需要 `DHT sensor library`）。接线/编译/排错详见该目录的 `README.md`。
+**零第三方库**；仅玄关/融合节点的 DHT11 需要 `DHT sensor library`）。接线/编译/排错详见该目录的 `README.md`。
 
 ### 演示剧本（现场三个场景）
 
 | 场景 | 你的操作 | 设备反应 |
 |---|---|---|
 | ① 语音控灯 | 「打开客厅灯」「调成蓝色」「暗一点」「关灯」 | 节点 1 的 RGB 灯亮/变色/调光/灭 |
-| ② 人来自动开灯 ★ | 手靠近超声波（<30cm） | 灯自动亮 + 喇叭播报「检测到有人靠近，已为你开灯」 |
+| ② 人来自动开灯 ★ | 手靠近超声波（<30cm），然后拿开 | 灯自动亮 + 喇叭播报「检测到有人靠近，已为你开灯」；**人走 30 秒后自动灭** |
 | ③ 环境查询 + 门禁 | 「室内多少度」；手挡激光 | 返回节点 2 温湿度；播报「门口有人经过，请注意」 |
 
 ②③ 不需要说话，是**节点自己判定并主动触发**，现场最有观赏性。
 （高温同理：节点 2 侧 ≥28℃ 播一次、≤26℃ 复位——阈值属于节点的业务语义，主控不参与判断。）
 这些“自动动作”（如人来自动开灯）都写在**节点固件**里，主控完全不知道。
+
+> **只有一块板时**：把节点固件烧成 **`NODE_ID 3`（融合节点）**——一台设备同时接全部四个传感器
+> （RGB + 超声波 + DHT11 + 激光，后两个因 GPIO4/5 已被 RGB 占用而改用 GPIO16/17），
+> 上面三个场景能在一块板子上全部演完。接线见 `arduino/EspNowNode/wiring-node3.svg`。
 
 ### AI 语音指令（服务端通过 MCP 工具自动调用）
 
@@ -652,7 +656,7 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 5. **上电等 3 秒**：主控收到 `info` 后自动出现在 `self.home.devices` 里，直接对它说话即可。
 
 > 播报音频：把 `smoke.mp3` 之类放进 TF 卡 `/sdcard/announce/`，名字与 `queueSay()` 的参数一致。
-> 能力规格要克制（单包 ≤200B）：节点侧超长会被截断，主控只保留前 3 个能力。
+> 能力规格要克制（单包 ≤200B）：节点侧超长会被截断，主控只保留前 4 个能力。
 
 ### 设计取舍（改这块前先读）
 
@@ -661,9 +665,14 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
    （`say` 与 `evt` 是两条通道，即使同名也互不吞）；
    而节点是**常醒**的（`WiFi.setSleep(false)`、USB 供电），下行无需重发，
    **更不能重发**——在 MCP 工具回调里连发会阻塞约 300ms，直接卡住对话。
+   节点侧上行是 **6 槽队列 + 同键合并**（键 = `@n<id> <kind> <名字>`，同键只留最新）：
+   否则 `dist` 这类高频状态会占满队列、把 `say` 挤掉（现场“播报时有时无”）；
+   融合节点有 4 路状态（dist/motion/temp/beam），槽位数必须留得下 `say`/`ok`。
 2. **不为 ESP-NOW 全局提频**：待机省电是刻意设计（见踩坑 7），不改 `SetPowerSaveLevel()`；
    若现场实测仍丢包，再调 `esp_now_set_wake_window()`（IDF v6 API，默认最大窗口）。
-3. **传输层零日志**（`espnow_home.cc` 内无任何 `ESP_LOG`）：本板 UART0 与 Arduino 指令共用。
+3. **主控侧传输层零日志**（`espnow_home.cc` 内无任何 `ESP_LOG`）：本板 UART0 与 Arduino 指令共用。
+   **但排查节点问题必须看节点自己的串口**：节点是独立 ESP32-S3、串口独占，日志默认开（115200），
+   `hopping…` → `LOCKED` → `RX` → `TX` 四步即可定位，详见 `arduino/EspNowNode/README.md` 的「串口调试」。
 4. **抗抖动留在节点侧**：超声波 30/40cm 迟滞、激光两次采样一致、距离变化 ≥3cm 才上报。
 5. **主控不存业务语义**：传感器字段、能力名、事件名、播报文件名、温度阈值**一律留在节点侧**。
    状态在传输层只是一个通用的 `key=value` 文本（`temp=26 55 light=1 0 0 255 err=dht`），
@@ -682,7 +691,8 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 
 1. 节点上电 → 3 秒内 `self.home.devices` 显示该设备 `online: true` 且 `info_seen: true`；
 2. 「打开客厅灯」→ 灯亮；「调成蓝色」→ 变蓝；「关灯」→ 灭；
-3. 手靠近超声波 <30cm → 灯**自动亮** + 播报（10 秒内不重复）；
+3. 手靠近超声波 <30cm → 灯**自动亮** + 播报（10 秒内不重复）；人拿开后 30 秒灯**自动灭**
+   （但先说了「开灯」再靠近、或亮灯期间又调过颜色 → 不再自动关，控制权已交回人工）；
 4. 「室内多少度」→ 与实物温度计接近（DHT11 ±2℃）；
 5. 手挡激光 → 播报；温度 ≥28℃ 播报一次（降到 ≤26℃ 之后才能再播）；
 6. 拔节点电源 30 秒再插 → 自动恢复在线（`info` 重报，能力不丢）；
@@ -703,6 +713,7 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 | 播报不响 | 是否正在**对话中**（对话不插嘴）；`/sdcard/announce/<名字>.mp3` 是否存在（节点 `say` 的名字要与文件名一致） |
 | 播报刷屏 | 检查冷却（10 秒）；节点是否把高频状态也走了 `say`（高频项应走 `evt`） |
 | 温度有值但读取失败 | `state` 里同时有 `temp=..` 和 `err=dht` 属正常（保留旧读数），检查 DHT11 接线/供电 |
+| 网页日志查不出节点问题 | 节点不进主控日志：**看节点串口**（`hopping…`=没锁定/密钥、`LOCKED`=已锁定、`RX`=收到指令、`TX`=已回执），见节点 README「串口调试」 |
 
 ## AI 闹钟提醒（AI 语音 + 网页 + TF 卡持久化）
 
