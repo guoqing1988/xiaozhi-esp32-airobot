@@ -35,9 +35,15 @@ static const char* DirFromQuery(const char* q) {
     }
     return MUSIC_DIR;
 }
-// 目录是否为提示音目录
+// 目录是否为提示音目录/提示音标识。
+// ⚠️ 这里必须同时接受两种形态：查询参数值 "announce"（WebSocket 与前端直接传的）
+// 和目录路径 "/sdcard/announce"（HTTP 上传经 DirFromQuery 得到的是路径）。
+// 只认一种会出现“上传成功但列表为空”——实际列的是歌曲目录，前端找不到 motion.mp3。
 static bool IsAnnounceDir(const char* dir) {
-    return dir != nullptr && strcmp(dir, ANNOUNCE_DIR) == 0;
+    if (dir == nullptr) {
+        return false;
+    }
+    return strcmp(dir, "announce") == 0 || strcmp(dir, ANNOUNCE_DIR) == 0;
 }
 
 // 确保目录存在（对齐 photo_store.cc 的 EnsureDir）：/sdcard/music 通常早就有了，

@@ -506,6 +506,16 @@ class TestSourceContracts(unittest.TestCase):
         # 非 MP3（wav/m4a/flac 等）也要能上传：一律转码成 MP3
         self.assertIn("'audio'", self.web)
 
+    def test_announce_dir_matcher_accepts_both_forms(self):
+        """dir 有两种形态（查询值 "announce" 与目录路径 /sdcard/announce），匹配函数必须都认。
+
+        WebSocket 传的是 "announce"，HTTP 上传经 DirFromQuery 得到的是目录路径；
+        只认一种就会出现“上传成功但列表为空”（列表实际列的是歌曲目录，
+        前端找不到 motion.mp3，于是永远显示未上传）。
+        """
+        self.assertIn('strcmp(dir, "announce") == 0', self.upload)
+        self.assertIn('strcmp(dir, ANNOUNCE_DIR) == 0', self.upload)
+
     # ---------- 沿用首版的有效约束 ----------
 
     def test_no_esp_log_in_espnow(self):
