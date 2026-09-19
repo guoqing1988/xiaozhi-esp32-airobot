@@ -36,7 +36,7 @@ BOARD_CC = os.path.join(BOARD_DIR, "compact_wifi_board_s3cam_airobot.cc")
 PLAYER_CC = os.path.join(BOARD_DIR, "local_music_player.cc")
 
 MAX_NODES = 4               # 与 EspNowHome::kMaxNodes 一致
-MAX_CAPS = 3                # 与 EspNowHome::kMaxCaps 一致
+MAX_CAPS = 4                # 与 EspNowHome::kMaxCaps 一致（融合节点有 4 个能力）
 NAME_LEN = 20
 CAP_NAME_LEN = 14
 CAP_SPEC_LEN = 48
@@ -318,9 +318,11 @@ class TestCapSpecParsing(unittest.TestCase):
         self.assertEqual(parse_caps("light:on(0|1)"), [("light", ":on(0|1)")])
 
     def test_capacity_limited(self):
-        caps = parse_caps("a(x):m();b(y):m();c(z):m();d(w):m()")
+        # 不写死 3：融合节点把上限抬到 4，这里跟着 MAX_CAPS 走
+        items = ";".join("c%d(x):m()" % i for i in range(MAX_CAPS + 1))
+        caps = parse_caps(items)
         self.assertEqual(len(caps), MAX_CAPS)
-        self.assertEqual([c[0] for c in caps], ["a", "b", "c"])
+        self.assertEqual([c[0] for c in caps], ["c%d" % i for i in range(MAX_CAPS)])
 
     def test_empty_items_ignored(self):
         self.assertEqual([c[0] for c in parse_caps("light(x):m();;dist(y):r()")],
@@ -618,11 +620,104 @@ class TestSourceContracts(unittest.TestCase):
         self.assertNotIn("ack light", self.ino)
         self.assertNotIn('"light "', self.ino)
 
+    def test_node_serial_log_is_switchable(self):
+        """节点串口是独占的（不像主控 UART0 与 Arduino 指令共用），日志默认开且可一键关。
+
+        置 NODE_LOG=0 时整段日志必须在编译期消失（空宏）——现场收不到日志时
+        要能彻底关掉，而不是只能改代码注释。
+        """
+        self.assertRegex(self.ino, r"#define NODE_LOG\s+1")
+        self.assertIn("Serial.begin(LOG_BAUD)", self.ino)
+        self.assertIn("#define LOGF(...) Serial.printf(__VA_ARGS__)", self.ino)
+        self.assertIn("#define LOGF(...) ((void)0)", self.ino)
+
+    def test_node_uplink_is_queued_and_coalesced(self):
+        """上行必须排队 + 同键合并（见 spec §2.1 修正 9）。
+
+        单槽缓冲会被同一 tick 的后一条上行静默覆盖（dist + motion + say），
+        主控 state 因此缺字段、播报时有时无；但只排队又会被高频 dist 占满，
+        所以还要按 "@n<id> <kind> <名字>" 同键合并。
+        """
+        self.assertNotIn("evt_buf", self.ino, "单槽缓冲已退役（spec §2.1 修正 9）")
+        for need in ("TXQ_SIZE", "txq_count", "msgKey", "putText"):
+            self.assertIn(need, self.ino, "上行队列缺少 %s" % need)
+        self.assertIn("portENTER_CRITICAL", self.ino)   # 回调入队 ↔ loop 出队
+
+    def test_node_queue_types_declared_before_first_function(self):
+        """队列 struct 必须声明在第一个函数定义之前（防重现编译错误）。
+
+        arduino-cli 会把函数原型自动插到第一个函数定义之前；若 `struct OutMsg` 定义在
+        文件中部，`putText(OutMsg&, ...)` 的原型就会引用未声明的类型，报
+        "OutMsg was not declared in this scope"（已实际重现过）。
+        """
+        struct_idx = self.ino.find("struct OutMsg")
+        first_fn_idx = self.ino.find("static const char* fmtMac")
+        self.assertGreater(struct_idx, -1, "缺少 struct OutMsg")
+        self.assertGreater(first_fn_idx, -1, "未找到首个函数 fmtMac（测试需同步）")
+        self.assertLess(struct_idx, first_fn_idx,
+                        "OutMsg 必须声明在第一个函数定义之前，否则原型注入会编译失败")
+
     def test_node_say_channel_for_announce(self):
         """播报走 say 通道；状态类走 evt（否则距离会反复触发 SD 卡文件查找）。"""
         self.assertIn("queueSay", self.ino)
         self.assertIn("say %s", self.ino)        # "@n%d say %s"
         self.assertIn("queueEvt(\"dist\"", self.ino)
+
+    def test_fusion_node_covers_all_four_sensors(self):
+        """节点 3 = 融合节点：一块板接全部四个传感器（RGB + 超声波 + DHT11 + 激光）。
+
+        关键约束：
+        - RGB 与超声波沿用 GPIO4/5/6/7/15；DHT11/激光必须换到 16/17（4/5 已被 RGB 占用）；
+        - 能力 4 个，正好等于主控 kMaxCaps，所以 kMaxCaps 必须 ≥4，否则第 4 个
+          能力（beam）会被静默忽略、AI 看不见；
+        - RGB 相关代码只能对节点 1/3 编译：原先无条件 ledcAttach(GPIO4/5/6) 会把
+          玄关节点的 DHT11/激光脚一并配成 LEDC 输出。
+        """
+        self.assertIn("#if NODE_ID == 3", self.ino)
+        self.assertRegex(self.ino, r"#define PIN_DHT\s+16")
+        self.assertRegex(self.ino, r"#define PIN_LASER\s+17")
+        self.assertGreaterEqual(MAX_CAPS, 4, "融合节点 4 个能力，主控 kMaxCaps 必须 ≥4")
+        for need in ('"客厅灯"', '"玄关感应"', '"融合节点"'):
+            self.assertIn(need, self.ino, "缺少节点名 %s" % need)
+
+        # ledcAttach 必须落在条件编译块里（玄关节点的 GPIO4/5 是 DHT11 与激光）
+        idx = self.ino.find("ledcAttach(PIN_RGB_R")
+        self.assertGreater(idx, -1, "未找到 RGB 初始化")
+        self.assertIn("#if NODE_ID == 1 || NODE_ID == 3", self.ino[max(0, idx - 400):idx],
+                      "ledcAttach 必须按 NODE_ID 条件编译，否则会抢走玄关节点的 GPIO4/5")
+        # 4 路状态上报 + say/ok 要都放得下
+        self.assertRegex(self.ino, r"#define TXQ_SIZE\s+6")
+
+    def test_fusion_node_info_packet_fits_single_packet_limit(self):
+        """节点 3 的 info 报文必须 ≤200B（主控 kMaxPacketLen），否则描述被截断。
+
+        直接按固定里真实的能力文案拼报文核长度：文案一拉长就会红，
+        避免出现“AI 看不到第四个能力”这种难查的问题。
+        """
+        specs = dict(re.findall(r'\{"(light|dist|temp|beam)", "([^"]+)"', self.ino))
+        self.assertEqual({"light", "dist", "temp", "beam"}, set(specs),
+                         "四个能力必须都在节点固件的能力表里")
+        names = ("light", "dist", "temp", "beam")
+        text = "@n3 info 融合节点 " + ";".join(n + specs[n] for n in names)
+        n_bytes = len(text.encode("utf-8"))
+        self.assertLessEqual(
+            n_bytes, 200,
+            "info 报文 %dB 超主控单包上限 200B（会被截断，AI 看不到后面的能力）" % n_bytes)
+
+    def test_motion_auto_off_only_touches_auto_lit_lamp(self):
+        """人走超时只关"自动开的"那盏灯（见 spec §2.1 修正 11）。
+
+        若无条件关灯，用户刚用语音开的灯会被 30 秒后偷偷关掉；
+        所以用 auto_lit 标记"这盏灯是自动开的"，并在 capLight 里一动手就清标记。
+        """
+        self.assertRegex(self.ino, r"#define MOTION_AUTO_OFF_MS\s+30000")
+        self.assertIn("auto_lit", self.ino)
+        self.assertIn("auto_off_due_ms", self.ino)
+        idx = self.ino.find("static bool capLight")
+        self.assertGreater(idx, -1)
+        body = self.ino[idx:idx + 700]
+        self.assertIn("auto_lit = false", body, "capLight 必须取消自动关灯排队")
+        self.assertIn('strcmp(action, "read")', body, "read 只是查询，不该取消排队")
 
     def test_high_temp_threshold_moved_to_node(self):
         """温度阈值属于业务语义，必须在节点侧判定。"""

@@ -27,11 +27,22 @@
 // ============================ 现场可调参数 ============================
 // 注意：这些宏必须在下面的 #if 之前定义（预处理按顺序求值）。
 
-#define NODE_ID 1                    // 1=客厅灯(RGB+超声波), 2=玄关感应(DHT11+激光)
+#define NODE_ID 1                    // 1=客厅灯(RGB+超声波) 2=玄关感应(DHT11+激光) 3=融合节点(四件套)
 #define HOP_INTERVAL_MS 200          // 未锁定信道时的换信道间隔
 #define LOST_TIMEOUT_MS 5000         // 锁定后多久收不到主控包就回到 hop
 #define HOP_CHANNEL_MIN 1
 #define HOP_CHANNEL_MAX 13
+
+// 串口调试日志：1=开（默认），0=关（整段日志编译期消失，零额外开销）
+// 节点串口是独占的（USB 转串口），不像主控 UART0 还要与 Arduino 指令共用，可放心开。
+#define NODE_LOG 1
+#define LOG_BAUD 115200
+
+#if NODE_LOG
+#define LOGF(...) Serial.printf(__VA_ARGS__)
+#else
+#define LOGF(...) ((void)0)
+#endif
 
 // 重复上报：主控待机时 WiFi 省电(MAX_MODEM)只在 DTIM 醒来，单包易漏；
 // 连发 EVENT_RESEND 次跨过 DTIM 周期，主控侧按 (kind, 名字) 1 秒去重。
@@ -42,6 +53,7 @@
 // （距离每 100ms 采一次，但只在变化达标或保活周期到了才上报，避免刷屏占 2.4G）
 #define MOTION_TRIGGER_CM 30
 #define MOTION_RELEASE_CM 40
+#define MOTION_AUTO_OFF_MS 30000     // 人离开后多久自动关灯（只关"人来自动开的"那盏；0 = 不自动关）
 #define SONAR_PERIOD_MS 100
 #define SONAR_TIMEOUT_US 30000       // pulseIn 超时(约 5m 对应 ~29ms)
 #define DIST_REPORT_DELTA_CM 3       // 距离变化达 3cm 才上报
@@ -64,8 +76,15 @@
 #define PIN_RGB_B 6
 #define PIN_SONAR_TRIG 7
 #define PIN_SONAR_ECHO 15
+#if NODE_ID == 3
+// 融合节点：RGB 已占用 GPIO4/5/6，DHT11 与激光改用两个空闲脚
+// （GPIO16/17 在 S3 上是普通 IO，不撞 flash/PSRAM/USB）
+#define PIN_DHT 16
+#define PIN_LASER 17
+#else
 #define PIN_DHT 4
 #define PIN_LASER 5
+#endif
 
 // 三通道 RGB 模块共阳时 PWM 反相（现象：颜色反相或关不掉时改这里）
 #define RGB_COMMON_ANODE 1
@@ -84,8 +103,8 @@ static const uint8_t kLmk[16] = "xiaozhi-lmk-01";
 #include <WiFi.h>
 #include <esp_mac.h>
 
-#if NODE_ID == 2
-#include <DHT.h>   // 仅节点 2 需要，故按条件包含（节点 1 无需安装该库）
+#if NODE_ID == 2 || NODE_ID == 3
+#include <DHT.h>   // 仅玄关/融合节点需要，故按条件包含（客厅节点无需安装该库）
 #endif
 
 // ============================== 运行状态 ==============================
@@ -95,24 +114,78 @@ static uint8_t cur_channel = 1;
 static uint32_t last_hop_ms = 0;
 static uint32_t last_seen_ms = 0;           // 最近一次收到主控任何报文
 
-static char evt_buf[200] = {0};             // 待上报报文（info 可能较长）
-static int evt_left = 0;                    // 剩余连发次数
-static uint32_t evt_due_ms = 0;             // 下一次连发时刻
-
 static uint32_t info_due_ms = 0;            // 能力重报（收到 beacon 时置位，loop 里安全发送）
 
+// 灯状态（客厅 1 / 融合 3；玄关节点不含这部分代码）
+#if NODE_ID == 1 || NODE_ID == 3
 static int light_on = 0;
 static int light_r = 255, light_g = 255, light_b = 255, light_bright = 200;
+#endif
 
+// 超声波状态（客厅 1 / 融合 3）
+#if NODE_ID == 1 || NODE_ID == 3
 static bool motion_active = false;
+// 自动亮灯的两个标记：
+// auto_lit   = 当前这盏灯是"人来到自动开的"（用户一动手就交回人工，不再自动关）
+// auto_off_due_ms = 自动关灯的到点时刻（0 = 没在排队）
+static bool auto_lit = false;
+static uint32_t auto_off_due_ms = 0;
 static int last_dist = -1;
 static uint32_t last_dist_ms = 0;
+static uint32_t sonar_ms = 0;
+static uint32_t sonar_timeout_log_ms = 0;   // 超声波"无回波"日志的限频时间戳
+static uint32_t sonar_ok_log_ms = 0;        // 距离读数日志的限频时间戳（没它就只能靠"有没有 no echo"反推）
+#endif
+
+// DHT11 状态（玄关 2 / 融合 3）
+#if NODE_ID == 2 || NODE_ID == 3
+static int last_temp = -100, last_hum = -100;
+static int hot_state = 0;   // 0=正常 1=已告警（迟滞，避免在阈值上反复播报）
+static uint32_t dht_ms = 0;
+#endif
+
+// 激光状态（玄关 2 / 融合 3）
+#if NODE_ID == 2 || NODE_ID == 3
 static int last_beam = -1;
-static uint32_t sonar_ms = 0, dht_ms = 0, laser_ms = 0;
+static uint32_t laser_ms = 0;
+#endif
+
+// ---- 上行发送队列（数据结构）----
+// ⚠️ 必须声明在文件前部（第一个函数定义之前）：arduino-cli 会把函数原型自动插到
+// 第一个函数定义之前，若 struct 定义在文件中部，`putText(OutMsg&, ...)` 的原型
+// 就会引用到未声明的类型而编译失败（本文件曾因此报 "OutMsg was not declared"）。
+// 队列实现见下方「上行发送」段。
+// 为什么是 6 槽：融合节点(3) 有 4 路状态上报（dist/motion/temp/beam）各占一槽后，
+// 仍要留得下 say/ok —— 4 槽会被状态占满，把播报与回执报文挤掉。
+#define TXQ_SIZE 6
+
+struct OutMsg {
+    char key[32];      // 合并键：去掉参数后的 "@n<id> <kind> <name>"
+    char text[200];
+    int left;          // 剩余连发次数
+    uint32_t due_ms;   // 下一次发送时刻
+};
+
+static OutMsg txq[TXQ_SIZE];
+static int txq_head = 0;      // 队首（正在连发的那条）
+static int txq_count = 0;     // 队列中报文条数
+// 入队在 ESP-NOW 回调（WiFi 任务）里发生，出队在 loop 里，故需临界区保护
+static portMUX_TYPE txq_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static void queueEvent(const char* text);   // 前置声明（HomePeer 内会用到）
 
+// ============================== 日志小工具 ==============================
+
+// MAC 转 "aa:bb:cc:dd:ee:ff"（仅日志用；返回静态缓冲，一次日志里只调用一次）
+static const char* fmtMac(const uint8_t* mac) {
+    static char buf[18];
+    snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2],
+             mac[3], mac[4], mac[5]);
+    return buf;
+}
+
 // ============================== 灯控制 ==============================
+#if NODE_ID == 1 || NODE_ID == 3
 
 static void applyLight() {
     int scale = light_bright < 0 ? 0 : (light_bright > 255 ? 255 : light_bright);
@@ -130,6 +203,8 @@ static void applyLight() {
     ledcWrite(PIN_RGB_G, duty(light_g));
     ledcWrite(PIN_RGB_B, duty(light_b));
 }
+
+#endif   // NODE_ID == 1 || NODE_ID == 3（RGB）
 
 // ===================== 参数解析小工具 =====================
 // AI 生成的参数格式并不统一（"0 0 255" / "0,0,255" / "[0,0,255]" 都可能出现），
@@ -172,7 +247,15 @@ static const char* nextField(const char* p, char* out, size_t out_len) {
 // 动作名建议用标准词汇 on/off/set/rgb/read —— AI 首次调用命中率最高；
 // 自定义动作名同样可以（主控原样透传，不校验）。
 
+#if NODE_ID == 1 || NODE_ID == 3
+
 static bool capLight(const char* action, const char* args, char* out, size_t out_len) {
+    // 用户/语音一动手就接管这盏灯：取消"人来自动开灯"的自动关灯排队，
+    // 只查询（read）不算接管。
+    if (strcmp(action, "read") != 0) {
+        auto_lit = false;
+        auto_off_due_ms = 0;
+    }
     int v[3] = {0, 0, 0};
     int n = parseNums(args, v, 3);
     if (strcmp(action, "on") == 0) {
@@ -216,6 +299,8 @@ static bool capLight(const char* action, const char* args, char* out, size_t out
     return false;
 }
 
+#endif   // NODE_ID == 1 || NODE_ID == 3（capLight）
+
 // ============================== 能力表 ==============================
 // 这是整个节点唯一的"设备描述来源"：改这里就能改 AI 看到的设备名与能力，
 // 主控不需要任何改动。
@@ -234,8 +319,9 @@ struct NodeDef {
     int cap_count;
 };
 
-#if NODE_ID == 1
+// ---- 只读能力处理函数（按 NODE_ID 编译需要的组合，避免未使用代码）----
 
+#if NODE_ID == 1 || NODE_ID == 3
 static bool capDistRead(const char* action, const char* args, char* out, size_t out_len) {
     (void)args;
     if (strcmp(action, "read") != 0 || last_dist < 0) {
@@ -244,18 +330,9 @@ static bool capDistRead(const char* action, const char* args, char* out, size_t 
     snprintf(out, out_len, "%d", last_dist);
     return true;
 }
+#endif
 
-static const CapDef kCaps[] = {
-    {"light", "(RGB灯):on(0|1),off(),rgb(r,g,b),bright(0-255),read()", capLight},
-    {"dist", "(超声波距离cm,只读):read()", capDistRead},
-};
-static const char kNodeName[] = "客厅灯";
-
-#else
-
-static int last_temp = -100, last_hum = -100;
-static int hot_state = 0;   // 0=正常 1=已告警（迟滞，避免在阈值上反复播报）
-
+#if NODE_ID == 2 || NODE_ID == 3
 static bool capTempRead(const char* action, const char* args, char* out, size_t out_len) {
     (void)args;
     if (strcmp(action, "read") != 0 || last_temp < -50) {
@@ -273,25 +350,114 @@ static bool capBeamRead(const char* action, const char* args, char* out, size_t 
     snprintf(out, out_len, "%d", last_beam);
     return true;
 }
+#endif
 
+#if NODE_ID == 1
+// 客厅：RGB 灯 + 超声波（人来自动开灯）
+static const CapDef kCaps[] = {
+    {"light", "(RGB灯):on(0|1),off(),rgb(r,g,b),bright(0-255),read()", capLight},
+    {"dist", "(超声波距离cm,只读):read()", capDistRead},
+};
+static const char kNodeName[] = "客厅灯";
+
+#elif NODE_ID == 2
+// 玄关：DHT11 + 激光
 static const CapDef kCaps[] = {
     {"temp", "(温湿度℃/%,只读):read()", capTempRead},
     {"beam", "(激光遮挡0=通1=挡,只读):read()", capBeamRead},
 };
 static const char kNodeName[] = "玄关感应";
 
+#else
+// 融合节点：一台设备接全部四个传感器。
+// 4 个能力的 info 报文实测约 188B，未超主控 200B 单包上限（描述文案别再拉长）。
+static const CapDef kCaps[] = {
+    {"light", "(RGB灯):on(0|1),off(),rgb(r,g,b),bright(0-255),read()", capLight},
+    {"dist", "(超声波距离cm,只读):read()", capDistRead},
+    {"temp", "(温湿度℃/%,只读):read()", capTempRead},
+    {"beam", "(激光遮挡0=通1=挡,只读):read()", capBeamRead},
+};
+static const char kNodeName[] = "融合节点";
+
 #endif
 
-static const NodeDef kNodeDef = {kNodeName, kCaps, 2};
+// 能力数用 sizeof 推导：避免新增/删除能力时忘同步计数
+static const NodeDef kNodeDef = {kNodeName, kCaps, (int)(sizeof(kCaps) / sizeof(kCaps[0]))};
 static const NodeDef* node_def = &kNodeDef;
 
 // ============================== 上行发送 ==============================
+// 队列数据结构（TXQ_SIZE / OutMsg / txq[] / txq_mux）声明在文件前部「运行状态」段。
+//
+// 为什么要排队（而不是单槽缓冲）：一次 tick 里会连续产生多条上行
+// （例："dist 上报" + "motion 上报" + "say motion"），单槽会被后一条直接覆盖，
+// 前几条静默丢失（主控 state 里缺字段，现场表现为"状态时有时无"）。
+// 每槽 200B（info 报文可能很长），6 槽 × 300ms 已远高于实际事件频率。
 
-// 填入一条待上报报文（会替换上一条未发完的；事件频率极低，够用）
+// 报文键：去掉参数部分（第 3 个空格之前的内容），用于同键合并。
+// "@n1 evt dist 42" → "@n1 evt dist "；"@n1 say motion" → 整串。
+static void msgKey(const char* text, char* out, size_t out_len) {
+    memset(out, 0, out_len);
+    const char* p = text;
+    int spaces = 0;
+    while (*p != '\0' && spaces < 3) {
+        if (*p == ' ') {
+            spaces++;
+        }
+        p++;
+    }
+    size_t n = static_cast<size_t>(p - text);
+    if (n >= out_len) {
+        n = out_len - 1;
+    }
+    memcpy(out, text, n);
+}
+
+// 写入槽文本（超长截断：info 报文不要写太长）
+static void putText(OutMsg& m, const char* text) {
+    size_t n = strlen(text);
+    if (n >= sizeof(m.text)) {
+        n = sizeof(m.text) - 1;
+    }
+    memcpy(m.text, text, n);
+    m.text[n] = '\0';
+}
+
+// 入队一条待上报报文（首次由 evtTick 立即发出，后续按时间戳重发）
+// 同键合并：dist 这类状态在抖动时会每 100ms 变一次，若不去重，队列会被它占满
+// 而把 say/ok 这类事件报文挤掉（现场表现为"播报时有时无"）。
 static void queueEvent(const char* text) {
-    snprintf(evt_buf, sizeof(evt_buf), "%s", text);
-    evt_left = EVENT_RESEND;
-    evt_due_ms = millis();
+    char key[32];
+    msgKey(text, key, sizeof(key));
+
+    bool dropped = false;
+    portENTER_CRITICAL(&txq_mux);
+    OutMsg* slot = nullptr;
+    for (int i = 0; i < txq_count; i++) {
+        OutMsg& c = txq[(txq_head + i) % TXQ_SIZE];
+        if (c.left > 0 && strncmp(c.key, key, sizeof(key)) == 0) {
+            slot = &c;   // 同键：只更新内容，保留原有的重发节奏
+            break;
+        }
+    }
+    if (slot == nullptr) {
+        if (txq_count == TXQ_SIZE) {
+            // 队列满：丢最旧的，保留最新状态（临界区外再打日志）
+            txq_head = (txq_head + 1) % TXQ_SIZE;
+            txq_count--;
+            dropped = true;
+        }
+        slot = &txq[(txq_head + txq_count) % TXQ_SIZE];
+        memcpy(slot->key, key, sizeof(key));
+        slot->left = EVENT_RESEND;
+        slot->due_ms = millis();
+        txq_count++;
+    }
+    putText(*slot, text);
+    portEXIT_CRITICAL(&txq_mux);
+
+    if (dropped) {
+        LOGF("[espnow] WARN tx queue full, dropped oldest\n");
+    }
 }
 
 // 状态上报（只更新主控的状态缓存，不触发播报）
@@ -353,6 +519,7 @@ public:
 
     void onReceive(const uint8_t* data, size_t len, bool broadcast) override {
         last_seen_ms = millis();
+        // beacon(广播) 不打印：每 500ms 一条会刷屏，锁定与 info 重报已各有日志
         if (len < 4 || data[0] != '@') {
             return;
         }
@@ -386,6 +553,8 @@ private:
         if (strncmp(body, "do ", 3) != 0) {
             return;   // 其它命令（ping 等）：收到即刷新在线（onReceive 已做）
         }
+        // 下行指令由人工/语音触发、频率极低，回调内直接打印不影响实时性
+        LOGF("[espnow] RX  %s\n", body);
         char cap[16] = {0};
         char action[16] = {0};
 
@@ -442,8 +611,10 @@ static void onNewPeerCb(const esp_now_recv_info_t* info, const uint8_t* data, in
             delete peer;
             peer = nullptr;
             locked = false;   // 登记失败：继续 hop，下一轮 beacon 再试
+            LOGF("[espnow] peer add failed, keep hopping\n");
         } else {
             info_due_ms = millis();   // 锁定成功：立刻上报能力
+            LOGF("[espnow] LOCKED master %s on ch %u\n", fmtMac(info->src_addr), cur_channel);
         }
     }
     last_seen_ms = millis();
@@ -456,23 +627,52 @@ static void hopTick() {
         return;
     }
     last_hop_ms = millis();
-    cur_channel = (cur_channel >= HOP_CHANNEL_MAX) ? HOP_CHANNEL_MIN : (cur_channel + 1);
+    if (cur_channel >= HOP_CHANNEL_MAX) {
+        cur_channel = HOP_CHANNEL_MIN;
+        // 每轮(13*200ms ≈ 2.6s)打一行：现场据此判断"确实在找信道但没收到 beacon"
+        LOGF("[espnow] hopping... (no @beacon yet)\n");
+    } else {
+        cur_channel++;
+    }
     WiFi.setChannel(cur_channel);
 }
 
 // 上行连发（非阻塞：靠时间戳推进，不 delay，避免堵 loop）
 static void evtTick() {
-    if (evt_left <= 0) {
+    char buf[200];
+    int left = 0;
+    bool ready = false;
+
+    // 临界区内只做拷贝与计数推进，真正的发送（可能阻塞）留在临界区外
+    portENTER_CRITICAL(&txq_mux);
+    if (txq_count > 0) {
+        OutMsg& m = txq[txq_head];
+        if (static_cast<int32_t>(millis() - m.due_ms) >= 0) {
+            memcpy(buf, m.text, sizeof(buf));
+            m.left--;
+            left = m.left;
+            if (left <= 0) {
+                txq_head = (txq_head + 1) % TXQ_SIZE;
+                txq_count--;
+            } else {
+                m.due_ms = millis() + kEventResendGapMs;
+            }
+            ready = true;
+        }
+    }
+    portEXIT_CRITICAL(&txq_mux);
+
+    if (!ready) {
         return;
     }
-    if (static_cast<int32_t>(millis() - evt_due_ms) < 0) {
-        return;
+    bool ok = (peer != nullptr) && peer->sendData(buf);
+    // 连发只在首包打印完整报文，重发仅在失败时补一行（同一事件不刷三行）
+    if (left == EVENT_RESEND - 1) {
+        LOGF("[espnow] TX  (%d/%d) %s%s\n", EVENT_RESEND - left, EVENT_RESEND, buf,
+             ok ? "" : "  <== SEND FAILED");
+    } else if (!ok) {
+        LOGF("[espnow] TX  (%d/%d) SEND FAILED\n", EVENT_RESEND - left, EVENT_RESEND);
     }
-    if (peer != nullptr) {
-        peer->sendData(evt_buf);
-    }
-    evt_left--;
-    evt_due_ms = millis() + kEventResendGapMs;
 }
 
 // 能力重报（收到 beacon 后）
@@ -486,7 +686,7 @@ static void infoTick() {
 
 // ============================== 传感器 ==============================
 
-#if NODE_ID == 1
+#if NODE_ID == 1 || NODE_ID == 3
 static void sonarTick() {
     if (millis() - sonar_ms < SONAR_PERIOD_MS) {
         return;
@@ -500,9 +700,21 @@ static void sonarTick() {
     digitalWrite(PIN_SONAR_TRIG, LOW);
     unsigned long us = pulseIn(PIN_SONAR_ECHO, HIGH, SONAR_TIMEOUT_US);
     if (us == 0) {
-        return;   // 超时/无回波：保持上次状态，不误报
+        // 超时/无回波：保持上次状态，不误报；日志限频 2 秒，避免每 100ms 刷屏
+        if (sonar_timeout_log_ms == 0 || millis() - sonar_timeout_log_ms >= 2000) {
+            sonar_timeout_log_ms = millis();
+            LOGF("[sonar] no echo (timeout), keep last state\n");
+        }
+        return;
     }
     int cm = static_cast<int>(us / 58);
+
+    // 读数日志（限频 2 秒）：不打印的话，现场"看不到超声波信息"无法区分
+    // “确实没测到”与“测到了只是没打印”。
+    if (sonar_ok_log_ms == 0 || millis() - sonar_ok_log_ms >= 2000) {
+        sonar_ok_log_ms = millis();
+        LOGF("[sonar] dist %d cm (motion=%d)\n", cm, motion_active ? 1 : 0);
+    }
 
     // 距离上报降频：变化达标或到保活周期才发（每 100ms 全发会占满 2.4G）
     if (last_dist < 0 || abs(cm - last_dist) >= DIST_REPORT_DELTA_CM ||
@@ -517,9 +729,14 @@ static void sonarTick() {
     // 人体靠近：迟滞判定，只在"进入"边沿动作一次。
     // “人来自动开灯”这个策略属于节点自己的业务逻辑（主控不知道也不关心）：
     // 节点自己开灯 + 上报状态 + 请求播报。换成“人来自动开风扇”也只改这里。
-    // 人离开只复位标志与状态，**不自动关灯**（避免干扰用户刚用语音开的灯）。
+    // 人离开后按 MOTION_AUTO_OFF_MS 自动关灯，但**只关自动开的**：
+    // 用户语音开的灯（或又调了颜色的灯）已经交回人工，不再自动动它。
     if (!motion_active && cm < MOTION_TRIGGER_CM) {
         motion_active = true;
+        if (!light_on) {
+            auto_lit = true;   // 只接管“本来就是灭的”灯；用户自己开的灯不标记
+        }
+        auto_off_due_ms = 0;   // 又有人了：取消排队中的自动关灯
         light_on = 1;
         applyLight();
         queueEvt("motion", "1");
@@ -527,9 +744,25 @@ static void sonarTick() {
     } else if (motion_active && cm > MOTION_RELEASE_CM) {
         motion_active = false;
         queueEvt("motion", "0");
+        if (MOTION_AUTO_OFF_MS > 0 && auto_lit) {
+            auto_off_due_ms = millis() + MOTION_AUTO_OFF_MS;
+            LOGF("[motion] released, auto-off in %d ms\n", MOTION_AUTO_OFF_MS);
+        }
+    }
+
+    // 自动关灯到点：只关“自动开的”那盏；用户接管过的灯不动
+    if (MOTION_AUTO_OFF_MS > 0 && auto_off_due_ms != 0 &&
+        static_cast<int32_t>(millis() - auto_off_due_ms) >= 0) {
+        auto_off_due_ms = 0;
+        if (auto_lit) {
+            auto_lit = false;
+            light_on = 0;
+            applyLight();
+            LOGF("[motion] auto off (nobody for %d ms)\n", MOTION_AUTO_OFF_MS);
+        }
     }
 }
-#else
+#elif NODE_ID == 2 || NODE_ID == 3
 static DHT* dht = nullptr;
 
 static void dhtTick() {
@@ -560,6 +793,8 @@ static void dhtTick() {
         }
         delay(120);   // DHT11 两次读取需间隔；仅失败路径有这点延迟
     }
+    LOGF("[dht] read failed after %d retries (last ok: %d C %d %%)\n", DHT_RETRY, last_temp,
+         last_hum);
     queueEvt("err", "dht");
 }
 
@@ -587,16 +822,37 @@ static void laserTick() {
 // ============================== Arduino ==============================
 
 void setup() {
-    // 1) 灯（仅客厅节点有 RGB；玄关节点接了也无害）
+    // 0) 串口日志（不加 while(!Serial)：未接 USB 时不能卡住启动）
+#if NODE_LOG
+    Serial.begin(LOG_BAUD);
+#endif
+    LOGF("\n[espnow] ==== node %d boot ====\n", NODE_ID);
+    LOGF("[espnow] chip=%s heap=%u name=%s caps=%d\n", ESP.getChipModel(),
+         (unsigned)ESP.getFreeHeap(), node_def->name, node_def->cap_count);
+
+    // 1) 传感器与灯：只初始化本节点真正接了的硬件。
+    //    （原先 RGB 的三个 ledcAttach 是无条件执行的，会把玄关节点的 DHT11/激光脚
+    //     （GPIO4/5）一并配成 LEDC 输出 —— 玄关节点没有 RGB，必须按条件跳过。）
+#if NODE_ID == 1 || NODE_ID == 3
     ledcAttach(PIN_RGB_R, RGB_PWM_FREQ, RGB_PWM_BITS);
     ledcAttach(PIN_RGB_G, RGB_PWM_FREQ, RGB_PWM_BITS);
     ledcAttach(PIN_RGB_B, RGB_PWM_FREQ, RGB_PWM_BITS);
     applyLight();
+    // 开局打印实际占空比：共阳模块在“关灯”时 duty=255（引脚高电平，与 + 同电位 = 灭）。
+    // 若日志显 255 而灯仍亮，就是接线/极性反了（+ 接到了 GND，或模块其实是共阴），
+    // 不是程序问题 —— 别再改代码了。
+    LOGF("[led] init on=%d bright=%d rgb=%d,%d,%d anode=%d -> duty %u/%u/%u\n", light_on,
+         light_bright, light_r, light_g, light_b, RGB_COMMON_ANODE,
+         (unsigned)ledcRead(PIN_RGB_R), (unsigned)ledcRead(PIN_RGB_G),
+         (unsigned)ledcRead(PIN_RGB_B));
+#endif
 
-#if NODE_ID == 1
+#if NODE_ID == 1 || NODE_ID == 3
     pinMode(PIN_SONAR_TRIG, OUTPUT);
     pinMode(PIN_SONAR_ECHO, INPUT);
-#else
+#endif
+
+#if NODE_ID == 2 || NODE_ID == 3
     pinMode(PIN_LASER, INPUT);
     dht = new DHT(PIN_DHT, DHT11);
     dht->begin();
@@ -609,8 +865,11 @@ void setup() {
     while (!WiFi.STA.started()) {
         delay(10);
     }
+    LOGF("[espnow] mac=%s hop ch %d..%d (pmk/lmk 必须与主控一致)\n", WiFi.macAddress().c_str(),
+         HOP_CHANNEL_MIN, HOP_CHANNEL_MAX);
 
     if (!ESP_NOW.begin(kPmk)) {    // 官方 ESP_NOW 类（核心自带）
+        LOGF("[espnow] ESP_NOW.begin failed, restart\n");
         delay(1000);
         ESP.restart();
     }
@@ -626,14 +885,17 @@ void loop() {
         locked = false;
         delete peer;
         peer = nullptr;
+        LOGF("[espnow] lost master (%lu ms no packet), back to hop\n",
+             (unsigned long)(millis() - last_seen_ms));
     }
 
     evtTick();
     infoTick();
 
-#if NODE_ID == 1
+#if NODE_ID == 1 || NODE_ID == 3
     sonarTick();
-#else
+#endif
+#if NODE_ID == 2 || NODE_ID == 3
     dhtTick();
     laserTick();
 #endif
