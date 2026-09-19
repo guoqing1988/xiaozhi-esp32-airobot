@@ -311,7 +311,9 @@ arduino-cli monitor -p COM11 -c baudrate=115200   # 看日志（波特率 = #def
 | `[sonar] no echo (timeout), keep last state` | 超声波无回波（限频 2 秒）：查接线/供电（3.3V） |
 | `[motion] released, auto-off in 30000 ms` | 人走开，开始自动关灯倒计时 |
 | `[motion] auto off (nobody for 30000 ms)` | 到点自动关灯（只关“人来到自动开的”那盏） |
+| `[dht] 26 C 55 %` | DHT11 读数（5 秒一行） |
 | `[dht] read failed after 3 retries (last ok: …)` | DHT11 读取失败（同时会 `evt err dht`） |
+| `[laser] blocked (DO=1)` / `[laser] clear (DO=0)` | 激光状态**变化**时一行（上电后第一次读到也会打，用来确认模块在工作） |
 
 > 按现象怎么定位，见文末「排错」表（每行都注明了该看哪一行日志）。
 

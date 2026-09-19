@@ -27,7 +27,7 @@
 // ============================ 现场可调参数 ============================
 // 注意：这些宏必须在下面的 #if 之前定义（预处理按顺序求值）。
 
-#define NODE_ID 1                    // 1=客厅灯(RGB+超声波) 2=玄关感应(DHT11+激光) 3=融合节点(四件套)
+#define NODE_ID 3                    // 1=客厅灯(RGB+超声波) 2=玄关感应(DHT11+激光) 3=融合节点(四件套)
 #define HOP_INTERVAL_MS 200          // 未锁定信道时的换信道间隔
 #define LOST_TIMEOUT_MS 5000         // 锁定后多久收不到主控包就回到 hop
 #define HOP_CHANNEL_MIN 1
@@ -778,6 +778,7 @@ static void dhtTick() {
             int hi = static_cast<int>(h + 0.5f);
             last_temp = ti;
             last_hum = hi;
+            LOGF("[dht] %d C %d %%\n", ti, hi);
             char arg[16];
             snprintf(arg, sizeof(arg), "%d %d", ti, hi);
             queueEvt("temp", arg);
@@ -812,6 +813,8 @@ static void laserTick() {
         return;   // 两次读数不一致：当作抖动，丢弃
     }
     last_beam = v;
+    // 只在状态变化时打印（采样周期 50ms，不能每次都打）；上电后第一次读到也会打一行
+    LOGF("[laser] %s (DO=%d)\n", v ? "blocked" : "clear", v);
     queueEvt("beam", v ? "1" : "0");
     if (v == 1) {
         queueSay("beam");   // 只有"被挡住"这个边沿才播报
