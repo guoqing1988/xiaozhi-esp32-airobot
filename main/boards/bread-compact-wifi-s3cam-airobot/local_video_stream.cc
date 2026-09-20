@@ -10,6 +10,7 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <lwip/sockets.h>
 
 #include "esp_camera.h"
 
@@ -22,8 +23,12 @@ namespace {
 constexpr int kStreamPort = 81;
 constexpr int kStreamCtrlPort = 32769;
 
-// 目标帧率上限：实时视频与 ESP-NOW 共用同一个 2.4G 射频，限帧=限空口占用，保住节点控制的实时性。
-constexpr int kTargetFps = 12;
+// 目标帧率上限。
+// 用途是「网页遥控机器人走位」（第一视角），延时/流畅度第一；
+// 实测场景下开视频时不会同时做家里的 ESP-NOW 节点控制（用户确认），
+// 所以不需要为节点控制留空口，可以拿高帧率换观感。
+// 实际上限还受 OV2640 出帧能力约束（VGA JPEG 约 15~20fps），够不着就在这里体现为实测帧率。
+constexpr int kTargetFps = 20;
 
 // 官方 multipart 流的分隔与头部（照 esp32-camera README 的样例，社区事实标准）
 constexpr char kStreamContentType[] = "multipart/x-mixed-replace;boundary="
@@ -72,6 +77,13 @@ esp_err_t StreamLoop(httpd_req_t *req) {
     if (res != ESP_OK) {
         return res;
     }
+    // 低延时的硬要求：禁用 Nagle。否则内核会“攒够一个 MSS 才发”，每帧白等几十毫秒。
+    // （摇杆指令也一样受益：小包不再被视频大包拖在发送缓冲里。）
+    const int fd = httpd_req_to_sockfd(req);
+    if (fd >= 0) {
+        int nodelay = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    }
     // 长连接必须禁止缓存与中间缓冲，否则浏览器攒够一大块才渲染（延时飙升、看着像卡顿）
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "Pragma", "no-cache");
@@ -116,6 +128,7 @@ esp_err_t StreamLoop(httpd_req_t *req) {
         }
 
         // 限帧：追上就等到下一帧时间点，落后了则重置基准（不补帧，避免延时累积）
+        // 注意这里**不补帧**：宁可少一帧，也不让队列堆积把延时拖上去（遥控场景最忌延迟持续增长）。
         next_frame_us += frame_interval_us;
         const int64_t now = esp_timer_get_time();
         if (next_frame_us > now) {

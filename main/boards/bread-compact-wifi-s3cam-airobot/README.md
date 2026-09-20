@@ -518,7 +518,15 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
   - 切模式靠 `Esp32Camera::Reinit(config)`（新加的纯增量方法，其它板不受影响），配置由板级 `MakeCameraConfig(format)` 统一生成（引脚/分辨率/质量只写一处）。
   - **失败必回退**：切 JPEG 失败或服务起不来，都会立刻切回 RGB565，不会把相机丢在“未初始化”状态；切换后重新套用用户 NVS 里的翻转设置。
 - **帧率/分辨率角标**：浏览器对 MJPEG `<img>` 不暴露逐帧事件、拿不到帧率 → 由**设备侧统计**（滚动 1 秒窗口）经**已有 WebSocket** 每秒推一次 `{"video":1,"fps":…,"w":…,"h":…}`，前端更新角标；停止时推 `{"video":0}` 收回角标。
-- **限帧 12fps**：视频与 ESP-NOW 节点控制**共用同一个 2.4G 射频**，限帧=限空口占用（`local_video_stream.cc` 的 `kTargetFps`）。
+- **帧率 20fps + 低延时三件套（FPV 遥控用途）**：这条功能的实际用途是**网页遥控机器人走位**（第一视角），
+  **延时优先**；实测场景里开视频时不会同时做家里的 ESP-NOW 控制，所以不必为节点控制留空口。为此做了：
+  1. 帧率上限 20fps（`local_video_stream.cc` 的 `kTargetFps`）。实际还受 OV2640 出帧能力限制（VGA JPEG 约 15~20fps），看画面角标即可。
+  2. **禁用 Nagle**（`TCP_NODELAY`）：否则内核要攒够一个 MSS 才发，每帧白等几十毫秒；摇杆小包也不再被视频大帧拖在发送缓冲里。
+  3. 取帧用 `CAMERA_GRAB_LATEST`，且**落后了不补帧**——宁可丢一帧，也不让队列堆积把延时越拖越长（遥控最忌延迟持续增长）。
+- **与 ESP-NOW 节点控制的关系**：两者共用同一个 2.4G 射频，开视频时节点指令会被大帧排队拖慢。
+  若确实要同时用（一边看视频一边管家里的节点），把 `kTargetFps` 调低（如 12）给节点控制让出空口。
+- **想再降延时**：把 `MakeCameraConfig()` 的 `jpeg_quality`（当前 12，质量高、单帧大）调大，
+  或把 `frame_size` 降到 `FRAMESIZE_QVGA`（320×240）——单帧越小，传输越快，延时越低（代价是清晰度）。
 - **同时只服务一个观众**：本板 `fb_count=1`（帧池只有一块），第二个连接直接返回 `503`。
 - **关页面自动停流**：WS 客户端归零（关页面/断网）时板级自动 `VideoStreamStop()`，避免相机一直留在 JPEG 模式导致拍照没预览。
 - **接口**：WS action `{"action":"video_start"}` / `{"action":"video_stop"}`；流地址 `GET http://<设备IP>:81/stream`。

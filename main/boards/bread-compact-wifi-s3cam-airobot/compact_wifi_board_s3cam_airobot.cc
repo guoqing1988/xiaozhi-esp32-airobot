@@ -207,9 +207,13 @@ private:
     // 构造相机配置。format 决定像素格式：
     //   平时 PIXFORMAT_RGB565 —— 软件编码 JPEG 供网页拍照/AI 识别，且能在 LCD 上预览；
     //   视频流期间 PIXFORMAT_JPEG —— 模组自带 JPEG 编码，驱动直接回 JPEG 帧，
-    //   推送时零编码零拷贝（官方 README 也指出 JPEG 模式帧率更好）。
+    //                              推送时零编码零拷贝（官方 README 也指出 JPEG 模式帧率更好）。
+    // grab 决定取帧策略：
+    //   照片/预览用 CAMERA_GRAB_WHEN_EMPTY（等一帧新的，画面完整）；
+    //   实时视频用 CAMERA_GRAB_LATEST（总是拿最新帧，宁可丢旧帧也不排队 —— 遥控要的是低延时）。
     // 引脚/分辨率/质量与 format 无关，故抽成一个函数；切换模式时复用它避免两处不一致。
-    static camera_config_t MakeCameraConfig(pixformat_t format) {
+    static camera_config_t MakeCameraConfig(
+        pixformat_t format, camera_grab_mode_t grab = CAMERA_GRAB_WHEN_EMPTY) {
         camera_config_t config = {};
         config.pin_d0 = CAMERA_PIN_D0;
         config.pin_d1 = CAMERA_PIN_D1;
@@ -236,7 +240,7 @@ private:
         // （见 esp32_camera.h 里 EncodeCurrentFrameToJpeg 的说明）。
         config.fb_count = 1;
         config.fb_location = CAMERA_FB_IN_PSRAM;
-        config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+        config.grab_mode = grab;
         return config;
     }
 
@@ -1188,7 +1192,7 @@ private:
         if (camera_ == nullptr) {
             return "{\"ok\":false,\"error\":\"相机不可用\"}";
         }
-        if (!camera_->Reinit(MakeCameraConfig(PIXFORMAT_JPEG))) {
+        if (!camera_->Reinit(MakeCameraConfig(PIXFORMAT_JPEG, CAMERA_GRAB_LATEST))) {
             // 切不过去不能把相机丢在未初始化状态：立刻退回原配置
             camera_->Reinit(MakeCameraConfig(PIXFORMAT_RGB565));
             ApplyCameraFlip();

@@ -139,6 +139,23 @@ class TestStreamServer(_Base):
         self.assertIn("VideoStatCallback", self.video)
         self.assertIn("esp_timer_get_time()", self.video)
 
+    def test_low_latency_tuning(self):
+        """用途是 FPV 遥控（第一视角），延时优先：三处优化别被改回去。
+
+        1. 帧率不能像“与 ESP-NOW 共存”时那样压到 12（太顿）
+        2. 必须禁用 Nagle，否则每帧白等几十毫秒
+        3. 取帧必须是“只要最新帧”，否则旧帧排队会把延时越拖越长
+        """
+        m = re.search(r"constexpr int kTargetFps = (\d+);", self.video)
+        self.assertIsNotNone(m, "找不到 kTargetFps")
+        self.assertGreaterEqual(int(m.group(1)), 15, "遥控用途帧率不应低于 15fps")
+        self.assertIn("TCP_NODELAY", self.video, "禁用 Nagle 是低延时的硬要求")
+        self.assertIn("CAMERA_GRAB_LATEST", self.board, "视频取帧要用“只要最新帧”")
+
+    def test_send_timeout_is_bounded(self):
+        """慢客户端不能把发送任务永久占住（否则整个流卡死）。"""
+        self.assertIn("cfg.send_wait_timeout", self.video)
+
 
 class TestCameraModeSwitch(_Base):
     """按需切换：开视频才 JPEG，停了必须切回 RGB565（保住拍照的 LCD 预览）。"""
@@ -149,7 +166,8 @@ class TestCameraModeSwitch(_Base):
     def test_start_switches_to_jpeg(self):
         m = re.search(r"std::string VideoStreamStart\(\)\s*\{(.*?)\n    \}", self.board, re.S)
         self.assertIsNotNone(m, "找不到 VideoStreamStart")
-        self.assertIn("MakeCameraConfig(PIXFORMAT_JPEG)", m.group(1))
+        self.assertIn("MakeCameraConfig(PIXFORMAT_JPEG, CAMERA_GRAB_LATEST)", m.group(1),
+                      "视频模式取帧要用“只要最新帧”，否则旧帧排队把延时拖上去")
 
     def test_stop_restores_rgb565(self):
         """最关键的一条：停流必须切回 RGB565，否则拍照没有 LCD 预览。"""
