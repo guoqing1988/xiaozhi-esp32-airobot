@@ -296,26 +296,42 @@ class TestCameraModeSwitch(_Base):
         """尺寸/质量要真的传进相机配置（否则弹窗改了也不生效）。"""
         m = re.search(r"std::string VideoStreamStart\(\)\s*\{(.*?)\n    \}", self.board, re.S)
         body = m.group(1)
-        self.assertIn("VideoFrameSizeOf(video_cfg_.size)", body)
-        self.assertIn("video_cfg_.quality", body)
+        self.assertIn("kVideoMaxFrameSize", body, "开流要按最大档分配帧缓冲")
+        self.assertIn("video_cfg_.quality", body, "质量要传进相机配置")
+        self.assertIn("ApplyVideoFramesize()", body, "再切到用户实际选的分辨率")
 
-    def test_quality_change_does_not_reinit_camera(self):
-        """改质量不该重启相机（不白闪 0.3 秒）。
+    def test_all_params_apply_without_reinit(self):
+        """四项参数都不该重启相机（分辨率也走 set_framesize 动态切，不白闪 0.3 秒）。
 
         依据驱动源码：
-          - cam_hal.c cam_config()：fb_size = width × height × 2  → 跟分辨率走，与质量无关
-          - ov2640.c set_quality()：仅 write_reg(sensor, BANK_DSP, QS, quality)
-        所以质量能运行时动态改，只有分辨率变了才必须 deinit + init。
+          - cam_hal.c:588  fb_size = 宽×高/5，按「初始化时」的分辨率算
+          - ll_cam.c:478   JPEG 模式 DMA 缓冲固定 32KB，与分辨率无关
+          - ov2640.c:211   set_framesize 只写 sensor 寄存器
+          - ov2640.c:334   set_quality  只写 sensor 寄存器
+        所以开流时按最大档初始化，之后切分辨率/质量都不用重启。
         """
         m = re.search(r"std::string VideoCfgApply\(int size, int fps, int quality, int flip\)\s*\{(.*?)\n    \}",
                       self.board, re.S)
         self.assertIsNotNone(m, "找不到带 flip 的 VideoCfgApply")
         body = m.group(1)
-        self.assertIn("const bool size_changed", body, "重建条件只看尺寸")
+        self.assertIn("const bool size_changed", body)
         self.assertNotIn("quality != video_cfg_.quality) ||", body, "质量不能进重建条件")
         self.assertIn("set_quality", body, "质量要动态写进 sensor")
-        self.assertIn("if (!size_changed || !LocalVideoStreamRunning())", body,
-                      "只有尺寸变化才重启流")
+        self.assertIn("ApplyVideoFramesize()", body, "分辨率要动态切 sensor")
+        self.assertNotIn("VideoStreamStop()", body, "VideoCfgApply 里不该再重启流")
+
+    def test_framesize_inited_at_max_then_switched_dynamically(self):
+        """开流按最大分辨率初始化帧缓冲，再 set_framesize 切到用户选的档。
+
+        反例（坑）：按当前分辨率初始化再往大改 → cam_hal 的 FB-OVF + ll_cam_stop() 停摆。
+        """
+        m = re.search(r"static constexpr framesize_t kVideoMaxFrameSize = (FRAMESIZE_\w+)", self.board)
+        self.assertIsNotNone(m, "找不到 kVideoMaxFrameSize")
+        self.assertEqual(m.group(1), "FRAMESIZE_SVGA", "最大档必须 = 选项里的 800×600")
+        af = re.search(r"void ApplyVideoFramesize\(\)\s*\{(.*?)\n    \}", self.board, re.S)
+        self.assertIsNotNone(af, "找不到 ApplyVideoFramesize")
+        self.assertIn("set_framesize", af.group(1), "动态切分辨率只能靠 sensor")
+        self.assertIn("VideoFrameSizeOf(video_cfg_.size)", af.group(1))
 
     def test_flip_shares_nvs_with_ai_tool(self):
         """镜像/翻转要复用 AI 工具那份 NVS（camera/flip），否则两套配置会打架。"""

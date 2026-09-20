@@ -1200,11 +1200,28 @@ private:
     };
     VideoCfg video_cfg_;
 
+    // 视频模式固定的初始化分辨率（取最大档）：
+    // JPEG 模式下 DMA 缓冲是固定 32KB（ll_cam.c:478，与分辨率无关），
+    // 但帧缓冲 fb_size = 宽 × 高 / 5 是按「初始化时的分辨率」算的（cam_hal.c:588）。
+    // 所以按最大档初始化（SVGA 800×600 → 94KB PSRAM），运行时就能用 sensor 的
+    // set_framesize 在 [QVGA..SVGA] 里随便切，而不用重启相机。
+    // 反例：按当前分辨率初始化再往大改 → cam_hal 的 FB-OVF 检查会 ll_cam_stop() 停摆。
+    // 必须 >= VideoFrameSizeOf(2)。
+    static constexpr framesize_t kVideoMaxFrameSize = FRAMESIZE_SVGA;
+
     static framesize_t VideoFrameSizeOf(int size) {
         switch (size) {
             case 0: return FRAMESIZE_QVGA;  // 320×240
             case 2: return FRAMESIZE_SVGA;  // 800×600
             default: return FRAMESIZE_VGA;  // 640×480
+        }
+    }
+
+    // 动态切换视频分辨率：只写 sensor 寄存器，不重启相机、不断流（下一帧生效）。
+    // 前提是目标分辨率不超过初始化时的 kVideoMaxFrameSize（否则帧缓冲装不下）。
+    void ApplyVideoFramesize() {
+        if (sensor_t *s = esp_camera_sensor_get()) {
+            s->set_framesize(s, VideoFrameSizeOf(video_cfg_.size));
         }
     }
 
@@ -1279,16 +1296,10 @@ private:
                 s->set_quality(s, video_cfg_.quality);
             }
         }
-        // 只有画面尺寸要重建：帧缓冲大小是 cam_config() 在 init 时按分辨率算死的
-        // （cam_hal.c：fb_size = width × height × 2，RGB565 640×480 = 600KB），
-        // 运行时换尺寸会对不上，必须 deinit + init（约 300ms，画面闪一下）。
-        if (!size_changed || !LocalVideoStreamRunning()) {
-            return VideoCfgJson();
-        }
-        VideoStreamStop();
-        const std::string start = VideoStreamStart();  // 用新参数重新切 JPEG + 起流
-        if (start.find("\"ok\":true") == std::string::npos) {
-            return start;  // 起不来就把错误原样告诉页面
+        // 画面尺寸也走动态切换：帧缓冲按 kVideoMaxFrameSize 分配好了，
+        // 只要不超过它就能用 sensor 的 set_framesize 直接换 → 不重启相机、不断流。
+        if (size_changed && LocalVideoStreamRunning()) {
+            ApplyVideoFramesize();
         }
         return VideoCfgJson();
     }
@@ -1304,14 +1315,15 @@ private:
             return "{\"ok\":false,\"error\":\"相机不可用\"}";
         }
         if (!camera_->Reinit(MakeCameraConfig(PIXFORMAT_JPEG, CAMERA_GRAB_LATEST,
-                                             VideoFrameSizeOf(video_cfg_.size),
+                                             kVideoMaxFrameSize,   // 按最大档分配帧缓冲
                                              video_cfg_.quality))) {
             // 切不过去不能把相机丢在未初始化状态：立刻退回原配置
             camera_->Reinit(MakeCameraConfig(PIXFORMAT_RGB565));
             ApplyCameraFlip();
             return "{\"ok\":false,\"error\":\"相机切换 JPEG 模式失败\"}";
         }
-        ApplyCameraFlip();  // Reinit 只套 Kconfig 默认翻转，用户 NVS 里存的设置要重新生效
+        ApplyCameraFlip();     // Reinit 只套 Kconfig 默认翻转，用户 NVS 里存的设置要重新生效
+        ApplyVideoFramesize(); // 再切到用户实际选的分辨率（只写寄存器，不重启）
         // 视频流对延时敏感：待机态 WIFI_PS_MAX_MODEM 会让帧等 DTIM beacon（几百毫秒）
         SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         if (!LocalVideoStreamStart([this](float fps, int w, int h) {
