@@ -299,6 +299,24 @@ class TestCameraModeSwitch(_Base):
         self.assertIn("VideoFrameSizeOf(video_cfg_.size)", body)
         self.assertIn("video_cfg_.quality", body)
 
+    def test_quality_change_does_not_reinit_camera(self):
+        """改质量不该重启相机（不白闪 0.3 秒）。
+
+        依据驱动源码：
+          - cam_hal.c cam_config()：fb_size = width × height × 2  → 跟分辨率走，与质量无关
+          - ov2640.c set_quality()：仅 write_reg(sensor, BANK_DSP, QS, quality)
+        所以质量能运行时动态改，只有分辨率变了才必须 deinit + init。
+        """
+        m = re.search(r"std::string VideoCfgApply\(int size, int fps, int quality, int flip\)\s*\{(.*?)\n    \}",
+                      self.board, re.S)
+        self.assertIsNotNone(m, "找不到带 flip 的 VideoCfgApply")
+        body = m.group(1)
+        self.assertIn("const bool size_changed", body, "重建条件只看尺寸")
+        self.assertNotIn("quality != video_cfg_.quality) ||", body, "质量不能进重建条件")
+        self.assertIn("set_quality", body, "质量要动态写进 sensor")
+        self.assertIn("if (!size_changed || !LocalVideoStreamRunning())", body,
+                      "只有尺寸变化才重启流")
+
     def test_flip_shares_nvs_with_ai_tool(self):
         """镜像/翻转要复用 AI 工具那份 NVS（camera/flip），否则两套配置会打架。"""
         m = re.search(r"void SetCameraFlip\(int mode\)\s*\{(.*?)\n    \}", self.board, re.S)

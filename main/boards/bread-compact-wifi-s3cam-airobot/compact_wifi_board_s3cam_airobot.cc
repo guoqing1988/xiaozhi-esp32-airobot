@@ -1192,7 +1192,7 @@ private:
     // size   ：画面尺寸（0=320×240 更流畅 / 1=640×480 默认 / 2=800×600 更清晰）
     // fps    ：帧率上限（改完下一帧立即生效，不用重启流）
     // quality：JPEG 质量（数字越大越糊、单帧越小、延时越低；10≈清晰 20≈标准 30≈省流）
-    // 改尺寸/质量需要重 init 相机（约 300ms，画面闪一下），所以网页保存时会顺带重启流。
+    // 改尺寸需要重 init 相机（约 300ms，画面闪一下）；质量只写 sensor 寄存器，立即生效。
     struct VideoCfg {
         int size = 1;
         int fps = 20;
@@ -1260,10 +1260,11 @@ private:
                ",\"flip\":" + std::to_string(GetCameraFlip()) + "}";
     }
 
-    // 网页保存参数：帧率/镜像立即生效；尺寸/质量需要重 init 相机，
+    // 网页保存参数：帧率/镜像/JPEG 质量都立即生效；只有画面尺寸需要重建相机，
     // 正在播时顺带重启流（前端拿到 ok 后重连 <img>）。
     std::string VideoCfgApply(int size, int fps, int quality, int flip) {
-        const bool need_reinit = (size != video_cfg_.size) || (quality != video_cfg_.quality);
+        const bool size_changed = (size != video_cfg_.size);
+        const bool quality_changed = (quality != video_cfg_.quality);
         video_cfg_.size = size;
         video_cfg_.fps = fps;
         video_cfg_.quality = quality;
@@ -1271,7 +1272,17 @@ private:
         SaveVideoCfg();
         LocalVideoStreamSetFps(video_cfg_.fps);  // 帧率不用重启就生效
         SetCameraFlip(flip);                    // 镜像/翻转同样立即生效（与是否在播无关）
-        if (!need_reinit || !LocalVideoStreamRunning()) {
+        // JPEG 质量只写 sensor 寄存器（ov2640.c 的 set_quality 就一行 write_reg），
+        // 不参与帧缓冲分配 → 推流中改也不用重启相机，下一帧就是新画质。
+        if (quality_changed && LocalVideoStreamRunning()) {
+            if (sensor_t *s = esp_camera_sensor_get()) {
+                s->set_quality(s, video_cfg_.quality);
+            }
+        }
+        // 只有画面尺寸要重建：帧缓冲大小是 cam_config() 在 init 时按分辨率算死的
+        // （cam_hal.c：fb_size = width × height × 2，RGB565 640×480 = 600KB），
+        // 运行时换尺寸会对不上，必须 deinit + init（约 300ms，画面闪一下）。
+        if (!size_changed || !LocalVideoStreamRunning()) {
             return VideoCfgJson();
         }
         VideoStreamStop();
