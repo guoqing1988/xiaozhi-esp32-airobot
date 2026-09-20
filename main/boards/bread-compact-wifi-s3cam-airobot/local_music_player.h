@@ -52,6 +52,9 @@ private:
     std::atomic<bool> playing_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> stop_requested_{false};
+    // 当前这轮播的是"传感器播报"（非歌曲）：播报短（2~3 秒），
+    // 不能被 Idle->Connecting 的网络重连误判抢断（见 PlayOneSong 的打断判据）。
+    std::atomic<bool> announce_mode_{false};
     std::string pending_song_;                    // 指定要播的歌曲(下一首优先)
     std::string pending_path_;                    // 指定要播的绝对路径(播报用, 优先于 pending_song_)
     std::vector<std::string> play_queue_;         // 本次播放队列(顺序=字典序 / 随机=洗牌)

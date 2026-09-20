@@ -27,6 +27,7 @@
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_system.h>
+#include <dirent.h>
 #include <esp_timer.h>
 #include <driver/i2c_master.h>
 #include <driver/sdmmc_host.h>
@@ -127,8 +128,18 @@ private:
     esp_timer_handle_t espnow_wait_timer_ = nullptr;
     int espnow_wait_ticks_ = 0;  // 轮询次数（日志里能看到，用来确认轮询真的在跑）
     int espnow_wait_logs_ = 0;   // 已经打过的等待日志条数（只打前几条，避免刷屏）
-    int64_t home_announce_ms_[EspNowHome::kMaxNodes + 1] = {0};  // 同节点播报冷却
-    static constexpr int64_t kAnnounceCooldownMs = 10000;        // 播报冷却窗口
+    // 播报冷却按 (节点, 音频名) 两个维度：融合节点同时触发 motion/beam 时，
+    // 只按节点冷却会让它们互相压制（现场表现为"播报时有时无"）。
+    struct AnnounceCool {
+        bool used = false;
+        int node_id = 0;
+        char name[16] = {0};
+        int64_t ts_ms = 0;
+    };
+    static constexpr int kAnnounceCoolSlots = 8;
+    AnnounceCool announce_cool_[kAnnounceCoolSlots];
+    int announce_cool_pos_ = 0;
+    static constexpr int64_t kAnnounceCooldownMs = 10000;        // 播报冷却窗口（同节点同音频）
 
     // ---- 待机全屏大时钟（AI 可控: self.clock.set(开关+主题合一) / self.clock.current, NVS 持久化）----
     bool clock_mode_ = false;                // 时钟显示开关
@@ -1138,11 +1149,55 @@ private:
 
     // ---- ESP-NOW 居家节点 ----
 
-    // 事件播报：仅待机时播（不打断对话），同节点 10 秒冷却
+    // 事件播报：仅待机时播（不打断对话），同节点同音频 10 秒冷却
+    // （冷却按 (节点, 音频名)：融合节点四路传感器同时命中时不得互相压制）
+    // 把 /sdcard/announce 里实际有哪些文件打出来：排查“文件到底传到哪了 / 名字对不对”
+    // 最直接的一行（走 ESP-NOW TAG，已单独放开到 INFO，网页日志一定能看到）。
+    void LogAnnounceDir() {
+        DIR* dir = opendir("/sdcard/announce");
+        if (dir == nullptr) {
+            ESP_LOGE(TAG_ESPNOW, "提示音目录 /sdcard/announce 打不开(没插卡? 目录不存在?)");
+            return;
+        }
+        // 固定缓冲拼文件名：这里刻意不用 std::string —— 报错路径（没插卡 / 文件名异常）
+        // 往往正是内存紧张的时候，绝不在这个时机做堆分配。
+        char names[8 * 32 + 1] = {0};
+        size_t used = 0;
+        int count = 0;
+        struct dirent* e = nullptr;
+        while ((e = readdir(dir)) != nullptr) {
+            if (e->d_name[0] == '.') {
+                continue;  // 跳过 . 与 ..
+            }
+            if (count < 8) {
+                size_t need = strlen(e->d_name);
+                if (used + need + 1 < sizeof(names)) {
+                    memcpy(names + used, e->d_name, need);
+                    used += need;
+                    names[used++] = ' ';
+                    names[used] = '\0';
+                }
+            }
+            count++;
+        }
+        closedir(dir);
+        ESP_LOGE(TAG_ESPNOW, "提示音目录 /sdcard/announce: %d 个文件 %s", count,
+                 (names[0] == '\0') ? "(空)" : names);
+    }
+
     void Announce(int node_id, const char* name) {
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
-        if (!music_player_ || node_id < 1 || node_id > EspNowHome::kMaxNodes) {
-            ESP_LOGW(TAG_ESPNOW, "播报跳过: 播放器未就绪或节点号非法 (node=%d)", node_id);
+        if (node_id < 1 || node_id > EspNowHome::kMaxNodes) {
+            ESP_LOGE(TAG_ESPNOW, "播报跳过: 节点号非法 (node=%d)", node_id);
+            return;
+        }
+        // 必须走 GetMusicPlayer() 懒创建：music_player_ 原本只在“放过歌 / 闹钟响过 /
+        // 网页上传过文件”之后才被创建。用户插卡拷好提示音、开机直接挥手触发时，
+        // 这里 music_player_ 还是 nullptr → 播报被静默跳过（而且日志是 WARN，
+        // 网页日志默认级别是 ERROR，用户什么都看不到）→ 现象就是“从来没播报过、也没日志”。
+        LocalMusicPlayer* player = GetMusicPlayer();
+        if (player == nullptr) {
+            ESP_LOGE(TAG_ESPNOW, "播报跳过: 播放器创建失败(未插卡?)");
             return;
         }
         // 对话/播报中不插嘴：本地播放本身会把状态钉在 Speaking，天然串行
@@ -1151,17 +1206,46 @@ private:
             return;
         }
         int64_t now = EspNowHome::NowMs();
-        if (home_announce_ms_[node_id] != 0 &&
-            (now - home_announce_ms_[node_id]) < kAnnounceCooldownMs) {
-            ESP_LOGI(TAG_ESPNOW, "播报跳过: 冷却中(还剩 %lld ms), %s",
-                     (long long)(kAnnounceCooldownMs - (now - home_announce_ms_[node_id])), name);
-            return;
+        for (const auto& c : announce_cool_) {
+            if (c.used && c.node_id == node_id && strcmp(name, c.name) == 0 &&
+                (now - c.ts_ms) < kAnnounceCooldownMs) {
+                ESP_LOGI(TAG_ESPNOW, "播报跳过: 冷却中(还剩 %lld ms), %s",
+                         (long long)(kAnnounceCooldownMs - (now - c.ts_ms)), name);
+                return;
+            }
         }
-        if (music_player_->PlayAnnounce(name)) {
+        if (player->PlayAnnounce(name)) {
+            // 只有真的播起来才记冷却；同一 (节点,名字) 覆盖旧槽位，不刷爆表
+            AnnounceCool* slot = nullptr;
+            for (auto& c : announce_cool_) {
+                if (c.used && c.node_id == node_id && strcmp(name, c.name) == 0) {
+                    slot = &c;
+                    break;
+                }
+            }
+            if (slot == nullptr) {
+                for (auto& c : announce_cool_) {
+                    if (!c.used) {
+                        slot = &c;
+                        break;
+                    }
+                }
+            }
+            if (slot == nullptr) {
+                slot = &announce_cool_[announce_cool_pos_];
+                announce_cool_pos_ = (announce_cool_pos_ + 1) % kAnnounceCoolSlots;
+            }
+            slot->used = true;
+            slot->node_id = node_id;
+            snprintf(slot->name, sizeof(slot->name), "%s", name);
+            slot->ts_ms = now;
             ESP_LOGI(TAG_ESPNOW, "播报开始: %s.mp3", name);
-            home_announce_ms_[node_id] = now;   // 只有真的播起来才记冷却
         } else {
-            ESP_LOGW(TAG_ESPNOW, "播报失败: 打不开 /sdcard/announce/%s.mp3 (文件不存在?)", name);
+            ESP_LOGE(TAG_ESPNOW,
+                     "播报失败: 打不开 /sdcard/announce/%s.mp3 (文件不存在/未插卡? "
+                     "从网页「歌曲管理」下方的提示音槽位上上传)",
+                     name);
+            LogAnnounceDir();  // 顺带列出目录里到底有什么，方便对照文件名
         }
 #else
         (void)node_id;
@@ -1246,6 +1330,11 @@ private:
                 Application::GetInstance().Schedule([this, node_id, kind, name, arg, ts_ms]() {
                     OnHomeEvent(node_id, kind, name, arg, ts_ms);
                 });
+            },
+            // 链路事件（信道变化 / 命令未确认 / 发送连续失败）：传输层零日志（UART0 共享），
+            // 由板级写到独立 TAG ESP-NOW —— 现场"命令失败/延迟"时这是唯一的现场依据。
+            [](const char* what, const char* detail) {
+                ESP_LOGI(TAG_ESPNOW, "链路事件(%s): %s", what, detail);
             });
         if (!ok) {
             ESP_LOGE(TAG, "ESP-NOW: Begin() failed (esp_now_init/register/add_peer), disabled");
@@ -1324,8 +1413,11 @@ private:
                 if (!espnow_home_->SendTo(id, body)) {
                     return with_list("指令发送失败(" + name + ")");
                 }
-                return "已发送: " + name + " 的 " + cap + " " + action +
-                       (args.empty() ? "" : " " + args) + "; 结果可用 self.home.devices 查看";
+                // 下发是"非阻塞 + ACK 重传"：首包入队即返回，节点回执后再更新状态缓存。
+                // 故意不回"失败/重试"这类词（踩坑 15：会被 AI 读成没成功并反复调用）。
+                return "已下发: " + name + " 的 " + cap + " " + action +
+                       (args.empty() ? "" : " " + args) +
+                       "; 节点执行后会回报, 最新状态可在 self.home.devices 查看。不要重复调用本工具";
             });
 
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
@@ -1336,7 +1428,8 @@ private:
             PropertyList({Property("name", kPropertyTypeString, std::string("motion"))}),
             [this](const PropertyList& p) -> ReturnValue {
                 std::string name = p["name"].value<std::string>();
-                if (!music_player_ || !music_player_->PlayAnnounce(name)) {
+                LocalMusicPlayer* player = GetMusicPlayer();  // 懒创建(同上：不能直接判 music_player_)
+                if (player == nullptr || !player->PlayAnnounce(name)) {
                     return "未找到播报文件 " + name + ".mp3(需放在 TF 卡 /sdcard/announce/)";
                 }
                 return "已开始播报: " + name;

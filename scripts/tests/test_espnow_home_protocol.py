@@ -12,15 +12,20 @@
   - Arduino main/boards/bread-compact-wifi-s3cam-airobot/arduino/EspNowNode/EspNowNode.ino
             的能力表（CapDef/NodeDef）、sendInfo()、do 分发、超声波迟滞与 3 连发
 
-固化的三个真机隐患：
+固化的五个真机隐患：
   1. 主控待机时 WiFi 为 MAX_MODEM，只在 DTIM 醒来，ESP-NOW 单包上行会被漏掉 ——
      故节点必须连发 EVENT_RESEND 次，主控按 (kind, 名字) 1 秒窗口去重。
-  2. 下行若也连发，会在 MCP 工具回调里阻塞约 (N-1)*150ms 卡住对话 ——
-     而节点常醒（USB 供电、WiFi.setSleep(false)），故下行必须单次非阻塞发送。
-  3. 主控不得硬编码任何业务语义（能力名/事件名/播报文件名/温度阈值），
+  2. 下行若也在调用方循环连发，会阻塞 MCP 工具回调卡住对话 ——
+     故首包单次非阻塞，重传交给 esp_timer（见下条）。
+  3. 主控是 STA，射频信道由 AP 决定；AP 换信道/节点 hop 期间 esp_now_send 只表示
+     "已入队"。按 IDF v6.0.2 官方 esp_now.rst 的建议采用"应用层 ACK + 序列号 + 超时重传"：
+     序号在信封 `@n<id>#<seq>`，节点按序号去重（同序号只执行一次）。
+  4. 主控不得硬编码任何业务语义（能力名/事件名/播报文件名/温度阈值），
      否则接新设备就要重烧主控 —— 这是本文件大部分源码断言的由来。
+  5. 播报冷却必须按 (节点, 音频名)：融合节点四路传感器同时命中时不得互相压制；
+     播报短，不能被 Idle->Connecting 的网络重连误判抢断。
 
-真机验证仍需烧录后手动测试（见板级 README 的「ESP-NOW 居家灯控与传感器」章节）。
+真机验证仍需烧录后手动测试（见板级 README 的「ESP-NOW 居家设备」章节）。
 """
 
 import os
@@ -48,6 +53,12 @@ MOTION_TRIGGER_CM = 30      # 超声波触发阈值（节点侧）
 MOTION_RELEASE_CM = 40      # 超声波复位阈值（迟滞）
 EVENT_RESEND = 3            # 上行事件连发次数
 
+# 与 EspNowHome 的下行可靠性参数一致（espnow_home.h）
+CMD_RETRY_MAX = 4           # 首包后最多重传次数
+CMD_RETRY_GAP_MS = 150      # 重传间隔
+CMD_PENDING_MS = 7000       # 未确认命令挂起上限
+RETRY_TICK_MS = 100         # 重传定时器周期
+
 KINDS = ("info", "do", "ok", "say", "evt", "err")
 
 
@@ -58,8 +69,12 @@ def pkt(s: str) -> bytes:
     return s.encode("utf-8")
 
 
-def parse_node_packet(data: bytes):
-    """复刻 HandleRecv 的信封解析：返回 (node_id, body) 或 None。"""
+def parse_envelope(data: bytes):
+    """复刻 HandleRecv 的信封解析：返回 (node_id, seq, body) 或 None。
+
+    信封：`@n<id>[#<seq>] <body>`。序号可选（旧主控/旧节点不带），
+    只有 '#' 后真的跟着数字才消费 '#'（单独一个 '#' 不算序号）。
+    """
     if len(data) < 4 or data[0:1] != b"@" or data[1:2] != b"n":
         return None
     i = 2
@@ -67,12 +82,33 @@ def parse_node_packet(data: bytes):
     while i < len(data) and data[i:i + 1].isdigit():
         num += data[i:i + 1]
         i += 1
-    if not num or i >= len(data) or data[i:i + 1] != b" ":
+    if not num:
+        return None
+    seq = 0
+    if i < len(data) and data[i:i + 1] == b"#":
+        j = i + 1
+        digits = b""
+        while j < len(data) and data[j:j + 1].isdigit():
+            digits += data[j:j + 1]
+            j += 1
+        if digits:
+            seq = int(digits) & 0xFFFF
+            i = j
+    if i >= len(data) or data[i:i + 1] != b" ":
         return None
     node_id = int(num)
     if node_id <= 0 or node_id > MAX_NODES:
         return None
-    return node_id, data[i + 1:].decode("utf-8", "ignore")
+    return node_id, seq, data[i + 1:].decode("utf-8", "ignore")
+
+
+def parse_node_packet(data: bytes):
+    """复刻 HandleRecv 的信封解析（忽略序号）：返回 (node_id, body) 或 None。"""
+    parsed = parse_envelope(data)
+    if parsed is None:
+        return None
+    node_id, _seq, body = parsed
+    return node_id, body
 
 
 def parse_upstream(data: bytes):
@@ -453,6 +489,178 @@ class TestMotionHysteresis(unittest.TestCase):
         self.assertTrue(motion_update(st, 20))    # 可再次触发
 
 
+class TestSeqEnvelope(unittest.TestCase):
+    """序号信封 `@n<id>#<seq>`：只改信封、不改正文 → 旧节点仍能执行命令。"""
+
+    def test_seq_parsed(self):
+        self.assertEqual(parse_envelope(pkt("@n1#12 do light on 1")), (1, 12, "do light on 1"))
+
+    def test_old_format_has_seq_zero(self):
+        self.assertEqual(parse_envelope(pkt("@n1 ok light 1")), (1, 0, "ok light 1"))
+
+    def test_upstream_classification_unaffected_by_seq(self):
+        self.assertEqual(parse_upstream(pkt("@n1#12 ok light 1")), (1, "ok", "light", "1"))
+        self.assertEqual(parse_upstream(pkt("@n1#12 say motion")), (1, "say", "motion", ""))
+
+    def test_lone_hash_is_not_a_seq(self):
+        # '#' 后没有数字 → 不消费 '#' → 正文首字符不是空格 → 整包被拒（与 C++ 一致）
+        self.assertIsNone(parse_envelope(pkt("@n1# do light on")))
+        self.assertIsNone(parse_envelope(pkt("@n1#12x do light on")))
+
+    def test_seq_wraps_in_uint16(self):
+        # 节点侧是 uint16_t；主控侧不会发 0（0 是"无序号"旧格式的保留值）
+        self.assertEqual(parse_envelope(pkt("@n1#65536 ok light 1"))[1], 0)
+
+
+class _PendingCmd:
+    """复刻 EspNowHome::PendingCmd 的重传状态（仅测试用）。"""
+
+    def __init__(self, node_id, seq, now):
+        self.node_id = node_id
+        self.seq = seq
+        self.retries_left = CMD_RETRY_MAX
+        self.next_ms = now + CMD_RETRY_GAP_MS
+        self.expire_ms = now + CMD_PENDING_MS
+
+
+class PendingSim:
+    """复刻 SendTo / RetryTickRaw / CompletePending 的非阻塞重传策略。
+
+    C++ 侧用 esp_timer（RETRY_TICK_MS）驱动 RetryTickRaw；这里把 tick 显式传入模拟时刻，
+    断言的是"什么时刻发几次"，与实现一一对应（每节点最多 1 条在途命令）。
+    """
+
+    def __init__(self):
+        self.slots = {}
+        self.seq_next = 1
+        self.first_sent = []
+        self.retries = []
+        self.confirmed = 0
+        self.failed = 0
+
+    def send(self, node_id, body, now=0):
+        seq = self.seq_next
+        self.seq_next += 1
+        if self.seq_next > 0xFFFF:
+            self.seq_next = 1          # 0 保留给"无序号"
+        self.slots[node_id] = _PendingCmd(node_id, seq, now)
+        self.first_sent.append((node_id, seq, now))
+        return seq
+
+    def ack(self, node_id, seq):
+        p = self.slots.get(node_id)
+        if p is None:
+            return False
+        if seq != 0 and seq != p.seq:
+            return False               # 序号不匹配（旧回执）不算确认
+        del self.slots[node_id]
+        self.confirmed += 1
+        return True
+
+    def uplink_from(self, node_id, now):
+        p = self.slots.get(node_id)
+        if p is not None and now >= p.next_ms:
+            p.next_ms = now            # 链路恢复：下一 tick 立刻补发
+            return True
+        return False
+
+    def tick(self, now):
+        out = []
+        for node_id in list(self.slots.keys()):
+            p = self.slots[node_id]
+            if now >= p.expire_ms:
+                del self.slots[node_id]
+                self.failed += 1
+                continue
+            if now >= p.next_ms:
+                if p.retries_left > 0:
+                    p.retries_left -= 1
+                    p.next_ms = now + (CMD_RETRY_GAP_MS if p.retries_left > 0 else 1000)
+                else:
+                    p.next_ms = now + 1000    # 低频探测，等节点重锁
+                out.append((node_id, p.seq, now))
+        self.retries.extend(out)
+        return out
+
+
+class TestDownlinkRetry(unittest.TestCase):
+    """下行：官方 esp_now.rst 建议的"ACK 超时则重传 + 序列号去重"。"""
+
+    def test_retry_gap_then_low_frequency_probe(self):
+        sim = PendingSim()
+        sim.send(1, "do light on 1", now=0)          # 首包立刻发出（非阻塞）
+        self.assertEqual(len(sim.first_sent), 1)
+        for i in range(CMD_RETRY_MAX):
+            self.assertEqual(len(sim.tick(CMD_RETRY_GAP_MS * (i + 1))), 1,
+                             "第 %d 次重传应在 %dms" % (i + 1, CMD_RETRY_GAP_MS * (i + 1)))
+        # 重传用尽：进入 1s 低频探测（覆盖节点 hop 一圈后重锁），不再 150ms 一发
+        self.assertEqual(sim.tick(CMD_RETRY_GAP_MS * CMD_RETRY_MAX + 300), [])
+        self.assertEqual(len(sim.tick(CMD_RETRY_GAP_MS * CMD_RETRY_MAX + 1000)), 1)
+
+    def test_ack_stops_retry(self):
+        sim = PendingSim()
+        seq = sim.send(1, "do light on 1", now=0)
+        self.assertTrue(sim.ack(1, seq))
+        self.assertEqual(sim.tick(100000), [])
+        self.assertEqual(sim.confirmed, 1)
+        self.assertEqual(sim.failed, 0)
+
+    def test_wrong_seq_is_not_confirmation(self):
+        sim = PendingSim()
+        seq = sim.send(1, "do light on 1", now=0)
+        self.assertFalse(sim.ack(1, (seq + 1) & 0xFFFF))
+        self.assertIn(1, sim.slots)
+
+    def test_legacy_ack_without_seq_confirms(self):
+        # 旧节点回执不带序号（seq=0）：该节点只有 1 条在途命令，可直接确认
+        sim = PendingSim()
+        sim.send(1, "do light on 1", now=0)
+        self.assertTrue(sim.ack(1, 0))
+
+    def test_give_up_after_pending_window(self):
+        sim = PendingSim()
+        sim.send(1, "do light on 1", now=0)
+        sim.tick(CMD_PENDING_MS)
+        self.assertEqual(sim.failed, 1)
+        self.assertEqual(sim.slots, {})
+
+    def test_uplink_from_node_reschedules_immediately(self):
+        sim = PendingSim()
+        sim.send(1, "do light on 1", now=0)
+        sim.tick(CMD_RETRY_GAP_MS * CMD_RETRY_MAX + 1000)
+        # 节点上行（心跳/回执）会把低频探测的 next_ms 提到当下，立刻补发一次。
+        # 取挂在时限内的最后一个时刻（上限 7s），验证"最后关头收到上行也发得出去"。
+        near_deadline = CMD_PENDING_MS - 500
+        self.assertTrue(sim.uplink_from(1, near_deadline))
+        self.assertEqual(len(sim.tick(near_deadline)), 1)
+
+    def test_no_resend_after_pending_window(self):
+        # 超过挂起上限就彻底放弃：不再偷偷补发。
+        # 这正是把上限从 12s 收到 7s 的用意 —— 宁可明确失败，也不无限等，
+        # 否则用户以为没成功、几秒后灯却突然亮了（或反过来）。
+        sim = PendingSim()
+        sim.send(1, "do light on 1", now=0)
+        overtime = CMD_PENDING_MS + 1
+        self.assertTrue(sim.uplink_from(1, overtime))    # 迟到的上行仍会"推"一次
+        self.assertEqual(len(sim.tick(overtime)), 0)     # 但已过期，一条都不发
+        self.assertEqual(sim.failed, 1)
+        self.assertEqual(sim.slots, {})
+
+    def test_new_command_overwrites_pending_for_same_node(self):
+        sim = PendingSim()
+        old_seq = sim.send(1, "do light on 1", now=0)
+        new_seq = sim.send(1, "do light rgb 0 0 255", now=10)
+        self.assertNotEqual(old_seq, new_seq)
+        self.assertFalse(sim.ack(1, old_seq))       # 旧回执不再匹配（新命令在途）
+        self.assertTrue(sim.ack(1, new_seq))
+
+    def test_seq_never_zero(self):
+        sim = PendingSim()
+        sim.seq_next = 0xFFFF
+        self.assertEqual(sim.send(1, "do light on 1"), 0xFFFF)
+        self.assertEqual(sim.send(2, "do light on 1"), 1)   # 回绕跳过 0
+
+
 class TestSourceContracts(unittest.TestCase):
     """两侧源码必须遵守的约定（改坏了这里会红）。"""
 
@@ -531,9 +739,105 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn("kMaxCaps = %d" % MAX_CAPS, self.h)
 
     def test_downlink_is_single_send(self):
-        """下行必须单次非阻塞发送：MCP 工具回调里连发会卡住对话。"""
+        """下行首包必须单次非阻塞（重传交给 esp_timer，见下一条测试）。"""
         self.assertNotIn("kResendCount", self.h)
         self.assertNotIn("kResendGapMs", self.h)
+
+    def test_downlink_uses_app_level_ack_retry(self):
+        """下行可靠性：官方文档建议的"应用层 ACK + 序列号 + 超时重传"。
+
+        IDF v6.0.2 的 esp_now.rst 明确列出"设备的信道不相同"会导致发送失败，
+        并建议：应用层回 ACK、超时重传、用序列号删除重复数据。这里钉住三点：
+        1) 序号放在信封里（`@n<id>#<seq>`），正文格式不变 → 旧节点仍能执行命令；
+        2) 用官方 esp_now_register_send_cb 拿 MAC 层真实结果
+           （esp_now_send 的返回值只表示"已入队"）；
+        3) 重传由 esp_timer 驱动，SendTo 里不得 sleep/阻塞。
+        """
+        self.assertIn('"@n%d#%u %s"', self.cc)
+        self.assertIn("esp_now_register_send_cb", self.cc)
+        self.assertIn("RetryTickRaw", self.cc)
+        self.assertIn("kCmdRetryGapMs", self.h)
+        self.assertIn("kCmdPendingMs", self.h)
+        idx = self.cc.find("bool EspNowHome::SendTo")
+        self.assertGreater(idx, -1, "缺少 SendTo 定义")
+        body = self.cc[idx:idx + 2000]
+        for bad in ("sleep_for", "vTaskDelay", "delay("):
+            self.assertNotIn(bad, body, "SendTo 必须非阻塞：%s" % bad)
+
+    def test_channel_guard_and_fast_beacon(self):
+        """主控是 STA，信道由 AP 决定 → 用官方 esp_wifi_get_channel 看护，
+        变化时切"快速 beacon 窗口"，节点一圈 6.5s 内必然撞上（不依赖路由器固定信道）。"""
+        self.assertIn("esp_wifi_get_channel", self.cc)
+        self.assertIn("kFastBeaconWindowMs", self.h)
+        self.assertIn("EnterFastBeacon", self.cc)
+        self.assertIn('"channel"', self.cc)
+        # 快速窗口必须真的把 beacon 周期拉到快档
+        self.assertIn("kBeaconFastMs", self.cc)
+
+    def test_link_events_go_to_board_not_espnow_log(self):
+        """传输层零日志（UART0 共享）：链路事件通过回调交给板级打 TAG=ESP-NOW。"""
+        self.assertIn("LinkCallback", self.h)
+        self.assertIn("link_cb_", self.cc)
+        self.assertIn("链路事件(", self.board)
+
+    def test_node_dedups_retried_command_seq(self):
+        """节点对主控重传的同一序号只执行一次，重复到达直接重发上次回执。"""
+        for need in ("last_cmd_seq", "last_reply", "resend last reply"):
+            self.assertIn(need, self.ino, "节点固件缺少序号去重：%s" % need)
+
+    def test_node_hops_fast_and_has_heartbeat(self):
+        """失联重锁速度：节点 hop 一圈 6.5s + 主控快速 beacon 窗口。
+
+        心跳（hb）只表示"我在当前信道"，是链路层保留名：
+        主控不进状态缓存、不回调业务（否则 AI 会看到 hb=1、日志每 5 秒被刷一行）。
+        """
+        self.assertRegex(self.ino, r"#define HOP_INTERVAL_MS\s+500")
+        self.assertRegex(self.ino, r"#define LOST_TIMEOUT_MS\s+5000")
+        self.assertRegex(self.ino, r"#define HB_PERIOD_MS\s+5000")
+        self.assertIn("hbTick", self.ino)
+        self.assertIn('queueEvt("hb"', self.ino)
+        self.assertIn('strcmp(nm, "hb") == 0', self.cc)
+
+    def test_announce_cooldown_is_per_event_not_per_node(self):
+        """播报冷却必须按 (节点, 音频名)：融合节点 motion/beam 同时命中时不得互相压制。"""
+        self.assertIn("announce_cool_", self.board)
+        self.assertIn("kAnnounceCoolSlots", self.board)
+        self.assertNotIn("home_announce_ms_", self.board)
+
+    def test_announce_dir_created_at_startup(self):
+        """提示音目录过去不随固件生成 → 未上传过时播报永远打不开文件。
+
+        上传路径有 EnsureDir（d20e556），这里在 SD 扫描时再兜一道：
+        即使用户用读卡器拷文件，目录也已存在。
+        """
+        player = read(PLAYER_CC)
+        self.assertIn("EnsureAnnounceDir", player)
+        self.assertIn("#include <sys/stat.h>", player)
+
+    def test_announce_lazily_creates_music_player(self):
+        """播报必须走 GetMusicPlayer() 懒创建，而不是直接判 music_player_。
+
+        历史 bug：`music_player_` 只在“放过歌 / 闹钟响过 / 网页上传过文件”之后才会被创建，
+        用户插卡拷好提示音、开机直接挥手触发时它还是 nullptr → 播报被静默跳过
+        （日志还是 WARN 级，而网页日志默认级别是 ERROR，用户什么都看不到），
+        现象就是“从来没播报过、也没有任何日志”。
+        """
+        board = read(BOARD_CC)
+        start = board.index("void Announce(int node_id, const char* name)")
+        body = board[start:board.index("void OnHomeEvent(", start)]
+        self.assertIn("GetMusicPlayer()", body)
+        self.assertNotIn("!music_player_", body)
+        # 失败路径必须“看得见”：按 ERROR 打日志，并列出目录里到底有什么
+        self.assertIn("LogAnnounceDir", body)
+        self.assertIn("ESP_LOGE(TAG_ESPNOW", body)
+        self.assertIn("播报失败", body)
+
+    def test_announce_not_interrupted_by_network_reconnect(self):
+        """播报短（2~3 秒），不能被 Idle->Connecting 的网络重连误判抢断；
+        歌曲播放保持原判据（Connecting 也算用户交互）。"""
+        player = read(PLAYER_CC)
+        self.assertIn("announce_mode_", player)
+        self.assertIn("!announce_mode_.load() && state == kDeviceStateConnecting", player)
 
     def test_uplink_resends_three_times(self):
         self.assertRegex(self.ino, r"EVENT_RESEND\s+%d" % EVENT_RESEND)

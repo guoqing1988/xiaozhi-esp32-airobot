@@ -89,6 +89,16 @@
 | 17 | “人来自动开灯”无条件执行；`capLight` 只清 `auto_lit` | 新增 `motion_suppress` + `MOTION_SUPPRESS_HOLD_MS`（默认 10000）：人工（语音/AI）接管过灯后抑制自动开灯，**连续 10 秒未检测到人**才解除；抑制期间 `evt motion`/`say motion` 照常上报 | 现象是“AI 关灯永远关不掉、只能换颜色”。手在传感器前晃动时距离在 30~45cm 之间反复穿越 30/40cm 迟滞阀值，`motion_active` 高频翻转，每次翻转都重新开灯，把人工关灯覆盖掉；换颜色时灯本来就是亮的，所以看不出来。第一版修正写成“距离一超过释放阀值就解除抑制”仍然无效——同一个原因，故改为“连续无人计时” |
 | 18 | 播报失败（`/sdcard/announce/<name>.mp3` 打不开）**静默跳过**，主控无任何日志 | 新增独立 TAG `ESP-NOW`（`TAG_ESPNOW`）：`OnHomeEvent` 每收到一条节点消息打一行；`Announce` 四道关卡各打一行说明为何跳过；全局 `esp_log_level_set("*", ESP_LOG_ERROR)` 之后**单独放开该 TAG 到 INFO** | 现场“传感器触发了但喇叭没响”时无法判断卡在哪一步（没收到？设备忙？冷却中？文件不存在？）。全局被压到 ERROR，不单独放开则新加的 INFO 全看不见 |
 
+| 19 | 节点上行不做应用层 ACK（§4「重发策略」）；下行 `light` **单次发送**（修正 1）；§5 约束 4 明确「不做周期性心跳刷屏」 | 下行加**序号信封 + 应用层 ACK + 非阻塞重传**（首包后最多 4 次 / 150ms / 12 秒上限）；节点加 **5 秒心跳 `evt hb 1`**；主控注册 `esp_now_register_send_cb` 拿真实发送结果 | 现场「命令偶发延迟/无反应」「节点偶发被判离线」。`esp_now_send()` 返回 `ESP_OK` 只代表**进了驱动队列**；官方 `esp_now.rst` 明确发送失败原因之一是"设备的信道不相同"，且建议"接收端回应答、发送端应答超时即重传、用序号删除重复数据"。主控是 STA，信道由 AP 的 ACS 决定、节点靠盲 hop 追，跳变期命令静默打丢。官方同时要求**发送回调内不得做耗时操作**，所以重传只能由 `esp_timer` 驱动，不能在 MCP 工具回调里 `sleep` 着连发 |
+| 20 | `HOP_INTERVAL_MS 2000`；`LOST_TIMEOUT_MS 12000`（修正 16） | `HOP_INTERVAL_MS 500`；`LOST_TIMEOUT_MS 5000`；新增 `HB_PERIOD_MS 5000` 心跳 | 主控稳态 beacon 3 秒、节点每信道停 500ms → 扫一圈 6.5 秒；再叠加主控两个提速触发点（**信道变化** 与 **命令连续发失败 3 次** → 8 秒快速窗口、500ms 一条 beacon），重锁从"最长 40 秒"压到 1~2 秒 |
+| 21 | 播报冷却按**节点** 10 秒（§4.3） | 按 **(节点, 音频名)** 记，8 槽环形表 | 融合节点（`NODE_ID 3`）的 `motion` 与 `beam` 属于同一个节点，按节点冷却会互相压制（现场"有时响有时不响"的一半原因） |
+| 22 | `/sdcard/announce/` 靠人工在电脑上建目录（`d20e556` 只在上传时 `EnsureDir`） | `LocalMusicPlayer::ScanSongs()` 开头就 `EnsureAnnounceDir()` | 目录不存在时**上传与播放双双失败**（`fopen("dir/name.mp3","w")` 必然失败），用户主控固件未含 `d20e556` 时表现就是"播报完全不能用"。让目录在启动路径上必然存在，比依赖"先成功上传一次"可靠 |
+| 23 | `Announce` 的打断判据 = 设备状态不是 `Idle` | 只把**真用户交互**当打断：`Listening`，以及**非播报期间**的 `Connecting`；播报自身引起的状态跳转不算 | 2~3 秒的播报期间任何一次网络抖动（`Idle→Connecting`，例如服务端会话刷新）都会把音频掐掉（现象"播报戛然而止"）。用 `announce_mode_` 标记"当前正在播的就是提示音"，据此区分 |
+| 24 | 传输层"零日志"只靠约定（§2.1 修正 3） | 新增 `EspNowHome::LinkCallback`：传输层把链路事件（`channel` / `txfail` / `cmdfail`）回调给板级，由板级打 **`ESP-NOW`** TAG | `espnow_home.cc` 内部**仍然零 `ESP_LOG`**（UART0 与 Arduino 下位机命令共用，这是硬约束），但"命令到底发出去没有"必须可见，否则现场只能靠猜。回调在板级拼成 `链路事件(channel): 检测到 AP 换信道…` |
+
+| 25 | `Announce()` 里直接判 `music_player_` 是否为空（为空就“播报跳过”，日志是 WARN 级） | 改走 `GetMusicPlayer()` 懒创建（顺带建目录 + 扫卡）；失败日志升到 **ERROR** 级；打不开文件时用 `LogAnnounceDir()` 把 `/sdcard/announce/` 里实际有哪些文件打出来 | **“播报从来没响过、也没有任何日志”的真正根因**：`music_player_` 只在“放过歌 / 闹钟响过 / 网页上传过文件”之后才由 `GetMusicPlayer()` 创建；用户插卡拷好提示音、开机直接挥手触发时它一直是 `nullptr` → 每次都被静默跳过，而这条 WARN 日志在网页默认级别（ERROR）下看不见 → 现场表现就是“这功能完全没实现”。现在第一次播报就会创建播放器（并 `EnsureAnnounceDir`），失败也一定能看到原因与目录内容 |
+| 26 | `kCmdPendingMs = 12000`（未确认命令挂起上限）；链路事件与播报失败路径用 `std::string` | `kCmdPendingMs = 7000`；`LinkCallback` / `NotifyLink` / `EnterFastBeacon` 签名改 `const char*`，`LogAnnounceDir()` 与播报冷却比较改定长 `char` 缓冲 + `strcmp` | 两条现场约束。①**实时性**：12 秒 > 节点跳一圈（6.5 秒），超过一圈仍未确认就说明节点真不在（断电/密钥不符），继续挂着等只会让“几秒后动作突然生效”更迷惑；改 7 秒（一圈 + 余量）后仍保留“节点重锁后自动补发”的能力，正常链路响应时间不变（首包直达 + 节点十几毫秒回执）。②**内存**：现场堆本就紧张、有重启风险，而链路事件每次要构造 2 个 `std::string`（`detail` 60+ 字节必然走堆），碎片化时可能 `bad_alloc` → abort 重启；改 `const char*` + 定长缓冲后该路径**零堆分配**，静态 `.bss` 仅 +约 0.8KB（4 槽在途命令表 + 8 槽播报冷却表），不占堆、不随运行增长 |
+
 用法与排错见 `arduino/EspNowNode/README.md` 的「串口调试」与「上行可靠性」。
 
 ## 3. 架构与组件
@@ -348,15 +358,38 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 main/boards/bread-compact-wifi-s3
 | 测试 | `scripts/tests/test_espnow_home_protocol.py` |
 | 文档 | 本文件 + 板级 `README.md` 新增章节 |
 
-## 11. 未完成事项（下次继续）
+## 11. 未完成事项（2026-09-19 更新）
 
-> 记录时间：2026-09 现场调试当次收尾。**以下均未验证或未解决**。
+> 计划文档：`docs/superpowers/plans/2026-09-19-espnow-link-reliability.md`
+> 代码已全部落地并通过**本机**验证（见 §11.1）；**下表全部是"待真机复测"的硬件项**。
+> 正文 §4「重发策略」与 §5 约束 4 中"下行单次发送 / 不做周期性心跳 / 不使用应用层 ACK"的表述
+> 已被 §2.1 修正 19~24 覆盖，**以修正表为准**。
 
-| # | 事项 | 当前状态 | 下一步 |
+| # | 事项 | 本次改动 | 真机复测步骤 |
 |---|---|---|---|
-| 1 | **播报无声音**（超声波/避障触发后喇叭不响） | 节点侧已确认正常：`TX @n3 say motion` / `@n3 say beam` 都发出去了。主控侧 `Announce()` 因 `fopen("/sdcard/announce/<name>.mp3")` 失败而静默跳过（修正 18 已加日志，**待重编主控后看网页日志面板确认**） | 重编主控 → 网页日志若出现 `播报失败: 打不开 ...` 则确认文件未落盘；若出现 `播报开始:` 则转查音频输出链路（喇叭/音量/编解码） |
-| 2 | **提示音上传/列表修复未生效** | `d20e556`（`fopen` 前 `EnsureDir`）与 `023b593`（`dir` 参数两种形态）已提交，但**用户主控固件尚未包含**（未重编） | 与第 1 项一起重编主控后验证「提示音管理」三个槽位显示与上传 |
-| 3 | **「关灯关不掉」修复未验证** | 节点侧已改为“人工接管后连续 10 秒无人解除抑制”（修正 17）；但**上次编译被中断，板上未必是最新固件**；改前实测日志里 `[motion] suppressed` 一次未出现（抑制被提前清掉），改为连续计时后**尚未取得验证日志** | 重烧节点后执行：手靠近 → 对 AI 说「关灯」→ 手在传感器前晃动，确认出现 `[motion] suppressed, light untouched` 且不再出现 `auto light on` |
-| 4 | **节点偶发掉线（AI 提示「节点已掉线」）** | 根因指向**主控所在信道会变化**（多次观测到节点锁在不同信道：`real ch 3` / `ch 4`）。主控要连路由器上网，射频信道被 AP 锁定，ESP-NOW 只能跟随；AP 一换信道，节点就失联，主控 `kOfflineMs = 15000` 到期即判离线 | **首选**：路由器 2.4G 信道固定（关闭自动信道选择/ACS），零代码。**备选**：主控 beacon 加快（3000ms → 500ms）+ 节点扫描加快（2000ms → 500ms），把盲区从 26 秒压到 6.5 秒内，但需重编主控 |
-| 5 | **「命令要等很久才执行」（偶发）** | 已排除无线与节点：双串口对齐时间戳实测命令**到达节点仅 5~30ms**，且同毫秒执行。判断为掉出信道期间的命令打空（与第 4 项同源） | 同第 4 项。若要彻底消除，需按下表第 6 项补 ACK/重发 |
-| 6 | **链路缺反馈闭环**（原设计缺口，非回归） | ① 节点上报是**广播**，无 ACK；② 主控下行 `SendTo()` 只 `esp_now_send` 入队即返回，**不检查发送回调**（主控未注册 `send_cb`）；③ 主控**无主动探测**（`espnow_home.cc` 无任何 ping/心跳）；④ `IsOnline()` 超时**只在 JSON 里标 `online:false`，从不清理设备**；⑤ 节点**无主动心跳**（`evtTick` 有数据才发，`infoTick` 靠收到广播触发） | 建议后续补：主控收到节点 `ok` 回执后校验超时重发；主控周期性探测；离线节点标记/清理。可让第 3、4、5 项的现象从「用户可感知」变为「自动兜住」 |
+| 1 | 播报无声音 | **根因是修正 25**（播报路径没有懒创建播放器 → 每次静默跳过、日志还被 WARN 级挡住）；叠加修正 22（目录启动即建）、修正 21（冷却按 节点+音频）、修正 23（不被重连打断） | 重编主控 → 手靠近超声波 → 应听到 `motion.mp3`。日志必看：`ESP-NOW` 的 INFO/ERROR 一律进网页日志（该 TAG 单独放开），出现 `提示音目录 /sdcard/announce: N 个文件 motion.mp3` 才算文件就位；若 `播报失败: 打不开 …` 则看紧随其后的目录清单对照文件名 |
+| 2 | 提示音上传/列表 | `d20e556` + `023b593` 已提交，本次一并重编进主控 | 网页「提示音管理」三个槽位显示、上传、试听 |
+| 3 | 关灯关不掉 | 修正 17（连续 10 秒无人解除抑制）已落地，只缺真机日志 | 手靠近 → 对 AI 说「关灯」→ 手在传感器前晃动：应出现 `[motion] suppressed` 且不再出现 `auto light on` |
+| 4 | 节点偶发掉线 | 主控信道看护（1s 轮询 `esp_wifi_get_channel`）+ 8 秒快速 beacon + 节点 hop 500ms / 失联 5s + 心跳（修正 19/20/24） | 拔插节点电源、主控换热点：应 1~2 秒重锁；日志只应零星出现 `链路事件(channel)` |
+| 5 | 命令偶发延迟/无反应 | 序号信封 + 应用层 ACK + 非阻塞重传（首包后 4 次 / 150ms / 7s 上限，修正 26）+ 节点同序号去重（修正 19） | 反复说「开灯 / 关灯」十来次：不应再"偶发没反应"，最终状态以最后一次为准 |
+| 6 | 链路缺反馈闭环 | 主控注册 `send_cb`（拿真实发送结果）、节点 5 秒 `evt hb 1`、未确认命令可见（`链路事件(cmdfail)`）（修正 19/24） | 拔掉节点电源再发指令：应看到 `链路事件(cmdfail)`（7 秒没确认），而不是静默 |
+
+## 11.1 本次本机验证记录（2026-09-19）
+
+| 验证项 | 命令 | 结果 |
+|---|---|---|
+| 主机侧协议/契约单测 | `python3 -m unittest scripts.tests.test_espnow_home_protocol` | **99 tests OK**（新增序号信封、下行重传模拟、信道看护、心跳、播报冷却/目录/打断等用例） |
+| 主控改动文件编译 | `-fsyntax-only`，复用 `build/compile_commands.json` 中 IDF v6.0.2 的完整编译参数（含 `-Werror`） | `espnow_home.cc`、`compact_wifi_board_s3cam_airobot.cc`、`local_music_player.cc` **全部通过** |
+| 官方依赖符号存在性 | `nm` IDF v6.0.2 预编译库 | `esp_now_register_send_cb`（`libespnow.a`）、`esp_wifi_get_channel`（`libnet80211.a`）均存在 |
+| 节点固件完整编译 | `arduino-cli compile --fqbn esp32:esp32:esp32s3 .` | **成功**（Flash 896138 B / 68%，RAM 46060 B / 14%） |
+
+> **主控 `idf.py build` 全量编译当前被环境问题阻塞（与本次改动无关）**：
+> IDF v6.0.2 的组件管理器把 `espressif/esp_h264` 的 Kconfig 需求记为"引用了不存在的符号
+> `ESP_VIDEO_USE_CUSTOMIZED_ESP_H264_VERSION`"——该组件在 `esp_video` 的清单里被声明为
+> `if: target in [esp32p4]`，本仓库 target 是 `esp32s3` 所以被 skip，而组件管理器仍要求该符号有定义。
+> 于是每次 configure 都以退出码 10 要求重跑，第二次重跑即
+> `CMake Error … Missing required kconfig option after retry.`（`tools/cmake/project.cmake:789`）。
+> 失败发生在 **CMake configure 阶段**、早于任何源码编译；当前 `managed_components/espressif__esp_h264`
+> 目录不存在（`dependencies.lock` 里仍有它的条目）。
+> 处理办法（需联网、会动项目依赖文件，**确认后再执行**）：`idf.py update-dependencies`，
+> 或临时 `idf.py add-dependency "espressif/esp_h264^1.3.0"` 装回组件后 `idf.py build`。

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <algorithm>
 #include <random>
 #include <chrono>
@@ -180,7 +181,19 @@ LocalMusicPlayer::~LocalMusicPlayer() {
     }
 }
 
+// 确保 /sdcard/announce 存在。该目录过去不随固件生成：若从未上传过提示音，
+// 网页上传会报 "cannot create file on SD card"，播报也永远打不开文件。
+// （上传路径另有一份 EnsureDir，这里是开机/扫描时的双保险。）
+static void EnsureAnnounceDir() {
+    struct stat st = {};
+    if (stat(ANNOUNCE_DIR, &st) == 0) {
+        return;
+    }
+    mkdir(ANNOUNCE_DIR, 0775);
+}
+
 void LocalMusicPlayer::ScanSongs() {
+    EnsureAnnounceDir();
     std::lock_guard<std::mutex> lock(songs_mutex_);
     songs_.clear();
     DIR* dir = opendir(MUSIC_DIR);
@@ -412,8 +425,11 @@ void LocalMusicPlayer::PlayTask() {
             playing_ = false;
             break;
         }
+        // 播报（绝对路径）与歌曲的打断策略不同，见 PlayOneSong 里的判定
+        announce_mode_ = !path.empty();
         PlayOneSong(path.empty() ? (std::string(MUSIC_DIR) + "/" + song) : path);
     }
+    announce_mode_ = false;
     playing_ = false;
     // 自然播完(非外部停止)且状态仍是我们钉住的 Speaking -> 回到待命；
     // 外部停止(MCP stop/唤醒/按钮)时状态由对话/唤醒流程接管，不干预
@@ -483,8 +499,12 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
         // 若按“非Idle即打断”会把会话超时误判为用户交互导致误停(实测: 听歌时服务器
         // 长时间无交互自动结束会话 -> 播放被误停)。唤醒词/按钮打断走明确 hook, 不受影响。
         auto state = Application::GetInstance().GetDeviceState();
-        if (interaction_state_ == kDeviceStateIdle &&
-            (state == kDeviceStateListening || state == kDeviceStateConnecting)) {
+        // 打断判据：歌曲播放中，Idle->Listening/Connecting 都算"用户开始交互"；
+        // 但**播报**（2~3 秒的传感器提示音）不能因 Idle->Connecting 这种网络重连误判被抢断——
+        // 否则现场现象就是"播报不响"（音频刚注入就被停）。唤醒词/按钮打断另有明确 hook，不受影响。
+        bool user_interaction = (state == kDeviceStateListening) ||
+                                (!announce_mode_.load() && state == kDeviceStateConnecting);
+        if (interaction_state_ == kDeviceStateIdle && user_interaction) {
             ESP_LOGI(TAG, "User interaction detected, stop local playback");
             display->ClearChatMessages();
             Stop();

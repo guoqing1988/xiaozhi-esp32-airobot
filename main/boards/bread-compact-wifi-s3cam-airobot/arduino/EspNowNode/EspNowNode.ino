@@ -11,13 +11,19 @@
  * 节点 2（玄关感应）: DHT11 温湿度 + 激光头模块
  *   —— 靠下面 NODE_ID 切换角色（编译节点 2 时改成 2）。
  *
- * 协议（与主控 espnow_home.cc 一致，@ 前缀文本行）：
- *   下行  @n<id> do <能力> <动作> [参数]     通用动作（主控不解释语义，原样透传）
+ * 协议（与主控 espnow_home.cc 一致，@ 前缀文本行；序号 `#<seq>` 放在**信封**里，
+ * 正文格式与首版一致 → 两侧任一没更新也不会彻底不能用）：
+ *   下行  @n<id>[#seq] do <能力> <动作> [参数]  通用动作（主控不解释语义，原样透传）
  *   上行  @n<id> info <名字> <能力规格>      能力自描述（锁信道后 + 每次收到 beacon）
- *         @n<id> ok <能力> <结果>           执行回执
+ *         @n<id>[#seq] ok <能力> <结果>      执行回执（带回主控的序号 → 主控确认送达）
  *         @n<id> say <名字>                 播报请求（主控播 <名字>.mp3）
  *         @n<id> evt <名字> <值>            状态上报（只更新状态，不播报）
+ *         @n<id> evt hb 1                   心跳（协议保留名：只让主控知道"我在当前信道"）
  *         @n<id> err <原因> [细节]          错误
+ *
+ * 可靠性（依据 IDF v6.0.2 官方文档 esp_now.rst 的"应用层 ACK + 序列号去重"建议）：
+ *   主控下发带序号，收不到回执会重传同一序号；节点对同一序号**只执行一次**，
+ *   重复到达时直接重发上次回执，不重复动作（对 speed+ 这类非幂等动作必须如此）。
  *
  * 编译: arduino-cli compile --fqbn esp32:esp32:esp32s3 <此目录>
  * 依赖: 灯与 ESP-NOW 用核心自带 API，零第三方库；
@@ -28,13 +34,19 @@
 // 注意：这些宏必须在下面的 #if 之前定义（预处理按顺序求值）。
 
 #define NODE_ID 3                    // 1=客厅灯(RGB+超声波) 2=玄关感应(DHT11+激光) 3=融合节点(四件套)
-#define HOP_INTERVAL_MS 2000   // 每个信道停留时长。主控每 3000ms 才广播一次，停太短会大部分
-                               // 时间错过广播：1200ms 时命中率仅 40%，要转两三圈才撞上一次；
-                               // 2000ms 提到 67%，一圈（26 秒）内基本能锁上
-#define LOST_TIMEOUT_MS 12000        // 锁定后多久收不到主控包才回 hop。主控 3 秒一次广播，
-                                     // 偶尔丢两三个很正常；原来 5 秒就掉线会反复重连
+#define HOP_INTERVAL_MS 500    // 每个信道停留时长。主控稳态每 3000ms 广播一次，但
+                               // "AP 换信道 / 命令未确认"时主控会切到 500ms 快速窗口；
+                               // 节点停 500ms → 一圈 13×0.5=6.5s，快速窗口内必然撞上一次
+                               // （旧值 2000ms 一圈 26s，配合 3s 稳态 beacon 要转好几圈）
+#define LOST_TIMEOUT_MS 5000         // 锁定后多久收不到主控包才回 hop（配合主控快速窗口；
+                                     // 旧值 12s 太长，AP 换信道后要等十几秒才开始找）
 #define HOP_CHANNEL_MIN 1
 #define HOP_CHANNEL_MAX 13
+
+// 心跳：每 5 秒一条 `@n<id> evt hb 1`。不是业务数据，而是让主控知道
+// "这个节点还在当前信道上"——否则节点无传感器变化时主控 15 秒就判离线（假离线，
+// 表现为 AI 拒绝执行控制命令）。主控侧对 hb 不进状态缓存、不回调业务。
+#define HB_PERIOD_MS 5000
 
 // 串口调试日志：1=开（默认），0=关（整段日志编译期消失，零额外开销）
 // 节点串口是独占的（USB 转串口），不像主控 UART0 还要与 Arduino 指令共用，可放心开。
@@ -123,6 +135,7 @@ static uint32_t last_hop_ms = 0;
 static uint32_t last_seen_ms = 0;           // 最近一次收到主控任何报文
 
 static uint32_t info_due_ms = 0;            // 能力重报（收到 beacon 时置位，loop 里安全发送）
+static uint32_t hb_ms = 0;                  // 上次心跳时刻（链路存活信号，见 HB_PERIOD_MS）
 
 // 灯状态（客厅 1 / 融合 3；玄关节点不含这部分代码）
 #if NODE_ID == 1 || NODE_ID == 3
@@ -498,13 +511,34 @@ static void queueSay(const char* name) {
     queueEvent(buf);
 }
 
-// 能力动作回执：kind = "ok" | "err"
-static void qCap(const char* kind, const char* a, const char* b) {
+// 回执去重缓存：主控重传时序号不变，同一序号只执行一次，重复到达直接重发上次回执。
+// （官方文档建议"设置序列号从而删除重复的数据"；对 speed+ 这类非幂等动作必须如此。）
+static uint16_t last_cmd_seq = 0;
+static char last_reply[96] = {0};
+
+// 能力动作回执：kind = "ok" | "err"；seq 由主控信封（@n<id>#<seq>）带下来，
+// 回执原样带回，主控据此确认命令送达（seq=0 表示旧主控，保持原格式、不去重）。
+static void qCap(uint16_t seq, const char* kind, const char* a, const char* b) {
     char buf[96];
-    if (b != nullptr && b[0] != '\0') {
-        snprintf(buf, sizeof(buf), "@n%d %s %s %s", NODE_ID, kind, a, b);
+    int n;
+    if (seq != 0) {
+        if (b != nullptr && b[0] != '\0') {
+            n = snprintf(buf, sizeof(buf), "@n%d#%u %s %s %s", NODE_ID, (unsigned)seq, kind, a, b);
+        } else {
+            n = snprintf(buf, sizeof(buf), "@n%d#%u %s %s", NODE_ID, (unsigned)seq, kind, a);
+        }
+        last_cmd_seq = seq;
+        if (n > 0) {
+            size_t len = ((size_t)n < sizeof(last_reply) - 1) ? (size_t)n : sizeof(last_reply) - 1;
+            memcpy(last_reply, buf, len);
+            last_reply[len] = '\0';
+        }
     } else {
-        snprintf(buf, sizeof(buf), "@n%d %s %s", NODE_ID, kind, a);
+        if (b != nullptr && b[0] != '\0') {
+            snprintf(buf, sizeof(buf), "@n%d %s %s %s", NODE_ID, kind, a, b);
+        } else {
+            snprintf(buf, sizeof(buf), "@n%d %s %s", NODE_ID, kind, a);
+        }
     }
     queueEvent(buf);
 }
@@ -563,14 +597,23 @@ public:
             return;
         }
         const char* p = reinterpret_cast<const char*>(data) + 2;
-        if (data[1] != 'n' || atoi(p) != NODE_ID) {
+        if (data[1] != 'n') {
             return;   // 不是发给本节点的
         }
-        const char* sp = strchr(p, ' ');
-        if (sp == nullptr) {
+        // 信封：`@n<id>` 或 `@n<id>#<seq>`（序号可选，旧主控不带）
+        char* end = nullptr;
+        long id = strtol(p, &end, 10);
+        if (end == nullptr || id != NODE_ID) {
+            return;   // 不是发给本节点的
+        }
+        uint16_t seq = 0;
+        if (*end == '#') {
+            seq = static_cast<uint16_t>(strtoul(end + 1, &end, 10));
+        }
+        if (*end != ' ') {
             return;
         }
-        handleCommand(sp + 1);
+        handleCommand(end + 1, seq);
     }
 
     void onSent(bool success) override {
@@ -578,13 +621,19 @@ public:
     }
 
 private:
-    // 通用动作：do <能力> <动作> [参数]
+    // 通用动作：do <能力> <动作> [参数]（seq 来自信封，0=旧主控不带序号）
     // 主控不解释语义、本节点按能力表分发——接入新动作只需改能力表。
-    static void handleCommand(const char* body) {
+    static void handleCommand(const char* body, uint16_t seq) {
         if (strncmp(body, "do ", 3) != 0) {
             return;   // 其它命令（ping 等）：收到即刷新在线（onReceive 已做）
         }
-        LOGF("[cmd] %s\n", body);   // 下行指令低频，直接打印不影响实时性
+        // 主控未收到回执时会重传同一序号：只执行一次，直接重发上次回执
+        if (seq != 0 && seq == last_cmd_seq && last_reply[0] != '\0') {
+            LOGF("[cmd] dup seq %u, resend last reply (not executed again)\n", (unsigned)seq);
+            queueEvent(last_reply);
+            return;
+        }
+        LOGF("[cmd] seq=%u %s\n", (unsigned)seq, body);   // 下行低频，直接打印不影响实时性
         char cap[16] = {0};
         char action[16] = {0};
 
@@ -594,7 +643,7 @@ private:
         }
         rest = nextField(rest, action, sizeof(action));
         if (action[0] == '\0') {
-            qCap("err", "missing-action", cap);
+            qCap(seq, "err", "missing-action", cap);
             return;
         }
         while (*rest == ' ') {
@@ -607,19 +656,19 @@ private:
                 continue;
             }
             if (node_def->caps[i].handler == nullptr) {
-                qCap("err", "readonly", cap);
+                qCap(seq, "err", "readonly", cap);
                 return;
             }
             char out[48];
             out[0] = '\0';
             if (node_def->caps[i].handler(action, args, out, sizeof(out))) {
-                qCap("ok", cap, out);
+                qCap(seq, "ok", cap, out);
             } else {
-                qCap("err", "unknown-action", action);
+                qCap(seq, "err", "unknown-action", action);
             }
             return;
         }
-        qCap("err", "unknown-cap", cap);
+        qCap(seq, "err", "unknown-cap", cap);
     }
 };
 
@@ -733,6 +782,19 @@ static void evtTick() {
     } else if (!ok) {
         LOGF("[espnow] TX  (%d/%d) SEND FAILED\n", EVENT_RESEND - left, EVENT_RESEND);
     }
+}
+
+// 心跳（锁定后每 HB_PERIOD_MS 一条）：给主控"我在、我在这个信道上"的信号。
+// 走 evt 通道（不播报）+ 队列同键合并（键固定，永远只占一槽）。
+static void hbTick() {
+    if (!locked) {
+        return;   // 未锁定主控：心跳没意义（主控也收不到）
+    }
+    if (hb_ms != 0 && millis() - hb_ms < HB_PERIOD_MS) {
+        return;
+    }
+    hb_ms = millis();
+    queueEvt("hb", "1");
 }
 
 // 能力重报（收到 beacon 后）
@@ -1039,6 +1101,7 @@ void loop() {
 
     evtTick();
     infoTick();
+    hbTick();
 
 #if NODE_ID == 1 || NODE_ID == 3
     sonarTick();
