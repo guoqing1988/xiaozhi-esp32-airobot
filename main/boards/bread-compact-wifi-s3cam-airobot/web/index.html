@@ -231,6 +231,22 @@
       background: #be123c
     }
 
+    /* 次要操作按钮：浅底描边、小尺寸。用在日志面板那排辅助操作上——
+       一堆实心蓝大按钮会把面板撑得又长又抢眼（移动端尤其明显） */
+    .btn-quiet {
+      background: #f1f5f9;
+      color: #374151;
+      border: 1px solid #dbe1ea;
+      border-radius: 10px;
+      padding: 6px 11px;
+      font-size: 12.5px;
+      font-weight: 400
+    }
+
+    .btn-quiet:hover {
+      background: #e2e8f0
+    }
+
     .check {
       display: flex;
       align-items: center;
@@ -301,6 +317,28 @@
        见 loadSongs/loadAlarms 渲染处）。没带 data-label 的占位行（如“暂无歌曲”
        的 colspan 单元格）不显示列名，自然退化为普通文本。 */
     @media (max-width: 620px) {
+      /* 日志面板的辅助操作：手机上再收紧一档，尽量一行排下、别抢注意力 */
+      .log-actions {
+        gap: 6px
+      }
+
+      .log-actions .btn-quiet {
+        padding: 5px 9px;
+        font-size: 12px
+      }
+
+      /* 主按钮与转向键在手机上整体收一档：默认 9px 16px / 14px 在窄屏显得笨重。
+         转向键是「按住持续转」的交互控件，只收高度、不瘦宽度（保留点击区）。 */
+      .btn {
+        padding: 7px 12px;
+        font-size: 13px;
+        border-radius: 9px
+      }
+
+      .btn.turn-btn {
+        padding: 9px 4px
+      }
+
       .card-table thead {
         display: none
       }
@@ -688,7 +726,7 @@
       <div class="hint">TF 卡「歌曲」目录下的 MP3 列表；删除会同时删除同名歌词(.lrc)。</div>
       <div class="row">
         <button class="btn" onclick="openUpload()">⬆️ 上传歌曲</button>
-        <button class="btn" onclick="loadSongs();loadAnnounces()">🔄 刷新列表</button>
+        <button class="btn-quiet" onclick="loadSongs();loadAnnounces()">🔄 刷新列表</button>
       </div>
       <table class="card-table">
         <thead>
@@ -752,7 +790,7 @@
       <div class="hint">创建后到点自动播报与屏幕提醒；也支持语音「30分钟后提醒我喝水」。</div>
       <div class="row">
         <button class="btn" onclick="openAlarm()">➕ 新建闹钟</button>
-        <button class="btn" onclick="loadAlarms()">🔄 刷新列表</button>
+        <button class="btn-quiet" onclick="loadAlarms()">🔄 刷新列表</button>
       </div>
       <table class="card-table">
         <thead>
@@ -802,7 +840,7 @@
         </div>
         <div class="row">
           <button class="btn" onclick="addAlarm()">添加</button>
-          <button class="btn" onclick="closeAlarm()">取消</button>
+          <button class="btn-quiet" onclick="closeAlarm()">取消</button>
         </div>
       </div>
     </div>
@@ -861,7 +899,7 @@
       <div class="row" style="align-items:center">
         <span style="font-size:12.5px;color:#6b7280;flex:1;line-height:1.4">下位机指令记录（<code>&gt;</code> 已发出 ·
           <code>!</code> 被防抖拦截 · <code>×</code> 发送失败 · <code>&lt;</code> 下位机回执）</span>
-        <button class="btn" onclick="copyPre('unoCmdView', this)">📋 复制</button>
+        <button class="btn-quiet" onclick="copyPre('unoCmdView', this)">📋 复制</button>
       </div>
       <pre id="unoCmdView"></pre>
 
@@ -885,7 +923,7 @@
         <img id="photoImg" alt="照片" style="max-width:100%;border-radius:8px">
         <div class="row" style="align-items:center;margin-top:4px">
           <span id="photoStatus" style="font-size:12.5px;color:#6b7280;flex:1"></span>
-          <button class="btn" onclick="clearPhotoView()" title="只清这里的显示，不删卡上的照片">🧹 清空显示</button>
+          <button class="btn-quiet" onclick="clearPhotoView()" title="只清这里的显示，不删卡上的照片">🧹 清空</button>
         </div>
       </div>
 
@@ -899,8 +937,8 @@
       </div>
       <div class="row" style="align-items:center">
         <label class="check"><input type="checkbox" id="aiSaveChk" onchange="setAiSave()"> AI 拍照也存卡</label>
-        <button class="btn" onclick="loadPhotos()">🔄 刷新</button>
-        <button class="btn" onclick="clearPhotos()">🗑 清空本相册</button>
+        <button class="btn-quiet" onclick="loadPhotos()">🔄 刷新</button>
+        <button class="btn-quiet" onclick="clearPhotos()">🗑 清空本相册</button>
       </div>
       <div id="photoGrid" class="photo-grid"></div>
       <div id="photoEmpty" class="hint" style="display:none">还没有照片。</div>
@@ -912,8 +950,7 @@
     <!-- 系统日志（独立 tab，排在最后）：设备内存环形缓冲的实时日志，不落串口（见 log_capture.h）。
          与「机器人控制」面板的「下位机指令记录」同源：那里只留 [UNO] 行，这里看全文。 -->
     <div class="panel" id="panel-log">
-      <div class="hint">设备实时日志。<b>日志不走串口</b>，所以开到「信息/调试」也不会干扰 Arduino 下位机控制；
-        排查完记得把级别调回「错误」。</div>
+      <div class="hint"><b>日志不走串口</b>；排查完把级别调回「错误」。</div>
       <div class="row" style="align-items:center">
         <span style="font-size:13px;color:#6b7280">级别</span>
         <select id="logLevel" onchange="setLogLevel()">
@@ -926,11 +963,11 @@
         <label class="check"><input type="checkbox" id="logMirror" onchange="setLogMirror()"> 同时输出到串口（会干扰
           Arduino）</label>
       </div>
-      <div class="row">
-        <button class="btn" onclick="clearLogView()">🧹 清空显示</button>
-        <button class="btn" onclick="clearDeviceLog()">🗑 清空设备缓冲</button>
-        <button class="btn" id="logPauseBtn" onclick="toggleLogPause()">⏸ 暂停</button>
-        <button class="btn" onclick="copyPre('logView', this)">📋 复制</button>
+      <div class="row log-actions">
+        <button class="btn-quiet" onclick="clearLogView()">🧹 清空</button>
+        <button class="btn-quiet" onclick="clearDeviceLog()" title="清空设备内存缓冲（含崩溃前保留的日志）">🗑 清空设备</button>
+        <button class="btn-quiet" id="logPauseBtn" onclick="toggleLogPause()">⏸ 暂停</button>
+        <button class="btn-quiet" onclick="copyPre('logView', this)">📋 复制</button>
       </div>
       <pre id="logView"></pre>
     </div>
