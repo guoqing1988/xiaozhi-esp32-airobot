@@ -1,3 +1,21 @@
+# ---------------------------------------------------------------
+# 上游组件元数据缺陷的兜底定义（不要删除）
+# espressif/esp_video 的可选依赖 espressif/esp_h264（仅 P4）在本板（S3）构建时会被
+# 组件管理器跳过，但它的元数据仍声明了 Kconfig 选项
+# ESP_VIDEO_USE_CUSTOMIZED_ESP_H264_VERSION。该符号没有任何组件去定义，
+# ESP-IDF v6 于是报 "used in if clauses, but not found in any Kconfig file"，
+# 并因配置不稳定反复重试，最终以
+#   project.cmake:789 Missing required kconfig option after retry.
+# 失败（只在组件管理器**联网解析依赖**时出现；不联网时不触发）。
+#
+# 这里给一个无 prompt 的默认值（n = 不使用自定义 h264 版本，与 S3 实际情况一致）：
+# 不进入 menuconfig 菜单，只消除“符号未定义”引起的重试。
+# 若将来 esp_h264 在 P4 上被真正加载并自带该定义，Kconfig 会提示重复定义，
+# 届时删掉本段即可。
+config ESP_VIDEO_USE_CUSTOMIZED_ESP_H264_VERSION
+    bool
+    default n
+
 menu "Xiaozhi Assistant"
 
 config OTA_URL
