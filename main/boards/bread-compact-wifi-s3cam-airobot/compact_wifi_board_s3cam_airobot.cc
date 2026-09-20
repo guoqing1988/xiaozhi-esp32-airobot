@@ -1273,13 +1273,13 @@ private:
         s.SetInt("flip", mode);
     }
 
-    // size_changed 回给前端：只有分辨率变了才需要重连 <img>（其余参数原地生效，画面不断）。
-    std::string VideoCfgJson(bool size_changed = false) {
+    // 四项参数都是原地生效：响应里不再需要 size_changed（改分辨率也不用重连 <img>，
+    // 因为 MJPEG 每帧是独立 JPEG 自带尺寸，浏览器逐帧替换）。
+    std::string VideoCfgJson() {
         return std::string("{\"ok\":true,\"size\":") + std::to_string(video_cfg_.size) +
                ",\"fps\":" + std::to_string(video_cfg_.fps) +
                ",\"quality\":" + std::to_string(video_cfg_.quality) +
-               ",\"flip\":" + std::to_string(GetCameraFlip()) +
-               ",\"size_changed\":" + (size_changed ? "true" : "false") + "}";
+               ",\"flip\":" + std::to_string(GetCameraFlip()) + "}";
     }
 
     // 网页保存参数：帧率/镜像/JPEG 质量都立即生效；只有画面尺寸需要重建相机，
@@ -1319,7 +1319,7 @@ private:
         if (size_changed && LocalVideoStreamRunning()) {
             ApplyVideoFramesize();
         }
-        return VideoCfgJson(size_changed);
+        return VideoCfgJson();
     }
 
     // 开启：相机切 JPEG（模组直出，零编码零拷贝）→ 起独立 /stream 服务（端口 81）。

@@ -2276,12 +2276,8 @@
         .then(function (r) {
           if (!r || r.ok !== true) { msg.textContent = '应用失败：' + ((r && r.error) || '未知错误'); return; }
           msg.textContent = '已应用';
-          // 只有分辨率变了才需要重连 <img>（其余参数设备侧原地生效，画面不断）
-          if (r.size_changed === true && document.getElementById('videoChk').checked) {
-            const img = document.getElementById('videoImg');
-            img.removeAttribute('src');
-            setTimeout(function () { img.src = videoStreamUrl() + '?t=' + Date.now(); }, 500);
-          }
+          // 分辨率变化也不用重连 <img>：MJPEG 里每帧是独立 JPEG（自带尺寸），
+          // 浏览器逐帧替换显示，流本身从没断过 → 重连只会白断画面 500ms。
           setTimeout(closeVideoCfg, 700);
         })
         .catch(function () { msg.textContent = '连不上设备：设置已暂存，连上后再点一次「应用」'; });

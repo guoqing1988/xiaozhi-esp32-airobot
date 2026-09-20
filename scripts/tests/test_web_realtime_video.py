@@ -167,15 +167,6 @@ class TestFrontendPanel(_Base):
         self.assertIn("videoCfgCacheSet(", body)
         self.assertIn("flip", body)
 
-    def test_apply_reconnects_stream(self):
-        """改了尺寸/质量会重启流，前端必须重连 <img>（否则看不到新画面）。"""
-        m = re.search(r"function applyVideoCfg\(size, fps, quality, flip\)\s*\{(.*?)\n    \}",
-                      self.html, re.S)
-        self.assertIsNotNone(m, "找不到 applyVideoCfg")
-        body = m.group(1)
-        self.assertIn("removeAttribute('src')", body)
-        self.assertIn("videoStreamUrl()", body)
-
     def test_modal_reads_current_cfg(self):
         """打开弹窗要先从设备读当前参数（否则显示的是浏览器默认值）。"""
         m = re.search(r"function openVideoCfg\(\)\s*\{(.*?)\n    \}", self.html, re.S)
@@ -344,11 +335,20 @@ class TestCameraModeSwitch(_Base):
         self.assertNotIn("video_flip_", self.board, "翻转值不能做内存缓存")
         self.assertIn("(flip != GetCameraFlip())", body, "变化判断要读 NVS")
 
-    def test_json_reports_size_changed_for_img_reload(self):
-        """响应要带 size_changed，前端据此决定是否重连 <img>（而不是无脑重连）。"""
-        self.assertIn("size_changed", self.board)
-        self.assertRegex(self.board, r"VideoCfgJson\(size_changed\)")
-        self.assertRegex(self.html, r"r\.size_changed === true")
+    def test_framesize_change_does_not_reload_img(self):
+        """改分辨率也不用重连 <img>。
+
+        MJPEG 流里每帧是独立 JPEG（自带尺寸），浏览器逐帧替换显示，流本身从没断过 →
+        重连反而白断画面 500ms。（旧实现 deinit+init 会重启整个 httpd 流，那时才需要。）
+        """
+        m = re.search(r"function applyVideoCfg\(size, fps, quality, flip\)\s*\{(.*?)\n    \}",
+                      self.html, re.S)
+        self.assertIsNotNone(m, "找不到 applyVideoCfg")
+        self.assertNotIn("removeAttribute('src')", m.group(1), "改分辨率不该断开画面")
+        self.assertIn("closeVideoCfg", m.group(1), "成功后就关弹窗即可")
+        # 响应里也不该再有 size_changed（前端已不需要）
+        self.assertNotIn('"size_changed"', self.board)
+        self.assertNotIn("size_changed === true", self.html)
 
     def test_framesize_inited_at_max_then_switched_dynamically(self):
         """开流按最大分辨率初始化帧缓冲，再 set_framesize 切到用户选的档。
