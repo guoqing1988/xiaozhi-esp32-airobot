@@ -872,22 +872,22 @@
       </div>
       <div class="row" style="align-items:center;margin-top:6px;flex-wrap:nowrap">
         <span style="font-size:13px;color:#6b7280;min-width:60px">🔧 头部舵机</span>
-        <button class="btn" style="padding:6px 12px;font-size:20px;line-height:1;flex-shrink:0"
+        <button class="btn-quiet" style="font-size:16px;line-height:1;flex-shrink:0"
           onclick="servoStep(-SERVO_STEP)">−</button>
         <input type="range" id="servoRange" min="0" max="180" value="82" style="flex:1;min-width:0;height:28px"
           oninput="onServoInput(this)" onchange="setServoDeg(this.value, true)">
-        <button class="btn" style="padding:6px 12px;font-size:20px;line-height:1;flex-shrink:0"
+        <button class="btn-quiet" style="font-size:16px;line-height:1;flex-shrink:0"
           onclick="servoStep(SERVO_STEP)">+</button>
         <span id="servoLabel" style="font-size:13px;color:#2563eb;min-width:40px;text-align:right">82°</span>
-        <button class="btn" style="padding:4px 8px;font-size:12px;margin-left:2px;flex-shrink:0"
+        <button class="btn-quiet" style="padding:4px 8px;font-size:12px;margin-left:2px;flex-shrink:0"
           onclick="servoHome()">回正</button>
       </div>
       <div class="row" style="align-items:center;margin-top:4px;flex-wrap:nowrap">
         <span style="font-size:13px;color:#6b7280;min-width:60px">🎯 回正值</span>
-        <button class="btn" style="padding:6px 14px;font-size:18px;flex-shrink:0" onclick="homeStep(-1)">−</button>
+        <button class="btn-quiet" style="font-size:16px;line-height:1;flex-shrink:0" onclick="homeStep(-1)">−</button>
         <input type="number" id="servoHomeVal" min="0" max="180" value="82" inputmode="numeric"
           style="flex:1;text-align:center;height:38px;min-width:0" onchange="onServoHomeInput(this)">
-        <button class="btn" style="padding:6px 14px;font-size:18px;flex-shrink:0" onclick="homeStep(1)">+</button>
+        <button class="btn-quiet" style="font-size:16px;line-height:1;flex-shrink:0" onclick="homeStep(1)">+</button>
       </div>
       <!-- <div class="hint">头部舵机：拖动滑块或点 − / + 微调（每次 5°），「回正」转到下方回正值。<br>
         回正值即「回正」按钮让头部停靠的角度，可直接输入数字（回车/失焦生效）或点 − / +；实时写入设备(NVS)，断电保留。</div> -->
