@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- 节点 3「融合节点」接线图：ESP32-S3 + RGB(4线共阳) + HC-SR04(宽电压 3.3V 供电) + DHT11 + 红外避障
+<!-- 节点 3「我的家」接线图：ESP32-S3 + RGB(4线共阳) + HC-SR04(宽电压 3.3V 供电) + DHT11 + 红外避障
      与 EspNowNode.ino（NODE_ID=3）的引脚定义一一对应。
      一台板接全部四个传感器；DHT11/红外避障因 GPIO4/5 已被 RGB 占用而改用 GPIO16/17。
      画法：线与线交叉处用白底"跳线"断开，表示不相连；模块引脚物理排列以实物丝印为准。 -->
@@ -7,7 +7,7 @@
      font-family="'Microsoft YaHei','PingFang SC','Noto Sans CJK SC',Arial,sans-serif">
   <rect x="0" y="0" width="1120" height="930" fill="#ffffff"/>
 
-  <text x="24" y="36" font-size="20" font-weight="bold" fill="#111827">节点 3「融合节点」接线：ESP32-S3 + RGB + 超声波 + DHT11 + 红外避障（一台板接全部四个）</text>
+  <text x="24" y="36" font-size="20" font-weight="bold" fill="#111827">节点 3「我的家」接线：ESP32-S3 + RGB + 超声波 + DHT11 + 红外避障（一台板接全部四个）</text>
 
   <!-- ============ 连线：每条线先画白色粗底再画彩线，后画的线在交叉处形成跳线缺口 ============ -->
 
