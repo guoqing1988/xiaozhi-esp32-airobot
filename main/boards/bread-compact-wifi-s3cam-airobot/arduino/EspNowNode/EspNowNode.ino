@@ -33,7 +33,7 @@
 // ============================ 现场可调参数 ============================
 // 注意：这些宏必须在下面的 #if 之前定义（预处理按顺序求值）。
 
-#define NODE_ID 3                    // 1=客厅灯(RGB+超声波) 2=玄关感应(DHT11+激光) 3=融合节点(四件套)
+#define NODE_ID 3                    // 1=客厅灯(RGB+超声波) 2=玄关感应(DHT11+激光) 3=我的家(四件套)
 #define HOP_INTERVAL_MS 500    // 每个信道停留时长。主控稳态每 3000ms 广播一次，但
                                // "AP 换信道 / 命令未确认"时主控会切到 500ms 快速窗口；
                                // 节点停 500ms → 一圈 13×0.5=6.5s，快速窗口内必然撞上一次
@@ -96,7 +96,7 @@
 #define PIN_SONAR_TRIG 7
 #define PIN_SONAR_ECHO 15
 #if NODE_ID == 3
-// 融合节点：RGB 已占用 GPIO4/5/6，DHT11 与激光改用两个空闲脚
+// 我的家：RGB 已占用 GPIO4/5/6，DHT11 与激光改用两个空闲脚
 // （GPIO16/17 在 S3 上是普通 IO，不撞 flash/PSRAM/USB）
 #define PIN_DHT 16
 #define PIN_LASER 17
@@ -124,7 +124,7 @@ static const uint8_t kLmk[16] = "xiaozhi-lmk-01";
 #include <esp_mac.h>
 
 #if NODE_ID == 2 || NODE_ID == 3
-#include <DHT.h>   // 仅玄关/融合节点需要，故按条件包含（客厅节点无需安装该库）
+#include <DHT.h>   // 仅玄关/我的家需要，故按条件包含（客厅节点无需安装该库）
 #endif
 
 // ============================== 运行状态 ==============================
@@ -184,7 +184,7 @@ static uint32_t laser_ms = 0;
 // 第一个函数定义之前，若 struct 定义在文件中部，`putText(OutMsg&, ...)` 的原型
 // 就会引用到未声明的类型而编译失败（本文件曾因此报 "OutMsg was not declared"）。
 // 队列实现见下方「上行发送」段。
-// 为什么是 6 槽：融合节点(3) 有 4 路状态上报（dist/motion/temp/beam）各占一槽后，
+// 为什么是 6 槽：我的家(3) 有 4 路状态上报（dist/motion/temp/beam）各占一槽后，
 // 仍要留得下 say/ok —— 4 槽会被状态占满，把播报与回执报文挤掉。
 #define TXQ_SIZE 6
 
@@ -401,15 +401,15 @@ static const CapDef kCaps[] = {
 static const char kNodeName[] = "玄关感应";
 
 #else
-// 融合节点：一台设备接全部四个传感器。
-// 4 个能力的 info 报文实测约 188B，未超主控 200B 单包上限（描述文案别再拉长）。
+// 我的家：一台设备接全部四个传感器。
+// 4 个能力的 info 报文实测约 194B，未超主控 200B 单包上限（描述文案别再拉长）。
 static const CapDef kCaps[] = {
     {"light", "(RGB灯):on(0|1),off(),rgb(r,g,b),bright(0-255),read()", capLight},
     {"dist", "(超声波距离cm,只读):read()", capDistRead},
     {"temp", "(温湿度℃/%,只读):read()", capTempRead},
     {"beam", "(红外避障0=无1=有,只读):read()", capBeamRead},
 };
-static const char kNodeName[] = "融合节点";
+static const char kNodeName[] = "我的家";
 
 #endif
 
@@ -488,7 +488,7 @@ static void queueEvent(const char* text) {
     portEXIT_CRITICAL(&txq_mux);
 
     if (dropped) {
-        LOGF("[espnow] WARN tx queue full, dropped oldest\n");
+        LOGF("[警告] 上行队列已满，丢弃最旧一条\n");
     }
 }
 
@@ -588,16 +588,38 @@ public:
         if (len < 4 || data[0] != '@') {
             return;
         }
+        // ⚠️ ESP-NOW 回调给的是「原始字节 + 长度」，**没有 '\0' 终止符**
+        // （ESP32_NOW.cpp 的 _esp_now_rx_cb 把 IDF 的 data/len 原样透传）。
+        // 而下面 handleCommand/nextField 全是 C 字符串解析（strcmp/strchr/strlen），
+        // 不补终止符就会越过包尾去读驱动缓冲里的残留字节——症状是**最后一个字段**
+        // 带上乱码：`do light off` 被解析成 `offxV??` → 回 err unknown-action
+        // → AI 说「关灯」关不掉（带参数的 rgb/bright 因 action 后紧跟空格而侥幸正常，
+        // 所以只在 off/on/read 这类无参数动作上暴露，且是否命中取决于缓冲残留）。
+        // 必须先拷到本地缓冲并按 len 补 '\0'，之后一律用 text。
+        char text[256];
+        if (len >= sizeof(text)) {
+            return;   // 超长包直接丢弃（主控单包上限 200B，正常不会走到）
+        }
+        memcpy(text, data, len);
+        text[len] = '\0';
+
         if (broadcast) {
             // 主控 beacon（广播）：重报一次能力描述。
             // 主控重启后注册表是空的，靠这条自愈；发在 loop 里做，避免在回调里做重活。
-            if (strncmp(reinterpret_cast<const char*>(data), "@beacon", 7) == 0) {
+            if (strncmp(text, "@beacon", 7) == 0) {
                 info_due_ms = millis();
+                // 低频证明“链路是通的”：beacon 稳态每 3 秒一条，每条都打会把真正
+                // 有用的日志冲掉，所以限频 60 秒（想看实时收发看 [发送]/[收到]）
+                static uint32_t beacon_log_ms = 0;
+                if (beacon_log_ms == 0 || millis() - beacon_log_ms >= 60000) {
+                    beacon_log_ms = millis();
+                    LOGF("[信道] 收到主控广播（链路正常）\n");
+                }
             }
             return;
         }
-        const char* p = reinterpret_cast<const char*>(data) + 2;
-        if (data[1] != 'n') {
+        const char* p = text + 2;
+        if (text[1] != 'n') {
             return;   // 不是发给本节点的
         }
         // 信封：`@n<id>` 或 `@n<id>#<seq>`（序号可选，旧主控不带）
@@ -629,11 +651,11 @@ private:
         }
         // 主控未收到回执时会重传同一序号：只执行一次，直接重发上次回执
         if (seq != 0 && seq == last_cmd_seq && last_reply[0] != '\0') {
-            LOGF("[cmd] dup seq %u, resend last reply (not executed again)\n", (unsigned)seq);
+            LOGF("[收到] 第%u条指令重复送达，只重发上次回执、不重复执行\n", (unsigned)seq);
             queueEvent(last_reply);
             return;
         }
-        LOGF("[cmd] seq=%u %s\n", (unsigned)seq, body);   // 下行低频，直接打印不影响实时性
+        LOGF("[收到] 主控指令（第%u条）：%s\n", (unsigned)seq, body);   // 下行低频，直接打印不影响实时性
         char cap[16] = {0};
         char action[16] = {0};
 
@@ -705,11 +727,11 @@ static void onNewPeerCb(const esp_now_recv_info_t* info, const uint8_t* data, in
             delete peer;
             peer = nullptr;
             locked = false;   // 登记失败：继续 hop，下一轮 beacon 再试
-            LOGF("[espnow] peer add failed, keep hopping\n");
+            LOGF("[信道] 登记主控失败，继续扫描信道\n");
         } else {
             info_due_ms = millis();   // 锁定成功：立刻上报能力
-            LOGF("[espnow] LOCKED master %s (real ch %u, cur=%u)\n", fmtMac(info->src_addr), real_ch,
-                 cur_channel);
+            LOGF("[信道] 已锁定主控 %s（实际信道 %u，扫描计数 %u）\n", fmtMac(info->src_addr),
+                 real_ch, cur_channel);
         }
     }
     last_seen_ms = millis();
@@ -725,13 +747,13 @@ static void hopTick() {
     static bool warned_ap = false;
     if (!warned_ap && WiFi.isConnected()) {
         warned_ap = true;
-        LOGF("[espnow] WARNING: connected to AP, channel is locked -> hop cannot work\n");
+        LOGF("[警告] 本节点已连上路由器，信道被锁死 -> 无法扫描信道\n");
     }
     last_hop_ms = millis();
     if (cur_channel >= HOP_CHANNEL_MAX) {
         cur_channel = HOP_CHANNEL_MIN;
-        // 每轮(13*2000ms = 26s)打一行：现场据此判断"确实在找信道但没收到 beacon"
-        LOGF("[espnow] hopping... (no @beacon yet)\n");
+        // 每轮（500ms × 13 ≈ 6.5 秒）打一行：现场据此判断“确实在扫信道但一直没收到主控广播”
+        LOGF("[信道] 扫描中...（还没收到主控广播）\n");
     } else {
         cur_channel++;
     }
@@ -742,7 +764,39 @@ static void hopTick() {
     // 永久错位，现象是"广播收得到、数据发不出去"，非常难查。
     esp_err_t ch_err = esp_wifi_set_channel(cur_channel, WIFI_SECOND_CHAN_NONE);
     if (ch_err != ESP_OK) {
-        LOGF("[espnow] setChannel(%u) failed: %d\n", cur_channel, (int)ch_err);
+        LOGF("[信道] 切换到信道 %u 失败：%d\n", cur_channel, (int)ch_err);
+    }
+}
+
+// 把一条上行报文翻译成一句中文（**仅供串口日志**；不参与协议，也不**不认识任何具体
+// 能力名/事件名**—— 只认协议层的 kind，保持“节点自描述”的设计）。
+// 为什么要翻译：现场看串口的人（DIY 演示者）看不懂 `@n3 evt dist 57` 这类报文；
+// 另外 `info` 报文的规格很长（≈194B），原样打印会把真正有用的日志冲掉，所以只打摘要。
+static void describeUplink(const char* text, char* out, size_t out_len) {
+    const char* p = text;
+    if (p[0] == '@' && p[1] == 'n') {          // 跳过 "@n<id>" 与可选 "#<seq>" 信封
+        p += 2;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '#') {
+            p++;
+            while (*p >= '0' && *p <= '9') p++;
+        }
+        if (*p == ' ') p++;
+    }
+    if (strncmp(p, "info ", 5) == 0) {
+        snprintf(out, out_len, "上报设备能力清单");
+    } else if (strncmp(p, "evt hb ", 7) == 0) {
+        snprintf(out, out_len, "心跳");
+    } else if (strncmp(p, "evt ", 4) == 0) {
+        snprintf(out, out_len, "上报状态：%s", p + 4);
+    } else if (strncmp(p, "say ", 4) == 0) {
+        snprintf(out, out_len, "请求播放提示音：%s.mp3", p + 4);
+    } else if (strncmp(p, "ok ", 3) == 0) {
+        snprintf(out, out_len, "回执·执行成功：%s", p + 3);
+    } else if (strncmp(p, "err ", 4) == 0) {
+        snprintf(out, out_len, "回执·执行失败：%s", p + 4);
+    } else {
+        snprintf(out, out_len, "上报：%s", p);
     }
 }
 
@@ -775,12 +829,14 @@ static void evtTick() {
         return;
     }
     bool ok = (tx_peer != nullptr) && tx_peer->sendData(buf);   // 走广播，见 setup 里的说明
-    // 连发只在首包打印完整报文，重发仅在失败时补一行（同一事件不刷三行）
+    // 连发只在首包打印一行（中文描述，一眼看出在干什么）；重发仅在失败时补一行
     if (left == EVENT_RESEND - 1) {
-        LOGF("[espnow] TX  (%d/%d) %s%s\n", EVENT_RESEND - left, EVENT_RESEND, buf,
-             ok ? "" : "  <== SEND FAILED");
+        char desc[96];
+        describeUplink(buf, desc, sizeof(desc));
+        LOGF("[发送] %s（第%d/%d次）%s\n", desc, EVENT_RESEND - left, EVENT_RESEND,
+             ok ? "" : "  <== 发送失败");
     } else if (!ok) {
-        LOGF("[espnow] TX  (%d/%d) SEND FAILED\n", EVENT_RESEND - left, EVENT_RESEND);
+        LOGF("[发送] 第%d/%d次失败\n", EVENT_RESEND - left, EVENT_RESEND);
     }
 }
 
@@ -825,7 +881,7 @@ static void sonarTick() {
         // 超时/无回波：保持上次状态，不误报；日志限频 2 秒，避免每 100ms 刷屏
         if (sonar_timeout_log_ms == 0 || millis() - sonar_timeout_log_ms >= 2000) {
             sonar_timeout_log_ms = millis();
-            LOGF("[sonar] no echo (timeout), keep last state\n");
+            LOGF("[距离] 无回波（超时），保持上次判断\n");
         }
         return;
     }
@@ -835,7 +891,7 @@ static void sonarTick() {
     // “确实没测到”与“测到了只是没打印”。
     if (sonar_ok_log_ms == 0 || millis() - sonar_ok_log_ms >= 2000) {
         sonar_ok_log_ms = millis();
-        LOGF("[sonar] dist %d cm (motion=%d)\n", cm, motion_active ? 1 : 0);
+        LOGF("[距离] %d 厘米（%s）\n", cm, motion_active ? "有人" : "无人");
     }
 
     // 距离上报降频：变化达标或到保活周期才发（每 100ms 全发会占满 2.4G）
@@ -856,26 +912,35 @@ static void sonarTick() {
     if (!motion_active && cm < MOTION_TRIGGER_CM) {
         motion_active = true;
         auto_off_due_ms = 0;   // 又有人了：取消排队中的自动关灯
-        // 被人工接管过就不开灯；但上报和播报照旧——人来了依旧要播“检测到有人靠近”
+        // 播报**只跟着“真的自动开了灯”走**，不再是人一到就播。两个理由：
+        // ① 灯本来就亮着（语音开的 / 刚有人来过）时再播“已为你开灯”是说谎；
+        // ② 被人工接管（motion_suppress）时根本没开灯，播报同样说谎。
+        // 状态上报（evt motion 1）与播报解耦、仍无条件发 —— AI 始终能知道“有人”。
+        bool did_auto_on = false;
         if (!motion_suppress) {
             if (!light_on) {
                 auto_lit = true;   // 只接管“本来就是灭的”灯；用户自己开的灯不标记
+                light_on = 1;
+                applyLight();
+                did_auto_on = true;
+                LOGF("[人感] 有人靠近：自动开灯（并请求播报）\n");
+            } else {
+                LOGF("[人感] 有人靠近：灯已亮着，保持不动、不播报\n");
             }
-            light_on = 1;
-            applyLight();
-            LOGF("[motion] auto light on\n");
         } else {
-            LOGF("[motion] suppressed, light untouched\n");   // 人工已接管，不自作主张开灯
+            LOGF("[人感] 有人靠近：人工接管中，不动灯、不播报\n");   // 人工已接管，不自作主张开灯
         }
         queueEvt("motion", "1");
-        queueSay("motion");
+        if (did_auto_on) {
+            queueSay("motion");   // 只有真开了灯才播“检测到有人靠近，已为你开灯”
+        }
     } else if (motion_active && cm > MOTION_RELEASE_CM) {
         motion_active = false;
         motion_clear_ms = millis();   // 记录“人走了”，满 MOTION_SUPPRESS_HOLD_MS 才解除抑制
         queueEvt("motion", "0");
         if (MOTION_AUTO_OFF_MS > 0 && auto_lit) {
             auto_off_due_ms = millis() + MOTION_AUTO_OFF_MS;
-            LOGF("[motion] released, auto-off in %d ms\n", MOTION_AUTO_OFF_MS);
+            LOGF("[人感] 人已离开，%d 毫秒后自动关灯\n", MOTION_AUTO_OFF_MS);
         }
     }
 
@@ -891,7 +956,7 @@ static void sonarTick() {
         } else if (millis() - motion_clear_ms >= MOTION_SUPPRESS_HOLD_MS) {
             motion_suppress = false;
             motion_clear_ms = 0;
-            LOGF("[motion] suppress cleared, auto light back on\n");
+            LOGF("[人感] 人工接管解除，恢复自动开灯\n");
         }
     }
 
@@ -903,15 +968,15 @@ static void sonarTick() {
             auto_lit = false;
             light_on = 0;
             applyLight();
-            LOGF("[motion] auto off (nobody for %d ms)\n", MOTION_AUTO_OFF_MS);
+            LOGF("[人感] 自动关灯（已 %d 毫秒无人）\n", MOTION_AUTO_OFF_MS);
         }
     }
 }
 #endif   // NODE_ID == 1 || NODE_ID == 3（超声波）
 
-// 玄关 / 融合节点：DHT11 + 激光。
-// ⚠️ 这里必须是**独立的 #if 块**，不能写成上面的 #elif —— 融合节点两块都要编译，
-// #elif 是互斥的，会让融合节点丢掉 dhtTick/laserTick（曾因此报 "'dht' was not declared"）。
+// 玄关 / 我的家：DHT11 + 激光。
+// ⚠️ 这里必须是**独立的 #if 块**，不能写成上面的 #elif —— 我的家两块都要编译，
+// #elif 是互斥的，会让我的家丢掉 dhtTick/laserTick（曾因此报 "'dht' was not declared"）。
 #if NODE_ID == 2 || NODE_ID == 3
 static DHT* dht = nullptr;
 
@@ -928,7 +993,7 @@ static void dhtTick() {
             int hi = static_cast<int>(h + 0.5f);
             last_temp = ti;
             last_hum = hi;
-            LOGF("[dht] %d C %d %%\n", ti, hi);
+            LOGF("[温度] %d°C 湿度 %d%%\n", ti, hi);
             char arg[16];
             snprintf(arg, sizeof(arg), "%d %d", ti, hi);
             queueEvt("temp", arg);
@@ -944,8 +1009,7 @@ static void dhtTick() {
         }
         delay(120);   // DHT11 两次读取需间隔；仅失败路径有这点延迟
     }
-    LOGF("[dht] read failed after %d retries (last ok: %d C %d %%)\n", DHT_RETRY, last_temp,
-         last_hum);
+    LOGF("[温度] 读取失败（重试 %d 次，上次成功 %d°C %d%%）\n", DHT_RETRY, last_temp, last_hum);
     queueEvt("err", "dht");
 }
 
@@ -984,13 +1048,13 @@ static void laserTick() {
     // 日志同时打“逻辑结论”和“引脚真实电平”：之前写成 (DO=1) 是把归一化后的
     // 逻辑值当成了引脚电平，而红外避障是低电平有效，导致“检测到障碍”却显示 DO=1，误导排查
     if (first_read) {
-        LOGF("[obstacle] init %s (pin=%s)\n", v ? "detected" : "clear",
+        LOGF("[避障] 上电首帧：%s（引脚=%s）\n", v ? "检测到障碍" : "无障碍",
              readObstacleRaw() ? "HIGH" : "LOW");
         return;
     }
 
     // 只在状态变化时打印（采样周期 50ms，不能每次都打）
-    LOGF("[obstacle] %s (pin=%s)\n", v ? "detected" : "clear",
+    LOGF("[避障] %s（引脚=%s）\n", v ? "检测到障碍" : "无障碍",
          readObstacleRaw() ? "HIGH" : "LOW");
     queueEvt("beam", v ? "1" : "0");
     if (v == 1) {
@@ -1006,8 +1070,8 @@ void setup() {
 #if NODE_LOG
     Serial.begin(LOG_BAUD);
 #endif
-    LOGF("\n[espnow] ==== node %d boot ====\n", NODE_ID);
-    LOGF("[espnow] chip=%s heap=%u name=%s caps=%d\n", ESP.getChipModel(),
+    LOGF("\n[启动] ==== 节点 %d 上电 ====\n", NODE_ID);
+    LOGF("[启动] 芯片=%s 剩余内存=%u 设备名=%s 能力数=%d\n", ESP.getChipModel(),
          (unsigned)ESP.getFreeHeap(), node_def->name, node_def->cap_count);
 
     // 1) 传感器与灯：只初始化本节点真正接了的硬件。
@@ -1021,7 +1085,7 @@ void setup() {
     // 开局打印实际占空比：共阳模块在“关灯”时 duty=255（引脚高电平，与 + 同电位 = 灭）。
     // 若日志显 255 而灯仍亮，就是接线/极性反了（+ 接到了 GND，或模块其实是共阴），
     // 不是程序问题 —— 别再改代码了。
-    LOGF("[led] init on=%d bright=%d rgb=%d,%d,%d anode=%d -> duty %u/%u/%u\n", light_on,
+    LOGF("[灯] 初始化：开关=%d 亮度=%d 颜色=%d,%d,%d 共阳=%d -> 占空比 %u/%u/%u\n", light_on,
          light_bright, light_r, light_g, light_b, RGB_COMMON_ANODE,
          (unsigned)ledcRead(PIN_RGB_R), (unsigned)ledcRead(PIN_RGB_G),
          (unsigned)ledcRead(PIN_RGB_B));
@@ -1056,12 +1120,13 @@ void setup() {
         uint8_t boot_ch = cur_channel;
         wifi_second_chan_t boot_second = WIFI_SECOND_CHAN_NONE;
         esp_wifi_get_channel(&boot_ch, &boot_second);
-        LOGF("[espnow] mac=%s hop ch %d..%d connected=%d ch=%u\n", WiFi.macAddress().c_str(),
-             HOP_CHANNEL_MIN, HOP_CHANNEL_MAX, WiFi.isConnected() ? 1 : 0, boot_ch);
+        LOGF("[信道] 本机MAC=%s 扫描信道 %d..%d 已连路由器=%d 当前信道=%u\n",
+             WiFi.macAddress().c_str(), HOP_CHANNEL_MIN, HOP_CHANNEL_MAX,
+             WiFi.isConnected() ? 1 : 0, boot_ch);
     }
 
     if (!ESP_NOW.begin(kPmk)) {    // 官方 ESP_NOW 类（核心自带）
-        LOGF("[espnow] ESP_NOW.begin failed, restart\n");
+        LOGF("[信道] ESP-NOW 初始化失败，重启\n");
         delay(1000);
         ESP.restart();
     }
@@ -1075,7 +1140,7 @@ void setup() {
     // 之后主控下发的加密命令，本节点靠上面那个 peer 照样能解开。
     tx_peer = new HomePeer(kBroadcastMac, 0, nullptr);
     if (tx_peer == nullptr || !tx_peer->attach()) {
-        LOGF("[espnow] broadcast peer add failed, restart\n");
+        LOGF("[信道] 广播对端登记失败，重启\n");
         delay(1000);
         ESP.restart();
     }
@@ -1095,7 +1160,7 @@ void loop() {
             delete peer;
             peer = nullptr;
         }
-        LOGF("[espnow] lost master (%lu ms no packet), back to hop\n",
+        LOGF("[信道] 与主控失联（%lu 毫秒未收到包），重新扫描信道\n",
              (unsigned long)(millis() - last_seen_ms));
     }
 

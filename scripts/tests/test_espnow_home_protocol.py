@@ -22,7 +22,7 @@
      序号在信封 `@n<id>#<seq>`，节点按序号去重（同序号只执行一次）。
   4. 主控不得硬编码任何业务语义（能力名/事件名/播报文件名/温度阈值），
      否则接新设备就要重烧主控 —— 这是本文件大部分源码断言的由来。
-  5. 播报冷却必须按 (节点, 音频名)：融合节点四路传感器同时命中时不得互相压制；
+  5. 播报冷却必须按 (节点, 音频名)：我的家四路传感器同时命中时不得互相压制；
      播报短，不能被 Idle->Connecting 的网络重连误判抢断。
 
 真机验证仍需烧录后手动测试（见板级 README 的「ESP-NOW 居家设备」章节）。
@@ -43,7 +43,7 @@ WEB_INDEX = os.path.join(BOARD_DIR, "web", "index.html")
 UPLOAD_CC = os.path.join(BOARD_DIR, "http_upload_server.cc")
 
 MAX_NODES = 4               # 与 EspNowHome::kMaxNodes 一致
-MAX_CAPS = 4                # 与 EspNowHome::kMaxCaps 一致（融合节点有 4 个能力）
+MAX_CAPS = 4                # 与 EspNowHome::kMaxCaps 一致（我的家有 4 个能力）
 NAME_LEN = 20
 CAP_NAME_LEN = 14
 CAP_SPEC_LEN = 48
@@ -212,10 +212,28 @@ def motion_update(st, dist_cm):
     """复刻节点侧超声波迟滞：<30cm 触发(边沿一次)，>40cm 复位，中间保持。"""
     if not st["active"] and dist_cm < MOTION_TRIGGER_CM:
         st["active"] = True
-        return True          # 事件：有人靠近 → 节点发 say motion
+        return True          # “人来了”这个边沿（不代表一定会播报，见 motion_on_enter）
     if st["active"] and dist_cm > MOTION_RELEASE_CM:
         st["active"] = False
     return False
+
+
+def motion_on_enter(light_on, motion_suppress, auto_lit=False):
+    """复刻节点侧“人靠近”边沿的动作：返回 (light_on, auto_lit, say_motion, evt_motion)。
+
+    播报**只跟着“真的自动开了灯”走**（2026-09 修正）：
+      - 灯本来灭着且未被抑制 → 开灯 + 播报；
+      - 灯已亮着（语音开的 / 刚有人来过）→ 不动灯、不播报（否则“已为你开灯”是说谎）；
+      - 被人工接管（motion_suppress）→ 明明没开灯，同样不播报。
+    状态上报 `evt motion` 与播报**解耦**、始终发 —— AI 始终能知道“有人”。
+    """
+    did_auto_on = False
+    if not motion_suppress:
+        if not light_on:
+            auto_lit = True          # 只接管“本来就是灭的”灯；用户自己开的灯不标记
+            light_on = 1
+            did_auto_on = True
+    return light_on, auto_lit, did_auto_on, True
 
 
 class DeviceTable:
@@ -356,7 +374,7 @@ class TestCapSpecParsing(unittest.TestCase):
         self.assertEqual(parse_caps("light:on(0|1)"), [("light", ":on(0|1)")])
 
     def test_capacity_limited(self):
-        # 不写死 3：融合节点把上限抬到 4，这里跟着 MAX_CAPS 走
+        # 不写死 3：我的家把上限抬到 4，这里跟着 MAX_CAPS 走
         items = ";".join("c%d(x):m()" % i for i in range(MAX_CAPS + 1))
         caps = parse_caps(items)
         self.assertEqual(len(caps), MAX_CAPS)
@@ -489,6 +507,53 @@ class TestMotionHysteresis(unittest.TestCase):
         self.assertTrue(motion_update(st, 20))    # 可再次触发
 
 
+class TestMotionAnnounce(unittest.TestCase):
+    """人靠近时“播报”必须与“真的自动开了灯”绑定。
+
+    旧实现是人一到就无条件 `queueSay("motion")`，于是灯本来就亮着（用户语音开的、
+    或刚有人来过）时，喇叭照样播“检测到有人靠近，已为你开灯”——与事实不符。
+    """
+
+    def test_dark_lamp_lights_and_announces(self):
+        light_on, auto_lit, say, evt = motion_on_enter(light_on=0, motion_suppress=False)
+        self.assertEqual(light_on, 1)
+        self.assertTrue(auto_lit)      # 标记为“自动开的”，人走后才允许自动关
+        self.assertTrue(say)
+        self.assertTrue(evt)
+
+    def test_light_already_on_does_not_announce(self):
+        """灯已亮着：不动灯、不播报 —— 这正是本次要修的行为。"""
+        light_on, auto_lit, say, evt = motion_on_enter(light_on=1, motion_suppress=False)
+        self.assertEqual(light_on, 1)
+        self.assertFalse(auto_lit)     # 用户自己开的灯不标记为自动
+        self.assertFalse(say, "灯已亮着还播“已为你开灯”是说谎")
+        self.assertTrue(evt)           # 状态照旧上报
+
+    def test_suppressed_does_not_announce(self):
+        """人工接管过（suppress）时没开灯，同样不播报。"""
+        light_on, auto_lit, say, evt = motion_on_enter(light_on=0, motion_suppress=True)
+        self.assertEqual(light_on, 0, "抑制期间不自作主张开灯")
+        self.assertFalse(auto_lit)
+        self.assertFalse(say, "没开灯却播“已为你开灯”是说谎")
+        self.assertTrue(evt)
+
+    def test_already_auto_lit_lamp_does_not_reannounce(self):
+        """之前自动开的灯还亮着 → 不重复播报，且仍归“自动”（人走后照旧自动关）。"""
+        light_on, auto_lit, say, _ = motion_on_enter(light_on=1, motion_suppress=False,
+                                                    auto_lit=True)
+        self.assertEqual(light_on, 1)
+        self.assertTrue(auto_lit)
+        self.assertFalse(say)
+
+    def test_event_always_reported_regardless_of_announce(self):
+        """状态上报与播报解耦：任何灯态/抑制组合下 evt motion 都必须发。"""
+        for light_on in (0, 1):
+            for suppress in (False, True):
+                _, _, _, evt = motion_on_enter(light_on, suppress)
+                self.assertTrue(evt, "evt motion 必须始终上报（light_on=%d suppress=%s）"
+                                % (light_on, suppress))
+
+
 class TestSeqEnvelope(unittest.TestCase):
     """序号信封 `@n<id>#<seq>`：只改信封、不改正文 → 旧节点仍能执行命令。"""
 
@@ -510,6 +575,61 @@ class TestSeqEnvelope(unittest.TestCase):
     def test_seq_wraps_in_uint16(self):
         # 节点侧是 uint16_t；主控侧不会发 0（0 是"无序号"旧格式的保留值）
         self.assertEqual(parse_envelope(pkt("@n1#65536 ok light 1"))[1], 0)
+
+
+class TestEspNowPayloadTermination(unittest.TestCase):
+    """ESP-NOW 回调给的是「原始字节 + 长度」，**没有 '\\0' 终止符**。
+
+    Arduino 核心的 ESP32_NOW.cpp 里 `_esp_now_rx_cb()` 把 IDF 的 data/len 直接
+    透传给 onReceive（无拷贝、无补零）。而节点固件后续全是 C 字符串解析
+    （handleCommand 里的 strncmp/strchr/strlen），于是越过包尾读到驱动缓冲的
+    残留字节 —— **只有最后一个字段**会中招（前面字段靠 strchr 找到空格就截断了）：
+
+        `do light off`  → action = `off` + 残留 → strcmp("off") 失败
+                        → 回 `err unknown-action offxV??` → AI 说「关灯」关不掉
+
+    带参数的 `do light rgb 0 0 255` 因为 action 后面紧跟空格而侥幸正常
+    （args 虽然也带残留，但 parseNums 只挑数字），这正是"只有关灯/查询这类
+    无参数命令偶发失效"的原因。
+    """
+
+    # 模拟驱动接收缓冲里的残留字节（上一次更长的包 / 未初始化内存）
+    RESIDUAL = b"xV\xef\xbf\xbd\xef\xbf\xbd?"
+
+    @staticmethod
+    def _c_str(buf: bytes) -> bytes:
+        """C 字符串语义：读到第一个 b'\\0'；没有终止符就一路读到底。"""
+        stop = buf.find(b"\0")
+        return buf if stop < 0 else buf[:stop]
+
+    @classmethod
+    def _parse_action(cls, wire: bytes) -> bytes:
+        """按 C 字符串语义从下行报文里取出 action 字段。"""
+        body = cls._c_str(wire).split(b" ", 1)[1]          # 去掉 "@n3#15"
+        return cls._c_str(body[len(b"do light "):])         # 去掉 "do light "
+
+    @classmethod
+    def _with_terminator(cls, payload: bytes) -> bytes:
+        """复刻修复后节点做的事：memcpy(text, data, len); text[len] = '\\0';"""
+        return payload + b"\0"
+
+    def test_last_field_is_corrupted_without_terminator(self):
+        """固化根因：不补终止符时 off 必然被污染成 off+乱码 → 关灯失效。"""
+        got = self._parse_action(b"@n3#15 do light off" + self.RESIDUAL)
+        self.assertEqual(got, b"off" + self.RESIDUAL)
+        self.assertNotEqual(got, b"off")        # strcmp(action, "off") 必然失败
+
+    def test_terminated_parse_is_clean(self):
+        """修复后：按 len 补 '\\0'，残留再多也污染不到最后一个字段。"""
+        self.assertEqual(
+            self._parse_action(self._with_terminator(b"@n3#15 do light off")), b"off")
+
+    def test_argument_commands_survive_either_way(self):
+        """带参数的命令为何一直"看起来正常"：action 后紧跟空格，取不到残留。"""
+        wire = b"@n3#15 do light rgb 0 0 255" + self.RESIDUAL
+        fields = self._c_str(wire).split(b" ", 1)[1].split(b" ", 3)
+        self.assertEqual(fields[1], b"light")
+        self.assertEqual(fields[2], b"rgb")      # 没被污染，所以调色一直正常
 
 
 class _PendingCmd:
@@ -688,12 +808,44 @@ class TestSourceContracts(unittest.TestCase):
         """
         self.assertIn("#define OBSTACLE_ACTIVE_LOW", self.ino)
         self.assertRegex(self.ino, r"readObstacleRaw\(\) == LOW")   # 低电平有效分支
-        self.assertIn("[obstacle]", self.ino)
+        self.assertIn("[避障]", self.ino)
         self.assertNotIn("[laser]", self.ino)
         # 日志必须打真实引脚电平：早期把归一化后的 0/1 当成了 DO 电平，拿万用表一对就矛盾
-        self.assertIn("(pin=%s)", self.ino)
+        self.assertIn("（引脚=%s）", self.ino)
         self.assertNotIn("(DO=%d)", self.ino)
-        self.assertIn("[obstacle] init", self.ino)   # 上电首帧只记录、不播报
+        self.assertIn("[避障] 上电首帧", self.ino)   # 上电首帧只记录、不播报
+
+    def test_serial_logs_are_human_readable_chinese(self):
+        """串口日志必须是中文人话（现场看串口的是 DIY 演示者，看不懂 `@n3 evt dist 57`）。
+
+        同时钉住“日志量不膨胀”：`info` 报文原来原样打印 194B 能力规格（每 3 秒一条），
+        现在只打摘要 —— 中文化本身不增加成本（printf 逐字节拷贝，不做编码转换），
+        真正要防的是“单条过长 + 频率过高”把 UART 缓冲打满（Arduino Serial 写满会阻塞）。
+        """
+        for gone in ("[espnow]", "[sonar]", "[dht]", "[motion]", "[cmd]", "[led]",
+                     "[obstacle]"):
+            self.assertNotIn(gone, self.ino, "串口日志应已中文化，不该再出现：%s" % gone)
+        for need in ("[启动]", "[信道]", "[收到]", "[发送]", "[距离]", "[温度]", "[避障]",
+                     "[人感]", "[灯]", "[警告]"):
+            self.assertIn(need, self.ino, "缺少中文日志标签 %s" % need)
+        # 提示音到底发没发，必须能从日志一眼看出（现场最关心之一）
+        self.assertIn("请求播放提示音", self.ino)
+        # info 报文不许原样打印（194B × 每 3 秒会把有用日志冲掉）
+        self.assertIn("上报设备能力清单", self.ino)
+
+    def test_describe_uplink_knows_only_protocol_kinds(self):
+        """日志翻译函数只认协议层 kind，**不认识任何具体能力名/事件名**。
+
+        否则就是把业务语义硬编码回节点固件，破坏了“节点自描述、主控零改动”的设计
+        （日志显示也不能开这个口子）。
+        """
+        idx = self.ino.find("static void describeUplink")
+        self.assertGreater(idx, -1, "缺少 describeUplink（日志翻译）")
+        body = self.ino[idx:idx + 1100]
+        for kind in ('"info "', '"evt "', '"say "', '"ok "', '"err "'):
+            self.assertIn(kind, body, "describeUplink 必须识别协议 kind %s" % kind)
+        for biz in ("light", "dist", "temp", "beam", "motion"):
+            self.assertNotIn(biz, body, "日志翻译不得硬编码业务名：%s" % biz)
 
     # ---------- Web 提示音（/sdcard/announce） ----------
 
@@ -782,7 +934,8 @@ class TestSourceContracts(unittest.TestCase):
 
     def test_node_dedups_retried_command_seq(self):
         """节点对主控重传的同一序号只执行一次，重复到达直接重发上次回执。"""
-        for need in ("last_cmd_seq", "last_reply", "resend last reply"):
+        # 日志已中文化：锚点用中文那句，避免“改了文案就误报”
+        for need in ("last_cmd_seq", "last_reply", "只重发上次回执"):
             self.assertIn(need, self.ino, "节点固件缺少序号去重：%s" % need)
 
     def test_node_hops_fast_and_has_heartbeat(self):
@@ -799,7 +952,7 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn('strcmp(nm, "hb") == 0', self.cc)
 
     def test_announce_cooldown_is_per_event_not_per_node(self):
-        """播报冷却必须按 (节点, 音频名)：融合节点 motion/beam 同时命中时不得互相压制。"""
+        """播报冷却必须按 (节点, 音频名)：我的家 motion/beam 同时命中时不得互相压制。"""
         self.assertIn("announce_cool_", self.board)
         self.assertIn("kAnnounceCoolSlots", self.board)
         self.assertNotIn("home_announce_ms_", self.board)
@@ -962,6 +1115,27 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn("nextField", self.ino)
         self.assertRegex(self.ino, r"while \(\*p == ' '\)")
 
+    def test_node_terminates_espnow_payload_before_parsing(self):
+        """ESP-NOW 回调的 data **没有 '\\0' 终止符**（ESP32_NOW.cpp 的 _esp_now_rx_cb
+        原样透传 IDF 的 data/len），而 onReceive 之后全是 C 字符串解析 —— 不补终止符
+        就会越过包尾读到驱动缓冲残留：`do light off` 的 action 变成 `offxV??`
+        → strcmp 失败 → 回 err unknown-action → AI 说「关灯」关不掉
+        （只有最后一个字段中招，rgb/bright 这类带参数命令因 action 后紧跟空格而侥幸正常）。
+
+        因此 onReceive 必须先拷贝到本地缓冲并按 len 补 '\\0'。
+        """
+        idx = self.ino.find("void onReceive(")
+        self.assertGreater(idx, -1, "节点必须有 onReceive 定义")
+        # 用函数边界而不是固定字符窗口：日志增删不该让断言误报
+        end = self.ino.find("void onSent(", idx)
+        self.assertGreater(end, idx, "未找到 onReceive 的结束边界")
+        body = self.ino[idx:end]
+        self.assertIn("memcpy(text, data, len)", body, "必须先拷贝 ESP-NOW 载荷")
+        self.assertIn("text[len] = '\\0'", body, "必须按 len 补字符串终止符")
+        self.assertIn("const char* p = text + 2", body, "信封解析必须用补齐后的缓冲")
+        self.assertNotIn("reinterpret_cast<const char*>(data)", body,
+                         "拷贝后不得再把裸 data 当 C 字符串用")
+
     def test_board_trims_ai_strings(self):
         """主控侧必须 trim cap/action/args。
 
@@ -1020,7 +1194,7 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn("queueEvt(\"dist\"", self.ino)
 
     def test_fusion_node_covers_all_four_sensors(self):
-        """节点 3 = 融合节点：一块板接全部四个传感器（RGB + 超声波 + DHT11 + 激光）。
+        """节点 3 = 我的家：一块板接全部四个传感器（RGB + 超声波 + DHT11 + 激光）。
 
         关键约束：
         - RGB 与超声波沿用 GPIO4/5/6/7/15；DHT11/激光必须换到 16/17（4/5 已被 RGB 占用）；
@@ -1032,8 +1206,8 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn("#if NODE_ID == 3", self.ino)
         self.assertRegex(self.ino, r"#define PIN_DHT\s+16")
         self.assertRegex(self.ino, r"#define PIN_LASER\s+17")
-        self.assertGreaterEqual(MAX_CAPS, 4, "融合节点 4 个能力，主控 kMaxCaps 必须 ≥4")
-        for need in ('"客厅灯"', '"玄关感应"', '"融合节点"'):
+        self.assertGreaterEqual(MAX_CAPS, 4, "我的家 4 个能力，主控 kMaxCaps 必须 ≥4")
+        for need in ('"客厅灯"', '"玄关感应"', '"我的家"'):
             self.assertIn(need, self.ino, "缺少节点名 %s" % need)
 
         # ledcAttach 必须落在条件编译块里（玄关节点的 GPIO4/5 是 DHT11 与激光）
@@ -1054,7 +1228,7 @@ class TestSourceContracts(unittest.TestCase):
         self.assertEqual({"light", "dist", "temp", "beam"}, set(specs),
                          "四个能力必须都在节点固件的能力表里")
         names = ("light", "dist", "temp", "beam")
-        text = "@n3 info 融合节点 " + ";".join(n + specs[n] for n in names)
+        text = "@n3 info 我的家 " + ";".join(n + specs[n] for n in names)
         n_bytes = len(text.encode("utf-8"))
         self.assertLessEqual(
             n_bytes, 200,
@@ -1075,16 +1249,37 @@ class TestSourceContracts(unittest.TestCase):
         self.assertIn("auto_lit = false", body, "capLight 必须取消自动关灯排队")
         self.assertIn('strcmp(action, "read")', body, "read 只是查询，不该取消排队")
 
+    def test_motion_announce_is_bound_to_actually_lighting(self):
+        """播报必须只在“真的自动开了灯”时请求（2026-09 修正）。
+
+        旧代码人一到就 `queueSay("motion")`：灯本来就亮着（用户语音开的、或刚有人
+        来过）时，喇叭照样播“检测到有人靠近，已为你开灯”——与事实不符。
+        状态上报 `evt motion 1` 与播报解耦，仍必须无条件发（AI 要能知道“有人”）。
+        """
+        idx = self.ino.find("if (!motion_active && cm < MOTION_TRIGGER_CM)")
+        self.assertGreater(idx, -1, "未找到人靠近的边沿处理")
+        end = self.ino.find("} else if (motion_active && cm > MOTION_RELEASE_CM)", idx)
+        self.assertGreater(end, idx, "未找到人靠近分支的结束边界")
+        body = self.ino[idx:end]
+        self.assertIn("bool did_auto_on = false", body)
+        cond = body.find("if (did_auto_on)")
+        self.assertGreater(cond, -1, "播报必须受 did_auto_on 控制")
+        say = body.find('queueSay("motion")')
+        self.assertGreater(say, cond, 'queueSay("motion") 必须在 did_auto_on 分支内')
+        evt = body.find('queueEvt("motion", "1")')
+        self.assertGreater(evt, -1, "evt motion 1 必须仍上报")
+        self.assertLess(evt, cond, "evt motion 1 不能被塞进播报分支（状态与播报解耦）")
+
     def test_node_sensor_blocks_are_independent_and_paired(self):
         """超声波块与 DHT/激光块必须是两个独立 #if，且预处理块必须配对。
 
-        融合节点(3) 两块都要编译；曾把它写成 `#if(1||3) … #elif(2||3) …` ——
-        #elif 是互斥的，融合节点因此丢掉 dhtTick/laserTick，报
+        我的家(3) 两块都要编译；曾把它写成 `#if(1||3) … #elif(2||3) …` ——
+        #elif 是互斥的，我的家因此丢掉 dhtTick/laserTick，报
         "'dht' was not declared in this scope"；而节点 1/2 各自只需要一块，照样能编过，
         所以只有真的编译 NODE_ID=3 才会暴露（已实际踩过）。
         """
         self.assertNotIn("#elif NODE_ID == 2 || NODE_ID == 3", self.ino,
-                         "DHT/激光块必须是独立 #if，写成 #elif 会让融合节点缺代码")
+                         "DHT/激光块必须是独立 #if，写成 #elif 会让我的家缺代码")
         depth = 0
         for line in self.ino.splitlines():
             t = line.strip()

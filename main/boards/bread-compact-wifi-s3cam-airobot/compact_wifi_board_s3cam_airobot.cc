@@ -128,7 +128,7 @@ private:
     esp_timer_handle_t espnow_wait_timer_ = nullptr;
     int espnow_wait_ticks_ = 0;  // 轮询次数（日志里能看到，用来确认轮询真的在跑）
     int espnow_wait_logs_ = 0;   // 已经打过的等待日志条数（只打前几条，避免刷屏）
-    // 播报冷却按 (节点, 音频名) 两个维度：融合节点同时触发 motion/beam 时，
+    // 播报冷却按 (节点, 音频名) 两个维度：我的家同时触发 motion/beam 时，
     // 只按节点冷却会让它们互相压制（现场表现为"播报时有时无"）。
     struct AnnounceCool {
         bool used = false;
@@ -1157,7 +1157,7 @@ private:
     // ---- ESP-NOW 居家节点 ----
 
     // 事件播报：仅待机时播（不打断对话），同节点同音频 10 秒冷却
-    // （冷却按 (节点, 音频名)：融合节点四路传感器同时命中时不得互相压制）
+    // （冷却按 (节点, 音频名)：我的家四路传感器同时命中时不得互相压制）
     // 把 /sdcard/announce 里实际有哪些文件打出来：排查“文件到底传到哪了 / 名字对不对”
     // 最直接的一行（走 ESP-NOW TAG，已单独放开到 INFO，网页日志一定能看到）。
     void LogAnnounceDir() {

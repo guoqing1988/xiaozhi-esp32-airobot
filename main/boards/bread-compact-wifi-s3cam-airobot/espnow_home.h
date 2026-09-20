@@ -60,7 +60,7 @@ public:
     using LinkCallback = std::function<void(const char* what, const char* detail)>;
 
     static constexpr int kMaxNodes = 4;
-    static constexpr int kMaxCaps = 4;               // 每节点能力上限（融合节点有 4 个；超出的静默忽略）
+    static constexpr int kMaxCaps = 4;               // 每节点能力上限（我的家有 4 个；超出的静默忽略）
     static constexpr int kNameLen = 20;              // 设备名缓冲（UTF-8，中文约 6 字）
     static constexpr int kCapNameLen = 14;
     static constexpr int kCapSpecLen = 48;           // 能力规格文本（含描述/动作/参数）
