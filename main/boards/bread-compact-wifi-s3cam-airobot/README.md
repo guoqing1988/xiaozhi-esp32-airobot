@@ -385,6 +385,8 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 ### TF 卡准备
 - 把歌曲（**MP3** 格式）放入 TF 卡的 `music` 目录：`/sdcard/music/*.mp3`。
 - 播放器启动时会扫描该目录，自动列出歌名。
+- 歌单访问是**按需遍历、不整表拷贝**（`HasSongs()` / `ForEachSong()`，见踩坑 20）：本板内部 SRAM 紧张，
+  `self.music.list` / `self.music.search` / 闹钟响铃前判空都**不会**复制整张歌单。
 
 ### 歌词显示（LRC）
 - 同名歌词文件（`歌曲名.lrc`，与 .mp3 同目录）会被自动解析，播放时逐行显示在屏幕底部字幕条。
@@ -1482,6 +1484,41 @@ HttpClient 改成**常驻复用**（`static std::unique_ptr<Http> explain_http`�
 
 **回归防护**：`scripts/tests/test_airobot_camera_explain_http.py`（不得每次新建、常驻必须判空只建一次、
 Close/超时必须保留、注释必须写明是规避）。
+
+### 20. 歌单“整表按值拷贝”持续碎化内部 SRAM（2026-09 修复）
+
+> **现象**：`self.music.list`（列歌单）、`self.music.search`（搜歌）以及**闹钟响铃前的判空**，
+> 每次都会把整张歌单按值拷贝一份 —— N 首歌就是 N 次堆分配。而本板内部 SRAM 空载只剩
+> 20~25KB、历史最低 6KB（见踩坑 16/18），歌多时这些短命小分配会不断碎化内部堆，
+> 是“偶发分配失败 / 重启”的隐性来源，且**平时完全看不出来**。
+
+**根因**：`LocalMusicPlayer::ListSongs()` 按值返回 `std::vector<std::string>`：
+
+| 调用点 | 实际只需要 | 却做了 |
+|---|---|---|
+| `self.music.list` | 前 30 首歌名 + 总数 | 先拷整表 |
+| `self.music.search` | 匹配的歌名 | 先拷整表 |
+| 闹钟响铃前 | 判断“有没有歌” | `!ListSongs().empty()` —— **只为判空也拷整表** |
+
+**修复**：接口改成按需访问，**锁内零拷贝**（`local_music_player.{h,cc}`）：
+
+```cpp
+bool HasSongs() const;                                        // 判空（不拷贝）
+void ForEachSong(const std::function<bool(const std::string&)>& cb) const;  // 锁内遍历
+```
+
+板级三处调用点全部改走这两个接口；`ListSongs()` 已删除。
+
+> ⚠️ **使用约束**：`ForEachSong` 的回调运行在 `songs_mutex_` 持锁状态下，
+> **回调内不得再调用 `LocalMusicPlayer` 的任何方法**（`std::mutex` 非递归，会死锁）。
+> 当前两处回调只做字符串拼接，安全。
+
+**回归防护**：`scripts/tests/test_music_list_api.py` —— 拦住“把按值返回整张列表的接口加回来”、
+要求遍历持锁且支持提前退出、要求板级不得再出现 `.ListSongs()`。
+
+> **同类检查思路**：本板内部 SRAM 紧张的根因往往不是“一次性大分配”，而是**高频短命小分配**
+> （`std::string` 拷贝、JSON 拼接、`vector<string>` 复制）。改内存相关代码时先问一句：
+> “这个接口是不是为了判空 / 取前几个而复制了全部？”
 
 ## 与上游合并提示
 

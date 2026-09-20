@@ -569,17 +569,23 @@ private:
             "To find a specific song by name/artist, use self.music.search instead.",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
-                auto songs = GetMusicPlayer()->ListSongs();
                 std::string result;
                 const size_t kMaxShown = 30;  // 截断: 避免几百首歌名撑爆 AI 上下文
-                for (size_t i = 0; i < songs.size() && i < kMaxShown; ++i) {
-                    result += songs[i] + "\n";
-                }
-                if (songs.size() > kMaxShown) {
-                    result += "...(共 " + std::to_string(songs.size()) + " 首, 仅显示前 " +
+                size_t total = 0;
+                // 锁内遍历、零拷贝（原先为显示 30 首却拷贝整张歌单）：
+                // 需要总数所以不能提前退出，只把前 30 首拼进结果。
+                GetMusicPlayer()->ForEachSong([&](const std::string& name) {
+                    if (total < kMaxShown) {
+                        result += name + "\n";
+                    }
+                    total++;
+                    return true;
+                });
+                if (total > kMaxShown) {
+                    result += "...(共 " + std::to_string(total) + " 首, 仅显示前 " +
                               std::to_string(kMaxShown) + " 首)";
                 } else {
-                    result += "共 " + std::to_string(songs.size()) + " 首";
+                    result += "共 " + std::to_string(total) + " 首";
                 }
                 return result;
             });
@@ -592,11 +598,11 @@ private:
                 std::string kw = props["keyword"].value<std::string>();
                 std::string lower_kw = kw;
                 std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
-                auto songs = GetMusicPlayer()->ListSongs();
                 std::string result;
                 size_t matched = 0;
                 const size_t kMaxShown = 30;
-                for (const auto& s : songs) {
+                // 锁内遍历、零拷贝（原先为搜关键词整表拷贝一次）
+                GetMusicPlayer()->ForEachSong([&](const std::string& s) {
                     bool hit = kw.empty();
                     if (!hit) {
                         hit = s.find(kw) != std::string::npos;
@@ -612,7 +618,8 @@ private:
                     if (hit) {
                         matched++;
                     }
-                }
+                    return true;   // 需要统计全部匹配数，不能提前退出
+                });
                 if (matched == 0) {
                     return std::string("未找到包含 \"") + kw + "\" 的歌曲";
                 }
@@ -745,7 +752,7 @@ private:
         }
         bool ringing = false;
         auto* player = GetMusicPlayer();  // 懒创建(首次响铃时建对象 + 扫描 SD 卡)
-        if (player != nullptr && !player->ListSongs().empty()) {
+        if (player != nullptr && player->HasSongs()) {
             if (!a.song.empty()) {
                 // 指定铃声: PlaySong 成功返回以"已开始播放"/"正在播放"开头；未找到则回退随机
                 std::string r = player->PlaySong(a.song);

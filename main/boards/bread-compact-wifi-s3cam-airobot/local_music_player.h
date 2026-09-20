@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <functional>
 #include <thread>
 #include <mutex>
 
@@ -29,7 +30,13 @@ public:
     void Resume();
     void Stop();
 
-    std::vector<std::string> ListSongs() const;
+    // 歌单只读访问：本板内部 SRAM 空载仅剩 20~25KB，而“判空 / 取前 30 首”原来都要把整张
+    // 歌单按值拷贝一遍（N 首歌名 = N 次堆分配），是碎片与分配失败的来源。
+    // 现在：判空走 HasSongs()，遍历走 ForEachSong()（锁内零拷贝）。
+    bool HasSongs() const;
+    // 在 songs_mutex_ 保护下遍历歌单（零拷贝）。cb 返回 false 立即结束遍历。
+    // ⚠ cb 内不得再调用本类其他方法（std::mutex 非递归，会死锁）。
+    void ForEachSong(const std::function<bool(const std::string&)>& cb) const;
     // 把用户说的(可能不准确的)歌名解析成本地准确文件名(含扩展名); 找不到返回空。
     // 用于闹钟指定铃声等场景: 把语音输入的模糊名持久化为准确名, 保证响铃一定播中。
     std::string ResolveSong(const std::string& name);

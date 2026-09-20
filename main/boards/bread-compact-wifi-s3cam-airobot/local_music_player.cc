@@ -221,9 +221,18 @@ void LocalMusicPlayer::ScanSongs() {
     ESP_LOGI(TAG, "Found %u songs in %s", static_cast<unsigned>(songs_.size()), MUSIC_DIR);
 }
 
-std::vector<std::string> LocalMusicPlayer::ListSongs() const {
+bool LocalMusicPlayer::HasSongs() const {
     std::lock_guard<std::mutex> lock(songs_mutex_);
-    return songs_;
+    return !songs_.empty();
+}
+
+void LocalMusicPlayer::ForEachSong(const std::function<bool(const std::string&)>& cb) const {
+    std::lock_guard<std::mutex> lock(songs_mutex_);
+    for (const auto& s : songs_) {
+        if (!cb(s)) {
+            return;
+        }
+    }
 }
 
 std::string LocalMusicPlayer::ResolveSong(const std::string& name) {
