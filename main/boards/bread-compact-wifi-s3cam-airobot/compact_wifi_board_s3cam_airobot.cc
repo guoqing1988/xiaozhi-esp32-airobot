@@ -1253,6 +1253,9 @@ private:
     // 镜像/翻转：与 MCP 工具 self.camera.set_flip 共用同一份 NVS（命名空间 camera 的 flip 键），
     // 这样网页改的、AI 工具改的、开机读回的是同一个值，不会两套配置打架。
     // flip 位含义：bit0 = 左右镜像，bit1 = 上下翻转。
+    // 注意：翻转值**不做内存缓存**。因为 MCP 工具 self.camera.set_flip 会自己直接写
+    // sensor + NVS（不经过下面的 SetCameraFlip），缓存会过期 → 网页弹窗显示旧值、
+    // 判断“有没有变化”也会判错。这里每次直接读 NVS（几十微秒，可忽略）。
     int GetCameraFlip() {
         Settings s("camera", false);
         return s.GetInt("flip", 0);
@@ -1270,25 +1273,40 @@ private:
         s.SetInt("flip", mode);
     }
 
-    std::string VideoCfgJson() {
+    // size_changed 回给前端：只有分辨率变了才需要重连 <img>（其余参数原地生效，画面不断）。
+    std::string VideoCfgJson(bool size_changed = false) {
         return std::string("{\"ok\":true,\"size\":") + std::to_string(video_cfg_.size) +
                ",\"fps\":" + std::to_string(video_cfg_.fps) +
                ",\"quality\":" + std::to_string(video_cfg_.quality) +
-               ",\"flip\":" + std::to_string(GetCameraFlip()) + "}";
+               ",\"flip\":" + std::to_string(GetCameraFlip()) +
+               ",\"size_changed\":" + (size_changed ? "true" : "false") + "}";
     }
 
     // 网页保存参数：帧率/镜像/JPEG 质量都立即生效；只有画面尺寸需要重建相机，
     // 正在播时顺带重启流（前端拿到 ok 后重连 <img>）。
+    // 网页保存参数：四项都即时生效（详见各分支注释）。
+    // 关键：**先算有没有真的变化**——没变就不写 NVS、不写 sensor 寄存器，
+    // 避免“什么都没改也点一下应用”带来的 flash 磨损、I2C 抖动和画面闪动。
     std::string VideoCfgApply(int size, int fps, int quality, int flip) {
-        const bool size_changed = (size != video_cfg_.size);
-        const bool quality_changed = (quality != video_cfg_.quality);
+        const VideoCfg old = video_cfg_;   // 旧值（clamp 之后再比较，判断才准）
         video_cfg_.size = size;
         video_cfg_.fps = fps;
         video_cfg_.quality = quality;
         ClampVideoCfg();
-        SaveVideoCfg();
-        LocalVideoStreamSetFps(video_cfg_.fps);  // 帧率不用重启就生效
-        SetCameraFlip(flip);                    // 镜像/翻转同样立即生效（与是否在播无关）
+        const bool size_changed = (video_cfg_.size != old.size);
+        const bool quality_changed = (video_cfg_.quality != old.quality);
+        const bool fps_changed = (video_cfg_.fps != old.fps);
+        const bool flip_changed = (flip != GetCameraFlip());  // 读 NVS，不缓存（见 GetCameraFlip 注释）
+        // NVS 只在有变化时落盘（写入有磨损寿命，而且会阻塞）
+        if (size_changed || quality_changed || fps_changed || flip_changed) {
+            SaveVideoCfg();
+        }
+        if (fps_changed) {
+            LocalVideoStreamSetFps(video_cfg_.fps);  // 帧率不用重启就生效
+        }
+        if (flip_changed) {
+            SetCameraFlip(flip);                     // 镜像/翻转立即生效（与是否在播无关）
+        }
         // JPEG 质量只写 sensor 寄存器（ov2640.c 的 set_quality 就一行 write_reg），
         // 不参与帧缓冲分配 → 推流中改也不用重启相机，下一帧就是新画质。
         if (quality_changed && LocalVideoStreamRunning()) {
@@ -1301,7 +1319,7 @@ private:
         if (size_changed && LocalVideoStreamRunning()) {
             ApplyVideoFramesize();
         }
-        return VideoCfgJson();
+        return VideoCfgJson(size_changed);
     }
 
     // 开启：相机切 JPEG（模组直出，零编码零拷贝）→ 起独立 /stream 服务（端口 81）。

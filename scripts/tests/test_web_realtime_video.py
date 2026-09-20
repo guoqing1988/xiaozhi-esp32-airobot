@@ -320,6 +320,36 @@ class TestCameraModeSwitch(_Base):
         self.assertIn("ApplyVideoFramesize()", body, "分辨率要动态切 sensor")
         self.assertNotIn("VideoStreamStop()", body, "VideoCfgApply 里不该再重启流")
 
+    def test_unchanged_params_skip_work(self):
+        """什么都没改也点「应用」→ 不该写 NVS、不该写 sensor 寄存器。
+
+        用户问过这点：参数没变动时就不该再下发一遍。
+        无条件下发的代价：NVS 写入磨损 flash、I2C 写寄存器让画面抖一下。
+        """
+        m = re.search(r"std::string VideoCfgApply\(int size, int fps, int quality, int flip\)\s*\{(.*?)\n    \}",
+                      self.board, re.S)
+        body = m.group(1)
+        for flag in ("size_changed", "quality_changed", "fps_changed", "flip_changed"):
+            self.assertIn(f"const bool {flag} = ", body, f"要有 {flag} 判断")
+        # NVS 只在真的有变化时落盘
+        self.assertRegex(
+            body,
+            r"if \(size_changed \|\| quality_changed \|\| fps_changed \|\| flip_changed\) \{\s*\n\s*SaveVideoCfg\(\);",
+            "NVS 保存要加变化判断")
+        # 帧率/翻转必须被各自的判断包住（不能再无条件下发）
+        self.assertRegex(body, r"if \(fps_changed\) \{\s*\n\s*LocalVideoStreamSetFps")
+        self.assertRegex(body, r"if \(flip_changed\) \{\s*\n\s*SetCameraFlip")
+        self.assertEqual(body.count("SetCameraFlip(flip);"), 1)
+        # 翻转值不缓存（MCP 工具 self.camera.set_flip 会绕过板级直写 NVS，缓存会过期）
+        self.assertNotIn("video_flip_", self.board, "翻转值不能做内存缓存")
+        self.assertIn("(flip != GetCameraFlip())", body, "变化判断要读 NVS")
+
+    def test_json_reports_size_changed_for_img_reload(self):
+        """响应要带 size_changed，前端据此决定是否重连 <img>（而不是无脑重连）。"""
+        self.assertIn("size_changed", self.board)
+        self.assertRegex(self.board, r"VideoCfgJson\(size_changed\)")
+        self.assertRegex(self.html, r"r\.size_changed === true")
+
     def test_framesize_inited_at_max_then_switched_dynamically(self):
         """开流按最大分辨率初始化帧缓冲，再 set_framesize 切到用户选的档。
 
