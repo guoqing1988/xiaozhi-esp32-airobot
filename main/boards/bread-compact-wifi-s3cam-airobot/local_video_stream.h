@@ -27,4 +27,9 @@ bool LocalVideoStreamStart(VideoStatCallback on_stat);
 // 停止视频流服务并释放其资源（httpd 任务/栈）。可重复调用。
 void LocalVideoStreamStop();
 
+// 运行时改目标帧率（1..30，越界夹紧）：下一帧立即生效，不用重启相机或流。
+// 供网页「⚙️ 视频设置」调用。
+void LocalVideoStreamSetFps(int fps);
+int LocalVideoStreamGetFps();
+
 bool LocalVideoStreamRunning();

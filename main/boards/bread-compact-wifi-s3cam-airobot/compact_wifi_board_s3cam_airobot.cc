@@ -213,7 +213,8 @@ private:
     //   实时视频用 CAMERA_GRAB_LATEST（总是拿最新帧，宁可丢旧帧也不排队 —— 遥控要的是低延时）。
     // 引脚/分辨率/质量与 format 无关，故抽成一个函数；切换模式时复用它避免两处不一致。
     static camera_config_t MakeCameraConfig(
-        pixformat_t format, camera_grab_mode_t grab = CAMERA_GRAB_WHEN_EMPTY) {
+        pixformat_t format, camera_grab_mode_t grab = CAMERA_GRAB_WHEN_EMPTY,
+        framesize_t frame_size = FRAMESIZE_VGA, int quality = 12) {
         camera_config_t config = {};
         config.pin_d0 = CAMERA_PIN_D0;
         config.pin_d1 = CAMERA_PIN_D1;
@@ -234,8 +235,8 @@ private:
         config.pin_reset = CAMERA_PIN_RESET;
         config.xclk_freq_hz = XCLK_FREQ_HZ;
         config.pixel_format = format;
-        config.frame_size = FRAMESIZE_VGA;
-        config.jpeg_quality = 12;
+        config.frame_size = frame_size;
+        config.jpeg_quality = quality;
         // 不能改成 2：cam_hal 会多占 ~30KB DMA **内部** RAM，本板内部 SRAM 扛不住
         // （见 esp32_camera.h 里 EncodeCurrentFrameToJpeg 的说明）。
         config.fb_count = 1;
@@ -245,6 +246,7 @@ private:
     }
 
     void InitializeCamera() {
+        LoadVideoCfg();  // 先读出网页保存的视频参数（内含把帧率同步给流模块）
         camera_ = new Esp32Camera(MakeCameraConfig(PIXFORMAT_RGB565));
     }
 
@@ -1176,11 +1178,109 @@ private:
         SetVideoWebApi({
             .start = [this]() { return VideoStreamStart(); },
             .stop = [this]() { return VideoStreamStop(); },
+            .get_cfg = [this]() { return VideoCfgJson(); },
+            .set_cfg = [this](int size, int fps, int quality, int flip) {
+                return VideoCfgApply(size, fps, quality, flip);
+            },
         });
         ApplyServoHome();   // 开机把 NVS 保存的回正角度下发给下位机
     }
 
     // ---- 网页实时视频流 ----
+
+    // ---- 实时视频的可调参数（网页「⚙️ 视频设置」改，存 NVS，不用重烧固件）----
+    // size   ：画面尺寸（0=320×240 更流畅 / 1=640×480 默认 / 2=800×600 更清晰）
+    // fps    ：帧率上限（改完下一帧立即生效，不用重启流）
+    // quality：JPEG 质量（数字越大越糊、单帧越小、延时越低；10≈清晰 20≈标准 30≈省流）
+    // 改尺寸/质量需要重 init 相机（约 300ms，画面闪一下），所以网页保存时会顺带重启流。
+    struct VideoCfg {
+        int size = 1;
+        int fps = 20;
+        int quality = 12;
+    };
+    VideoCfg video_cfg_;
+
+    static framesize_t VideoFrameSizeOf(int size) {
+        switch (size) {
+            case 0: return FRAMESIZE_QVGA;  // 320×240
+            case 2: return FRAMESIZE_SVGA;  // 800×600
+            default: return FRAMESIZE_VGA;  // 640×480
+        }
+    }
+
+    void ClampVideoCfg() {
+        if (video_cfg_.size < 0) video_cfg_.size = 0;
+        if (video_cfg_.size > 2) video_cfg_.size = 2;
+        if (video_cfg_.fps < 1) video_cfg_.fps = 1;
+        if (video_cfg_.fps > 30) video_cfg_.fps = 30;
+        if (video_cfg_.quality < 4) video_cfg_.quality = 4;
+        if (video_cfg_.quality > 63) video_cfg_.quality = 63;
+    }
+
+    void LoadVideoCfg() {
+        Settings s("video", false);
+        video_cfg_.size = s.GetInt("size", 1);
+        video_cfg_.fps = s.GetInt("fps", 20);
+        video_cfg_.quality = s.GetInt("quality", 12);
+        ClampVideoCfg();
+        LocalVideoStreamSetFps(video_cfg_.fps);  // 让流模块的运行帧率与配置一致
+    }
+
+    void SaveVideoCfg() {
+        Settings s("video", true);
+        s.SetInt("size", video_cfg_.size);
+        s.SetInt("fps", video_cfg_.fps);
+        s.SetInt("quality", video_cfg_.quality);
+    }
+
+    // 镜像/翻转：与 MCP 工具 self.camera.set_flip 共用同一份 NVS（命名空间 camera 的 flip 键），
+    // 这样网页改的、AI 工具改的、开机读回的是同一个值，不会两套配置打架。
+    // flip 位含义：bit0 = 左右镜像，bit1 = 上下翻转。
+    int GetCameraFlip() {
+        Settings s("camera", false);
+        return s.GetInt("flip", 0);
+    }
+
+    void SetCameraFlip(int mode) {
+        if (mode < 0) mode = 0;
+        if (mode > 3) mode = 3;
+        if (camera_ != nullptr) {
+            // 只改 sensor 寄存器，立即生效（不用重开相机，视频画面当场就翻）
+            camera_->SetHMirror(mode & 1);
+            camera_->SetVFlip((mode & 2) != 0);
+        }
+        Settings s("camera", true);
+        s.SetInt("flip", mode);
+    }
+
+    std::string VideoCfgJson() {
+        return std::string("{\"ok\":true,\"size\":") + std::to_string(video_cfg_.size) +
+               ",\"fps\":" + std::to_string(video_cfg_.fps) +
+               ",\"quality\":" + std::to_string(video_cfg_.quality) +
+               ",\"flip\":" + std::to_string(GetCameraFlip()) + "}";
+    }
+
+    // 网页保存参数：帧率/镜像立即生效；尺寸/质量需要重 init 相机，
+    // 正在播时顺带重启流（前端拿到 ok 后重连 <img>）。
+    std::string VideoCfgApply(int size, int fps, int quality, int flip) {
+        const bool need_reinit = (size != video_cfg_.size) || (quality != video_cfg_.quality);
+        video_cfg_.size = size;
+        video_cfg_.fps = fps;
+        video_cfg_.quality = quality;
+        ClampVideoCfg();
+        SaveVideoCfg();
+        LocalVideoStreamSetFps(video_cfg_.fps);  // 帧率不用重启就生效
+        SetCameraFlip(flip);                    // 镜像/翻转同样立即生效（与是否在播无关）
+        if (!need_reinit || !LocalVideoStreamRunning()) {
+            return VideoCfgJson();
+        }
+        VideoStreamStop();
+        const std::string start = VideoStreamStart();  // 用新参数重新切 JPEG + 起流
+        if (start.find("\"ok\":true") == std::string::npos) {
+            return start;  // 起不来就把错误原样告诉页面
+        }
+        return VideoCfgJson();
+    }
 
     // 开启：相机切 JPEG（模组直出，零编码零拷贝）→ 起独立 /stream 服务（端口 81）。
     // 关闭：停 /stream → 相机切回 RGB565（恢复拍照与 LCD 预览）。
@@ -1192,7 +1292,9 @@ private:
         if (camera_ == nullptr) {
             return "{\"ok\":false,\"error\":\"相机不可用\"}";
         }
-        if (!camera_->Reinit(MakeCameraConfig(PIXFORMAT_JPEG, CAMERA_GRAB_LATEST))) {
+        if (!camera_->Reinit(MakeCameraConfig(PIXFORMAT_JPEG, CAMERA_GRAB_LATEST,
+                                             VideoFrameSizeOf(video_cfg_.size),
+                                             video_cfg_.quality))) {
             // 切不过去不能把相机丢在未初始化状态：立刻退回原配置
             camera_->Reinit(MakeCameraConfig(PIXFORMAT_RGB565));
             ApplyCameraFlip();

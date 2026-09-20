@@ -845,6 +845,62 @@
       </div>
     </div>
 
+    <!-- 视频参数设置（视频区左上角 ⚙️ 打开）：改完即时生效 + 存进设备 NVS，不用重烧固件 -->
+    <div class="modal" id="videoCfgModal">
+      <div class="modal-box">
+        <div class="modal-head">
+          <h3>⚙️ 实时视频设置</h3>
+          <button class="modal-close" onclick="closeVideoCfg()" title="关闭">×</button>
+        </div>
+        <div class="hint">改完点「应用」即时生效：帧率、镜像/翻转立刻生效；尺寸/质量会重开相机（画面闪一下约 0.3 秒）。
+          设置存在设备里，断电重启仍有效；没连设备时也能打开这个窗口查看/修改。</div>
+        <div class="frow">
+          <label title="画面尺寸">分辨率</label>
+          <select id="vcfgSize">
+            <option value="0">320×240（更流畅、延时低）</option>
+            <option value="1" selected>640×480（默认）</option>
+            <option value="2">800×600（更清晰、更占带宽）</option>
+          </select>
+        </div>
+        <div class="frow">
+          <label title="帧率上限">帧率</label>
+          <select id="vcfgFps">
+            <option value="5">5 fps</option>
+            <option value="10">10 fps</option>
+            <option value="15">15 fps</option>
+            <option value="20" selected>20 fps（默认）</option>
+            <option value="25">25 fps</option>
+          </select>
+        </div>
+        <div class="frow">
+          <label title="JPEG 画面质量">质量</label>
+          <select id="vcfgQuality">
+            <option value="10">清晰（单帧大、延时略高）</option>
+            <option value="12" selected>默认</option>
+            <option value="20">标准（省带宽）</option>
+            <option value="30">省流（最省带宽）</option>
+          </select>
+        </div>
+        <div class="frow">
+          <label title="左右镜像 / 上下翻转">翻转</label>
+          <div style="display:flex;align-items:center;gap:14px;font-size:13.5px;color:#374151">
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+              <input type="checkbox" id="vcfgMirror" style="margin:0"> 左右镜像
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+              <input type="checkbox" id="vcfgFlip" style="margin:0"> 上下翻转
+            </label>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn" onclick="saveVideoCfg()">应用</button>
+          <button class="btn-quiet" onclick="resetVideoCfg()">恢复默认</button>
+          <button class="btn-quiet" onclick="closeVideoCfg()">取消</button>
+        </div>
+        <div id="vcfgMsg" style="font-size:12.5px;color:#6b7280;margin-top:6px"></div>
+      </div>
+    </div>
+
     <!-- 机器人控制 -->
     <div class="panel" id="panel-uno">
       <!-- <h3>🎮 机器人控制</h3> -->
@@ -856,13 +912,22 @@
         <input type="checkbox" id="videoChk" onchange="toggleVideo(this)"> 📹 实时视频<span
           style="color:#9ca3af;font-size:12px">（占用带宽；同时用节点控制会变慢）</span>
       </label>
-      <div id="videoWrap" style="display:none;position:relative;margin-bottom:8px">
-        <!-- aspect-ratio 固定 4:3（VGA）：流未连上/断开时高度不塔陷，不会让下方摇杆跳一下 -->
-        <img id="videoImg" alt="实时视频"
-          style="width:100%;aspect-ratio:4/3;object-fit:contain;display:block;border-radius:8px;background:#000">
-        <!-- 帧率/分辨率角标：设备端统计后经 WS 推来（浏览器拿不到 MJPEG 的逐帧事件） -->
+      <!-- 深色背景：画面未连上/断开时也是一块“屏幕”，不会白到看不出是视频区 -->
+      <div id="videoWrap" style="display:none;position:relative;margin-bottom:8px;background:#111;border-radius:8px;overflow:hidden">
+        <!-- aspect-ratio 固定 4:3：流未连上/断开时高度不塔陷，不会让下方摇杆跳一下 -->
+        <img id="videoImg" alt=""
+          style="width:100%;aspect-ratio:4/3;object-fit:contain;display:block">
+        <!-- 帧率/分辨率角标（左上角）：设备端统计后经 WS 推来（浏览器拿不到 MJPEG 的逐帧事件）。
+             默认写 0fps：没数据时也要有个值，不能只剩一条空的小黑条。 -->
         <span id="videoCorner"
-          style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.55);color:#fff;font-size:11.5px;padding:2px 7px;border-radius:6px;font-variant-numeric:tabular-nums"></span>
+          style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.55);color:#fff;font-size:11.5px;padding:2px 7px;border-radius:6px;font-variant-numeric:tabular-nums">0fps</span>
+        <!-- ⚙️ 视频参数（右上角）：点开弹窗改，设备侧即时生效并存进 NVS，不用重新编译烧固件。 -->
+        <button onclick="openVideoCfg()" title="视频设置（分辨率 / 帧率 / 质量 / 镜像）"
+          style="position:absolute;top:6px;right:6px;width:30px;height:30px;padding:0;border:0;border-radius:8px;background:rgba(0,0,0,.55);color:#fff;font-size:15px;line-height:1;cursor:pointer;z-index:2">⚙️</button>
+        <!-- 提示层：设备没连上/服务没起时给一行说明。
+             ⚠ 必须 pointer-events:none：它铺满整个框，否则会把上面的 ⚙️ 盖住点不动。 -->
+        <div id="videoHint"
+          style="position:absolute;inset:0;display:none;align-items:center;justify-content:center;color:#9ca3af;font-size:13px;line-height:1.6;text-align:center;padding:0 14px;pointer-events:none"></div>
       </div>
       <div class="joy-wrap">
         <!-- 左转/右转与摇杆同行：紧贴摇杆两侧，与摇杆内的「左移/右移」标签同高，
@@ -2102,46 +2167,149 @@
     // 勾选才向设备申请：设备切相机到 JPEG 模式（模组直出、零编码零拷贝）并启服务；
     // 取消则断流 + 让设备切回 RGB565（拍照与 LCD 预览恢复）。没人看时设备不抓帧。
     function videoStreamUrl() { return 'http://' + location.hostname + ':81/stream'; }
+    // 画面上的提示层：设备没连上/服务没起时给一行说明，不留空白也不显破图。
+    function videoSetHint(text) {
+      const h = document.getElementById('videoHint');
+      if (!h) return;
+      if (!text) { h.style.display = 'none'; h.textContent = ''; return; }
+      h.textContent = text;
+      h.style.display = 'flex';
+    }
+    // 打开画面：**不等设备回应**就先显示（没连设备也要能看到框，框里给提示）
     function videoOpen() {
       const img = document.getElementById('videoImg');
-      if (!img || img.getAttribute('src')) return;   // 已连着就不重复设
-      document.getElementById('videoCorner').textContent = '连接中…';
-      img.src = videoStreamUrl();
+      if (!img) return;
+      videoSetHint('');
+      img.style.visibility = 'visible';  // 上次失败可能被隐藏过
       document.getElementById('videoWrap').style.display = 'block';
+      if (img.getAttribute('src')) return;  // 已连着就不重复设
+      img.src = videoStreamUrl();
     }
     function videoClose() {
       const img = document.getElementById('videoImg');
       if (!img) return;
       img.removeAttribute('src');   // 断开 MJPEG 长连接（浏览器随即关掉这个请求）
       document.getElementById('videoWrap').style.display = 'none';
-      document.getElementById('videoCorner').textContent = '';
+      document.getElementById('videoCorner').textContent = '0fps';  // 角标回到默认值
+      videoSetHint('');
     }
     function toggleVideo(chk) {
       if (!chk.checked) { videoClose(); wsSend({ action: 'video_stop' }); return; }
+      videoOpen();   // 先出框：设备没连上照样显示，框里再报“接口不可用”
       wsSend({ action: 'video_start' })
         .then(function (resp) {
           if (!resp || resp.ok !== true) {
-            chk.checked = false; videoClose();
-            alert('开启视频失败：' + ((resp && resp.error) || '未知错误'));
-            return;
+            videoSetHint('接口不可用：' + ((resp && resp.error) || '视频服务启动失败'));
+            document.getElementById('videoCorner').textContent = '0fps';
           }
-          videoOpen();
         })
-        .catch(function () { chk.checked = false; videoClose(); alert('开启视频失败：设备无响应'); });
+        .catch(function () {
+          videoSetHint('接口不可用：未连接设备');
+          document.getElementById('videoCorner').textContent = '0fps';
+        });
     }
+    // <img> 连不上（设备没连/服务没起）时别显浏览器的破图图标
+    (function () {
+      const img = document.getElementById('videoImg');
+      if (!img) return;
+      img.addEventListener('error', function () {
+        img.style.visibility = 'hidden';
+        videoSetHint('接口不可用：未连接设备，或视频服务未启动');
+        document.getElementById('videoCorner').textContent = '0fps';
+      });
+    })();
     // 设备侧每秒经 WS 推一次实测帧率/分辨率：浏览器对 MJPEG <img> 不暴露逐帧事件，拿不到帧率。
     function updateVideoStat(j) {
       const corner = document.getElementById('videoCorner');
       if (!corner) return;
-      if (!j.video) { corner.textContent = ''; return; }
+      if (!j.video) { corner.textContent = '0fps'; return; }
       corner.textContent = (j.fps ? j.fps.toFixed(1) : '0') + 'fps ' + j.w + '×' + j.h;
     }
+    // ===== 视频参数设置（⚙️ 弹窗）=====
+    // 参数存**设备 NVS**：改一次永久有效，断电重启仍生效，不用重烧固件。
+    // 帧率、镜像/翻转立即生效；尺寸/质量为重开相机 ≈0.3 秒。
+    //
+    // 没连设备也要能看能改：把最近一次的值缓存在浏览器 localStorage，
+    // 打开弹窗先用缓存填上（否则离线时下拉全是默认值、看不出真实设置），
+    // 设备连上后再以设备为准。
+    function videoCfgCacheGet() {
+      try { return JSON.parse(localStorage.getItem('videoCfg') || 'null'); } catch (e) { return null; }
+    }
+    function videoCfgCacheSet(o) {
+      try { localStorage.setItem('videoCfg', JSON.stringify(o)); } catch (e) { }
+    }
+    function fillVideoCfg(o) {
+      document.getElementById('vcfgSize').value = String(o.size);
+      document.getElementById('vcfgFps').value = String(o.fps);
+      document.getElementById('vcfgQuality').value = String(o.quality);
+      document.getElementById('vcfgMirror').checked = !!(o.flip & 1);
+      document.getElementById('vcfgFlip').checked = !!(o.flip & 2);
+    }
+    function openVideoCfg() {
+      const msg = document.getElementById('vcfgMsg');
+      document.getElementById('videoCfgModal').classList.add('show');  // 先开窗：离线也能看/改
+      const cached = videoCfgCacheGet();
+      // 没缓存时也要填成**设备默认值**：否则下拉会停在第一项（320×240/5fps），
+      // 看着像真实设置，实际不是。
+      fillVideoCfg(cached || { size: 1, fps: 20, quality: 12, flip: 0 });
+      msg.textContent = cached ? '显示上次保存的值，正在读取设备…' : '读取中…';
+      wsSend({ action: 'video_cfg_get' })
+        .then(function (r) {
+          if (!r || r.ok !== true) {
+            msg.textContent = '读不到设备：显示的是上次保存的值，连上设备后再点「应用」';
+            return;
+          }
+          fillVideoCfg(r);
+          videoCfgCacheSet({ size: r.size, fps: r.fps, quality: r.quality, flip: r.flip });
+          msg.textContent = '';
+        })
+        .catch(function () {
+          msg.textContent = '读不到设备：显示的是上次保存的值，连上设备后再点「应用」';
+        });
+    }
+    function closeVideoCfg() { document.getElementById('videoCfgModal').classList.remove('show'); }
+    function applyVideoCfg(size, fps, quality, flip) {
+      const msg = document.getElementById('vcfgMsg');
+      videoCfgCacheSet({ size: size, fps: fps, quality: quality, flip: flip });  // 离线也能记住
+      msg.textContent = '应用中…';
+      wsSend({ action: 'video_cfg_set', size: size, fps: fps, quality: quality, flip: flip })
+        .then(function (r) {
+          if (!r || r.ok !== true) { msg.textContent = '应用失败：' + ((r && r.error) || '未知错误'); return; }
+          msg.textContent = '已应用';
+          // 改了尺寸/质量会重启视频流：<img> 必须重连才能看到新画面（加时间戳避开缓存）
+          if (document.getElementById('videoChk').checked) {
+            const img = document.getElementById('videoImg');
+            img.removeAttribute('src');
+            setTimeout(function () { img.src = videoStreamUrl() + '?t=' + Date.now(); }, 500);
+          }
+          setTimeout(closeVideoCfg, 700);
+        })
+        .catch(function () { msg.textContent = '连不上设备：设置已暂存，连上后再点一次「应用」'; });
+    }
+    function saveVideoCfg() {
+      const flip = (document.getElementById('vcfgMirror').checked ? 1 : 0) |
+        (document.getElementById('vcfgFlip').checked ? 2 : 0);
+      applyVideoCfg(Number(document.getElementById('vcfgSize').value),
+        Number(document.getElementById('vcfgFps').value),
+        Number(document.getElementById('vcfgQuality').value), flip);
+    }
+    function resetVideoCfg() {
+      fillVideoCfg({ size: 1, fps: 20, quality: 12, flip: 0 });
+      applyVideoCfg(1, 20, 12, 0);
+    }
+    (function () {
+      const m = document.getElementById('videoCfgModal');
+      if (m) m.addEventListener('click', function (e) { if (e.target === this) closeVideoCfg(); });
+    })();
 
     // ===== 机器人控制(遥感摇杆) =====
     // 手感参数集中在此处便于微调(改完需重新编译固件 + 浏览器强刷 Ctrl+F5)
     const JOY_R = 72, JOY_DEAD = 0.14;         // 摇杆半径(px) / 回中死区
-    const TURN_SPEED = 110;                    // 「左转/右转」按钮的固定转速(PWM 70-255)
-    const TURN_MIN_PRESS_MS = 250;             // 「左转/右转」点一下的最短转动时长(ms)
+    // 2026-09 实测反馈：转得太快、容易转过头 → 从 110/250 调低。
+    // 点一下的转弯幅度 ≈ TURN_SPEED × TURN_MIN_PRESS_MS（现约原来的一半，角速度也慢一些）。
+    // 下限提醒：TURN_SPEED 不能低于 70（下位机 PWM 下限），否则可能转不动。
+    const TURN_SPEED = 80;                     // 「左转/右转」按钮的固定转速(PWM 70-255)
+    const TURN_MIN_PRESS_MS = 160;             // 「左转/右转」点一下的最短转动时长(ms)
     const JOY_SECTORS = ['forward', 'rightup', 'rightmove', 'rightdown', 'back', 'leftdown', 'leftmove', 'leftup'];
     const JOY_NAMES = { forward: '前进', back: '后退', left: '左转', right: '右转', leftmove: '左移', rightmove: '右移', leftup: '左前', rightup: '右前', leftdown: '左后', rightdown: '右后' };
     let unoInterval = null, unoPollTimer = null, unoCurDir = '', unoCurSpeed = 0;

@@ -947,6 +947,22 @@ static std::string WsHandleMessage(const char* body) {
     } else if (strcmp(action, "video_stop") == 0) {
         resp = s_video_api.stop ? s_video_api.stop()
                                 : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
+    } else if (strcmp(action, "video_cfg_get") == 0) {
+        // 读视频参数（画面尺寸/帧率/质量）：打开设置弹窗时调
+        resp = s_video_api.get_cfg ? s_video_api.get_cfg()
+                                   : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
+    } else if (strcmp(action, "video_cfg_set") == 0) {
+        // 改视频参数并即时生效（帧率/镜像立即；尺寸/质量需重 init 相机 ≈300ms）
+        cJSON* c_size = cJSON_GetObjectItem(root, "size");
+        cJSON* c_fps = cJSON_GetObjectItem(root, "fps");
+        cJSON* c_quality = cJSON_GetObjectItem(root, "quality");
+        cJSON* c_flip = cJSON_GetObjectItem(root, "flip");
+        resp = s_video_api.set_cfg
+                   ? s_video_api.set_cfg(c_size ? c_size->valueint : 1,
+                                         c_fps ? c_fps->valueint : 20,
+                                         c_quality ? c_quality->valueint : 12,
+                                         c_flip ? c_flip->valueint : 0)
+                   : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
     }
     cJSON_Delete(root);
     // 若请求带 id, 将 id 注入到响应 JSON 中, 便于前端精确匹配请求-回执。

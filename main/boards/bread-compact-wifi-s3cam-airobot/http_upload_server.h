@@ -61,6 +61,8 @@ void WebNotifyUnoStatus();
 struct VideoWebApi {
     std::function<std::string()> start;
     std::function<std::string()> stop;
+    std::function<std::string()> get_cfg;               // 读当前视频参数（尺寸/帧率/质量）
+    std::function<std::string(int, int, int, int)> set_cfg;  // 改参数：size / fps / quality / flip
 };
 
 // 注入实时视频流回调；之后 WS action "video_start"/"video_stop" 即可启停视频流。

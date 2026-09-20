@@ -23,12 +23,14 @@ namespace {
 constexpr int kStreamPort = 81;
 constexpr int kStreamCtrlPort = 32769;
 
-// 目标帧率上限。
+// 目标帧率上限（可在网页「⚙️ 视频设置」里实时改，见 LocalVideoStreamSetFps）。
 // 用途是「网页遥控机器人走位」（第一视角），延时/流畅度第一；
 // 实测场景下开视频时不会同时做家里的 ESP-NOW 节点控制（用户确认），
 // 所以不需要为节点控制留空口，可以拿高帧率换观感。
-// 实际上限还受 OV2640 出帧能力约束（VGA JPEG 约 15~20fps），够不着就在这里体现为实测帧率。
-constexpr int kTargetFps = 20;
+// 实际上限还受 OV2640 出帧能力约束（VGA JPEG 约 15~20fps），够不着就体现为实测帧率上不去。
+constexpr int kFpsMin = 1;
+constexpr int kFpsMax = 30;
+std::atomic<int> s_target_fps{20};
 
 // 官方 multipart 流的分隔与头部（照 esp32-camera README 的样例，社区事实标准）
 constexpr char kStreamContentType[] = "multipart/x-mixed-replace;boundary="
@@ -88,10 +90,11 @@ esp_err_t StreamLoop(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "Pragma", "no-cache");
 
-    const int64_t frame_interval_us = 1000000 / kTargetFps;
     int64_t next_frame_us = esp_timer_get_time();
 
     while (!s_stop) {
+        // 每帧重读目标帧率：网页改完下一帧就生效（不用重启流）
+        const int64_t frame_interval_us = 1000000 / s_target_fps.load();
         camera_fb_t *fb = esp_camera_fb_get();
         if (fb == nullptr) {
             // 偶发抓帧失败（自动曝光切换等）不该终止整条流，退让一下重试
@@ -218,3 +221,12 @@ void LocalVideoStreamStop() {
 }
 
 bool LocalVideoStreamRunning() { return s_hd != nullptr; }
+
+void LocalVideoStreamSetFps(int fps) {
+    if (fps < kFpsMin) fps = kFpsMin;
+    if (fps > kFpsMax) fps = kFpsMax;
+    s_target_fps = fps;
+    ESP_LOGI(TAG, "target fps -> %d", fps);
+}
+
+int LocalVideoStreamGetFps() { return s_target_fps.load(); }
