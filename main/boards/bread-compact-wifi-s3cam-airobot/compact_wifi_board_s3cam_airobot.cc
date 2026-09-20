@@ -19,6 +19,7 @@
 #include "local_music_player.h"
 #include "http_upload_server.h"
 #include "local_photo.h"
+#include "local_video_stream.h"
 #include "photo_store.h"
 #include "alarm_manager.h"
 #include "assets/lang_config.h"
@@ -203,7 +204,12 @@ private:
                                          DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
-    void InitializeCamera() {
+    // 构造相机配置。format 决定像素格式：
+    //   平时 PIXFORMAT_RGB565 —— 软件编码 JPEG 供网页拍照/AI 识别，且能在 LCD 上预览；
+    //   视频流期间 PIXFORMAT_JPEG —— 模组自带 JPEG 编码，驱动直接回 JPEG 帧，
+    //   推送时零编码零拷贝（官方 README 也指出 JPEG 模式帧率更好）。
+    // 引脚/分辨率/质量与 format 无关，故抽成一个函数；切换模式时复用它避免两处不一致。
+    static camera_config_t MakeCameraConfig(pixformat_t format) {
         camera_config_t config = {};
         config.pin_d0 = CAMERA_PIN_D0;
         config.pin_d1 = CAMERA_PIN_D1;
@@ -223,13 +229,19 @@ private:
         config.pin_pwdn = CAMERA_PIN_PWDN;
         config.pin_reset = CAMERA_PIN_RESET;
         config.xclk_freq_hz = XCLK_FREQ_HZ;
-        config.pixel_format = PIXFORMAT_RGB565;
+        config.pixel_format = format;
         config.frame_size = FRAMESIZE_VGA;
         config.jpeg_quality = 12;
+        // 不能改成 2：cam_hal 会多占 ~30KB DMA **内部** RAM，本板内部 SRAM 扛不住
+        // （见 esp32_camera.h 里 EncodeCurrentFrameToJpeg 的说明）。
         config.fb_count = 1;
         config.fb_location = CAMERA_FB_IN_PSRAM;
         config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-        camera_ = new Esp32Camera(config);
+        return config;
+    }
+
+    void InitializeCamera() {
+        camera_ = new Esp32Camera(MakeCameraConfig(PIXFORMAT_RGB565));
     }
 
     // 应用 NVS 保存的摄像头翻转设置(开机调用, 断电重启仍保持)
@@ -1146,12 +1158,73 @@ private:
                 // web 控制页 WS 连接数变化: 遥控期间保持 WiFi 性能模式。
                 // 待机态是 WIFI_PS_MAX_MODEM, WS 帧要等 DTIM beacon 才下发, 实测有几百毫秒延迟。
                 web_control_active_ = (count > 0);
+                // 最后一个控制页断开（关页面/断网）：把视频流停掉，
+                // 否则相机会一直留在 JPEG 模式，拍照也没有 LCD 预览了。
+                if (count == 0 && LocalVideoStreamRunning()) {
+                    VideoStreamStop();
+                }
                 // 连接建立后立即提升; 断开后主动降回省电(否则会一直停在性能模式)
                 SetPowerSaveLevel(web_control_active_ ? PowerSaveLevel::PERFORMANCE
                                                       : PowerSaveLevel::LOW_POWER);
             },
         });
+        // 网页实时视频流：勾选才切 JPEG + 起 /stream，取消就切回 RGB565（拍照与 LCD 预览恢复）
+        SetVideoWebApi({
+            .start = [this]() { return VideoStreamStart(); },
+            .stop = [this]() { return VideoStreamStop(); },
+        });
         ApplyServoHome();   // 开机把 NVS 保存的回正角度下发给下位机
+    }
+
+    // ---- 网页实时视频流 ----
+
+    // 开启：相机切 JPEG（模组直出，零编码零拷贝）→ 起独立 /stream 服务（端口 81）。
+    // 关闭：停 /stream → 相机切回 RGB565（恢复拍照与 LCD 预览）。
+    // 说明：没有浏览器连着 /stream 时不会抓帧，所以只有真有人看时才占射频/CPU。
+    std::string VideoStreamStart() {
+        if (LocalVideoStreamRunning()) {
+            return "{\"ok\":true,\"msg\":\"视频已在运行\"}";
+        }
+        if (camera_ == nullptr) {
+            return "{\"ok\":false,\"error\":\"相机不可用\"}";
+        }
+        if (!camera_->Reinit(MakeCameraConfig(PIXFORMAT_JPEG))) {
+            // 切不过去不能把相机丢在未初始化状态：立刻退回原配置
+            camera_->Reinit(MakeCameraConfig(PIXFORMAT_RGB565));
+            ApplyCameraFlip();
+            return "{\"ok\":false,\"error\":\"相机切换 JPEG 模式失败\"}";
+        }
+        ApplyCameraFlip();  // Reinit 只套 Kconfig 默认翻转，用户 NVS 里存的设置要重新生效
+        // 视频流对延时敏感：待机态 WIFI_PS_MAX_MODEM 会让帧等 DTIM beacon（几百毫秒）
+        SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        if (!LocalVideoStreamStart([this](float fps, int w, int h) {
+                WebNotifyVideoStat(fps, w, h, fps > 0.0f);
+            })) {
+            camera_->Reinit(MakeCameraConfig(PIXFORMAT_RGB565));  // 服务起不来同样退回
+            ApplyCameraFlip();
+            SetPowerSaveLevel(web_control_active_ ? PowerSaveLevel::PERFORMANCE
+                                                 : PowerSaveLevel::LOW_POWER);
+            return "{\"ok\":false,\"error\":\"启动视频服务失败\"}";
+        }
+        ESP_LOGI(TAG, "video stream started (jpeg mode)");
+        return "{\"ok\":true,\"msg\":\"视频已开启\"}";
+    }
+
+    std::string VideoStreamStop() {
+        LocalVideoStreamStop();
+        WebNotifyVideoStat(0.0f, 0, 0, false);  // 立即把角标收回“--”，不等统计回调
+        if (camera_ != nullptr) {
+            // 切回 RGB565：恢复网页拍照与 LCD 预览（切失败也要继续把流停掉）
+            if (!camera_->Reinit(MakeCameraConfig(PIXFORMAT_RGB565))) {
+                ESP_LOGE(TAG, "restore RGB565 camera failed");
+            }
+            ApplyCameraFlip();
+        }
+        // 恢复原有省电策略：若 web 控制页还连着则保持性能模式
+        SetPowerSaveLevel(web_control_active_ ? PowerSaveLevel::PERFORMANCE
+                                             : PowerSaveLevel::LOW_POWER);
+        ESP_LOGI(TAG, "video stream stopped");
+        return "{\"ok\":true,\"msg\":\"视频已关闭\"}";
     }
 
     // ---- ESP-NOW 居家节点 ----

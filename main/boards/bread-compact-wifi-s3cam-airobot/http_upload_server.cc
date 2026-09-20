@@ -68,6 +68,8 @@ static esp_timer_handle_t s_wifi_timer = nullptr;
 static AlarmWebApi s_alarm_api;
 // 机器人控制回调(由板级 SetUnoWebApi 注入)
 static UnoWebApi s_uno_api;
+// 实时视频流回调(由板级 SetVideoWebApi 注入)
+static VideoWebApi s_video_api;
 // 网页拍照回调(由板级 SetCameraWebApi 注入)
 static CameraWebApi s_camera_api;
 
@@ -85,6 +87,7 @@ static int s_ws_count = 0;
 
 void SetAlarmWebApi(const AlarmWebApi& api) { s_alarm_api = api; }
 void SetUnoWebApi(const UnoWebApi& api) { s_uno_api = api; }
+void SetVideoWebApi(const VideoWebApi& api) { s_video_api = api; }
 void SetCameraWebApi(const CameraWebApi& api) { s_camera_api = api; }
 
 // URL 解码（%XX -> 字符，+ -> 空格），用于文件名
@@ -778,6 +781,27 @@ static void WsPushStatus() {
 // 对外接口：板级在状态变化时调用，把当前 uno 状态推给已连接的 web 前端(无连接则空操作)。
 void WebNotifyUnoStatus() { WsPushStatus(); }
 
+// 视频流状态回报：由板级的帧率统计回调触发（约每秒一次）。
+// 停止时也要推一条（video=0），前端才能把角标收回“--”。
+void WebNotifyVideoStat(float fps, int width, int height, bool running) {
+    cJSON* j = cJSON_CreateObject();
+    if (j == nullptr) {
+        return;
+    }
+    cJSON_AddNumberToObject(j, "video", running ? 1 : 0);
+    if (running) {
+        cJSON_AddNumberToObject(j, "fps", static_cast<double>(fps));
+        cJSON_AddNumberToObject(j, "w", width);
+        cJSON_AddNumberToObject(j, "h", height);
+    }
+    char* s = cJSON_PrintUnformatted(j);
+    if (s != nullptr) {
+        WsPush(s);
+        free(s);
+    }
+    cJSON_Delete(j);
+}
+
 // 处理一条来自前端的 JSON 消息(action)并返回响应 JSON 字符串。
 static std::string WsHandleMessage(const char* body) {
     cJSON* root = cJSON_Parse(body);
@@ -915,6 +939,14 @@ static std::string WsHandleMessage(const char* body) {
         bool on = (c_on != nullptr) && (cJSON_IsBool(c_on) ? cJSON_IsTrue(c_on) : c_on->valueint != 0);
         LogCaptureSetUartMirror(on);
         resp = std::string("{\"ok\":true,\"mirror\":") + (on ? "1" : "0") + "}";
+    } else if (strcmp(action, "video_start") == 0) {
+        // 实时视频流：板级切相机到 JPEG 模式并启动 /stream（端口 81）。
+        // 没人连上 /stream 时不会抓帧，所以“勾选”本身不等于持续占带宽。
+        resp = s_video_api.start ? s_video_api.start()
+                                 : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
+    } else if (strcmp(action, "video_stop") == 0) {
+        resp = s_video_api.stop ? s_video_api.stop()
+                                : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
     }
     cJSON_Delete(root);
     // 若请求带 id, 将 id 注入到响应 JSON 中, 便于前端精确匹配请求-回执。
@@ -1050,6 +1082,7 @@ static esp_err_t HandleWs(httpd_req_t* req) {
 #else  // !CONFIG_HTTPD_WS_SUPPORT
 // 未启用 WebSocket 时, 状态推送为空操作(板级调用 WebNotifyUnoStatus 安全)
 void WebNotifyUnoStatus() {}
+void WebNotifyVideoStat(float, int, int, bool) {}
 #endif
 
 // GET /alarm?action=list：返回闹钟 JSON 数组(供网页/外部读取)

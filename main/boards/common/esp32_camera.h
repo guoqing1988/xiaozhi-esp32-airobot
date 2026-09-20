@@ -42,9 +42,21 @@ private:
     };
     static size_t JpegEncodeCb(void *arg, size_t index, const void *data, size_t len);
 
+    // 释放当前帧/编码缓冲并 deinit（析构与 Reinit 共用；可重复调用）
+    void Release();
+    // 套用与构造函数相同的 sensor 设置（GC0308 特例 + Kconfig 的 mirror/flip）
+    void ApplySensorSettings(const camera_config_t &config);
+
 public:
     Esp32Camera(const camera_config_t &config);
     ~Esp32Camera();
+
+    // 用新配置重新初始化相机（先彻底释放再 init，并重新套用 sensor 设置）。
+    // 用途：实时视频流期间切到 PIXFORMAT_JPEG（模组直出 JPEG，零编码零拷贝），
+    // 退出视频流时切回 PIXFORMAT_RGB565（恢复拍照与 LCD 预览）。
+    // ⚠ 会丢弃 current_fb_ 与 encode_buf_（调用方需确保没有在用）；
+    // 失败返回 false 且相机处于**未初始化**状态，调用方必须处理（通常回退到原配置）。
+    bool Reinit(const camera_config_t &config);
 
     virtual void SetExplainUrl(const std::string &url, const std::string &token) override;
     virtual bool Capture() override;

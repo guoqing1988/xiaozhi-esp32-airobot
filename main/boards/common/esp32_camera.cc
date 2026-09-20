@@ -73,6 +73,12 @@ Esp32Camera::Esp32Camera(const camera_config_t &config) {
         return;
     }
 
+    ApplySensorSettings(config);
+    streaming_on_ = true;
+}
+
+// sensor 设置：GC0308 特例 + Kconfig 里配置好的 mirror/flip（构造与 Reinit 共用）
+void Esp32Camera::ApplySensorSettings(const camera_config_t &config) {
     sensor_t *s = esp_camera_sensor_get();
     if (s) {
         if (s->id.PID == GC0308_PID) {
@@ -84,24 +90,43 @@ Esp32Camera::Esp32Camera(const camera_config_t &config) {
 #endif
         ESP_LOGI(TAG, "Camera initialized: format=%d", config.pixel_format);
     }
-
-    streaming_on_ = true;
 }
 
-Esp32Camera::~Esp32Camera() {
+// 释放资源并 deinit（析构与 Reinit 共用；可重复调用）
+// 先 join 编码线程：它可能正引用 current_fb_ 或 encoder 内部状态。
+void Esp32Camera::Release() {
+    if (encoder_thread_.joinable()) {
+        encoder_thread_.join();
+    }
+    if (current_fb_) {
+        esp_camera_fb_return(current_fb_);
+        current_fb_ = nullptr;
+    }
+    if (encode_buf_) {
+        heap_caps_free(encode_buf_);
+        encode_buf_ = nullptr;
+        encode_buf_size_ = 0;
+    }
     if (streaming_on_) {
-        if (current_fb_) {
-            esp_camera_fb_return(current_fb_);
-            current_fb_ = nullptr;
-        }
-        if (encode_buf_) {
-            heap_caps_free(encode_buf_);
-            encode_buf_ = nullptr;
-            encode_buf_size_ = 0;
-        }
         esp_camera_deinit();
         streaming_on_ = false;
     }
+}
+
+Esp32Camera::~Esp32Camera() {
+    Release();
+}
+
+bool Esp32Camera::Reinit(const camera_config_t &config) {
+    Release();  // 彻底释放旧帧池与编码缓冲，避免跨模式残留
+    esp_err_t err = esp_camera_init(&config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Reinit: esp_camera_init failed with error 0x%x", err);
+        return false;
+    }
+    ApplySensorSettings(config);
+    streaming_on_ = true;
+    return true;
 }
 
 void Esp32Camera::SetExplainUrl(const std::string &url, const std::string &token) {

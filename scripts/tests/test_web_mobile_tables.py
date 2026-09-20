@@ -86,9 +86,16 @@ class TestAlarmModal(_PageBase):
 class TestMobileCardTables(_PageBase):
     """屏宽 ≤620px 时表格要变成卡片列表。"""
 
-    def test_both_tables_opt_in(self):
-        self.assertEqual(self.html.count('class="card-table"'), 2,
-                         "歌曲表与闹钟表都要加 card-table（漏一个则该表手机上仍要横向滚）")
+    def test_all_tables_opt_in(self):
+        """页面上每个表格都要加 card-table（漏一个则该表手机上仍要横向滚）。
+
+        原来硬编码数 2（歌曲表 + 闹钟表），后来加了「提示音」表就失效了；
+        改成遍历所有 <table>，以后新增表格也自动覆盖。
+        """
+        tables = re.findall(r"<table[^>]*>", self.html)
+        self.assertGreaterEqual(len(tables), 3, "页面表格数异常（是不是删了表却没同步测试？）")
+        for t in tables:
+            self.assertIn("card-table", t, f"{t} 没加 card-table")
 
     def test_media_query_and_layout(self):
         self.assertIn("@media (max-width: 620px)", self.html)

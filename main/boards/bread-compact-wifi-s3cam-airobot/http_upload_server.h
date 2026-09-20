@@ -54,3 +54,19 @@ void SetCameraWebApi(const CameraWebApi& api);
 // 下位机状态变化时调用：把当前 uno 状态 JSON 经 WebSocket 推送给已连接的 web 前端。
 // 由板级在解析到 @busy/@done/@stat(状态变化)时调用；无 WS 连接时为安全的空操作。
 void WebNotifyUnoStatus();
+
+// 实时视频流回调：由板级注入（相机模式切换 + /stream 服务启停）。
+// start: 切相机到 JPEG 模式并启动 /stream（端口 81），返回说明 JSON。
+// stop:  停 /stream 并把相机切回 RGB565（恢复拍照与 LCD 预览），返回说明 JSON。
+struct VideoWebApi {
+    std::function<std::string()> start;
+    std::function<std::string()> stop;
+};
+
+// 注入实时视频流回调；之后 WS action "video_start"/"video_stop" 即可启停视频流。
+void SetVideoWebApi(const VideoWebApi& api);
+
+// 视频流状态回报：板级在帧率统计回调里调用（约每秒一次），经 WebSocket 推给前端。
+// 浏览器对 MJPEG <img> 不暴露逐帧事件、拿不到帧率，所以由设备侧统计后推给页面显示角标。
+// running=false 表示已停止（fps 无意义，置 0）；无 WS 连接时为安全的空操作。
+void WebNotifyVideoStat(float fps, int width, int height, bool running);

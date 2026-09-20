@@ -849,6 +849,21 @@
     <div class="panel" id="panel-uno">
       <!-- <h3>🎮 机器人控制</h3> -->
       <!-- <div class="hint">拖动摇杆控制麦克纳姆轮机器人：前后左右及斜向均为平移（左右=横向挪移），推得越远速度越快，松手回中即停止；原地转圈请用下方「左转/右转」按钮。</div> -->
+      <!-- 实时视频：勾选才启用（设备端会把相机切到 JPEG 模式并启 /stream 服务），
+           取消立即停流并释放（相机切回 RGB565，拍照与 LCD 预览恢复）。
+           视频与节点控制共用 2.4G 空口，开启期间节点指令可能变慢。 -->
+      <label class="check" style="display:flex;align-items:center;gap:6px;margin:0 0 8px">
+        <input type="checkbox" id="videoChk" onchange="toggleVideo(this)"> 📹 实时视频<span
+          style="color:#9ca3af;font-size:12px">（占用带宽，可能影响节点控制）</span>
+      </label>
+      <div id="videoWrap" style="display:none;position:relative;margin-bottom:8px">
+        <!-- aspect-ratio 固定 4:3（VGA）：流未连上/断开时高度不塔陷，不会让下方摇杆跳一下 -->
+        <img id="videoImg" alt="实时视频"
+          style="width:100%;aspect-ratio:4/3;object-fit:contain;display:block;border-radius:8px;background:#000">
+        <!-- 帧率/分辨率角标：设备端统计后经 WS 推来（浏览器拿不到 MJPEG 的逐帧事件） -->
+        <span id="videoCorner"
+          style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.55);color:#fff;font-size:11.5px;padding:2px 7px;border-radius:6px;font-variant-numeric:tabular-nums"></span>
+      </div>
       <div class="joy-wrap">
         <!-- 左转/右转与摇杆同行：紧贴摇杆两侧，与摇杆内的「左移/右移」标签同高，
              比原来单独占一行更紧凑（原来那行已删除） -->
@@ -999,6 +1014,8 @@
         let j = null; try { j = JSON.parse(ev.data); } catch (e) { return; }
         // 若带 id 说明是某次请求的回执; 否则(如含 mode 的状态推送)直接当作状态更新
         if (j && j.id != null && wsPending.has(j.id)) { const r = wsPending.get(j.id); wsPending.delete(j.id); r(j); return; }
+        // 视频流状态推送（无 id）：设备侧每秒推一次实测帧率/分辨率
+        if (j && j.video != null) { updateVideoStat(j); return; }
         if (j && j.mode) { updateUnoStatus(j); }
       };
     }
@@ -1235,6 +1252,10 @@
       if (id === 'photos') loadPhotos();
       if (id === 'uno') { startUnoPolling(); }   // 由 WS 推送更新状态, 此处只主动问一次
       else { stopUnoPolling(); unoStop(); }
+      // 视频流只在「机器人控制」面板可见时拉：切走即断开（设备随即停止抓帧，不白占空口），
+      // 但保留勾选状态，切回来自动重连（相机模式不动，省掉一次约 300ms 的切换）。
+      if (id === 'uno') { if (document.getElementById('videoChk').checked) videoOpen(); }
+      else { videoClose(); }
       // 日志轮询：独立「系统日志」面板要拉；「机器人控制」面板的「下位机指令记录」
       // 与日志同源，也得拉（停了指令回执就不刷新）。频率由 logPollIntervalMs() 按面板定。
       if (id === 'uno' || id === 'log') startLogPolling(); else stopLogPolling();
@@ -2075,6 +2096,47 @@
         })
         .catch(() => { document.getElementById('alarmlog').innerHTML = '<div>❌ 删除失败（接口不可用）</div>'; });
     }
+    // ===== 实时视频流（MJPEG）=====
+    // 设备端用官方做法推 multipart/x-mixed-replace（独立 httpd，端口 81），
+    // 浏览器 <img> 原生即可显示，**前端不需要任何解码代码**。
+    // 勾选才向设备申请：设备切相机到 JPEG 模式（模组直出、零编码零拷贝）并启服务；
+    // 取消则断流 + 让设备切回 RGB565（拍照与 LCD 预览恢复）。没人看时设备不抓帧。
+    function videoStreamUrl() { return 'http://' + location.hostname + ':81/stream'; }
+    function videoOpen() {
+      const img = document.getElementById('videoImg');
+      if (!img || img.getAttribute('src')) return;   // 已连着就不重复设
+      document.getElementById('videoCorner').textContent = '连接中…';
+      img.src = videoStreamUrl();
+      document.getElementById('videoWrap').style.display = 'block';
+    }
+    function videoClose() {
+      const img = document.getElementById('videoImg');
+      if (!img) return;
+      img.removeAttribute('src');   // 断开 MJPEG 长连接（浏览器随即关掉这个请求）
+      document.getElementById('videoWrap').style.display = 'none';
+      document.getElementById('videoCorner').textContent = '';
+    }
+    function toggleVideo(chk) {
+      if (!chk.checked) { videoClose(); wsSend({ action: 'video_stop' }); return; }
+      wsSend({ action: 'video_start' })
+        .then(function (resp) {
+          if (!resp || resp.ok !== true) {
+            chk.checked = false; videoClose();
+            alert('开启视频失败：' + ((resp && resp.error) || '未知错误'));
+            return;
+          }
+          videoOpen();
+        })
+        .catch(function () { chk.checked = false; videoClose(); alert('开启视频失败：设备无响应'); });
+    }
+    // 设备侧每秒经 WS 推一次实测帧率/分辨率：浏览器对 MJPEG <img> 不暴露逐帧事件，拿不到帧率。
+    function updateVideoStat(j) {
+      const corner = document.getElementById('videoCorner');
+      if (!corner) return;
+      if (!j.video) { corner.textContent = ''; return; }
+      corner.textContent = (j.fps ? j.fps.toFixed(1) : '0') + 'fps ' + j.w + '×' + j.h;
+    }
+
     // ===== 机器人控制(遥感摇杆) =====
     // 手感参数集中在此处便于微调(改完需重新编译固件 + 浏览器强刷 Ctrl+F5)
     const JOY_R = 72, JOY_DEAD = 0.14;         // 摇杆半径(px) / 回中死区
