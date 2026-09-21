@@ -962,15 +962,6 @@ private:
             LogCaptureAppend("[UNO] x @%s （指令过长）\n", command_str);
             return std::string("指令发送失败: ") + command_str;
         }
-        // 先查 TX 软件缓冲余量: uart_write_bytes 内部是 xRingbufferSend(..., portMAX_DELAY),
-        // 缓冲不足会**无限阻塞**; 本函数在 httpd 单任务里被同步调用, 一旦卡住则整个网页控制
-        // (含 WS 心跳)都会停摆。空间不够就放弃本条, 由下一条心跳(250ms 后)重试。
-        size_t tx_free = 0;
-        if (uart_get_tx_buffer_free_size(ECHO_UART_PORT_NUM, &tx_free) != ESP_OK ||
-            tx_free < static_cast<size_t>(flen)) {
-            LogCaptureAppend("[UNO] x @%s （串口发送缓冲已满）\n", command_str);
-            return std::string("指令发送失败: 串口缓冲已满, 请稍后重试: ") + command_str;
-        }
         int written = uart_write_bytes(ECHO_UART_PORT_NUM, frame, flen);
         if (written < 0) {
             LogCaptureAppend("[UNO] x @%s （UART 写入失败）\n", command_str);
