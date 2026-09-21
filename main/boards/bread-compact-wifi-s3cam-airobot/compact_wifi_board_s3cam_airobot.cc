@@ -850,9 +850,7 @@ private:
         gpio_set_pull_mode(UART_ECHO_RXD, GPIO_PULLUP_ONLY);
         SendUartMessage("w2");
         // 启动 UART0 RX 解析任务, 读取 Arduino 回执(@busy/@done), 供 web /uno 接口查询下位机状态
-        // 优先级 5: 原为 3。仍低于 httpd(6)/音频(8), 但高于空闲优先级; 提高后 Arduino
-        // 回执解析不会因 ESP-NOW 定时器(esp_timer prio 22)抢跑而被长期推迟。
-        xTaskCreate(UnoStatusTask, "uno_status", 4096, this, 5, &uno_status_task_);
+        xTaskCreate(UnoStatusTask, "uno_status", 4096, this, 3, &uno_status_task_);
     }
 
     // 静态任务包装: 解析 Arduino 下位机回执
@@ -1442,14 +1440,14 @@ private:
         }
         // 对话/播报中不插嘴：本地播放本身会把状态钉在 Speaking，天然串行
         if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
-            ESP_LOGD(TAG_ESPNOW, "播报跳过: 设备忙(非待机), %s", name);
+            ESP_LOGI(TAG_ESPNOW, "播报跳过: 设备忙(非待机), %s", name);
             return;
         }
         int64_t now = EspNowHome::NowMs();
         for (const auto& c : announce_cool_) {
             if (c.used && c.node_id == node_id && strcmp(name, c.name) == 0 &&
                 (now - c.ts_ms) < kAnnounceCooldownMs) {
-                ESP_LOGD(TAG_ESPNOW, "播报跳过: 冷却中(还剩 %lld ms), %s",
+                ESP_LOGI(TAG_ESPNOW, "播报跳过: 冷却中(还剩 %lld ms), %s",
                          (long long)(kAnnounceCooldownMs - (now - c.ts_ms)), name);
                 return;
             }
@@ -1498,11 +1496,8 @@ private:
     // "evt" 只是状态上报（缓存由传输层维护），无需动作。
     void OnHomeEvent(int node_id, const std::string& kind, const std::string& name,
                      const std::string& arg, int64_t ts_ms) {
-        // 收到内容用 DEBUG 级: 节点状态是秒级持续上报的, INFO 级会以每秒数十条的速率
-        // 冲刷 4KB 日志环, 把网页「下位机指令记录」([UNO] 行)整片挤掉(现场症状就是
-        // 只看到被截断的残行)。CONFIG_LOG_MAXIMUM_LEVEL=3 时本行编译期即消失, 零开销;
-        // 需要排查 ESP-NOW 时把 CONFIG_LOG_MAXIMUM_LEVEL 调到 4 重新编译即可。
-        ESP_LOGD(TAG_ESPNOW, "收到节点%d消息: kind=%s name=%s arg=%s", node_id, kind.c_str(),
+        // 先把“收到了什么”记下来：排查时这是唯一的现场依据
+        ESP_LOGI(TAG_ESPNOW, "收到节点%d消息: kind=%s name=%s arg=%s", node_id, kind.c_str(),
                  name.c_str(), arg.c_str());
         (void)ts_ms;
         if (kind == "say") {
