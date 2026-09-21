@@ -477,9 +477,10 @@ void serialCommand() {
         size_t len = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
         if (len == 0) continue;
         line[len] = '\0';
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p != '@') continue;
+        // 容错: 上位机 UART0 与 ESP-IDF 控制台同口, 偶发噪声字节会插在命令前。
+        // 只判行首时, 行首多 1 个噪声字节即整行作废。改为行内查找 '@'。
+        char *p = strchr(line, '@');
+        if (p == nullptr) continue;
         p++;
         if (strncmp(p, "drive-", 6) == 0) {
             handleDrive(p + 6);   // web 摇杆驾驶命令
@@ -737,9 +738,9 @@ void checkLineStopCommand() {
         size_t len = Serial.readBytesUntil('\n', line, sizeof(line) - 1);
         if (len == 0) continue;
         line[len] = '\0';
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (*p != '@') continue;
+        // 容错同上: 行内查找 '@', 避免行首噪声导致急停命令被丢。
+        char *p = strchr(line, '@');
+        if (p == nullptr) continue;
         p++;
         if (strcmp(p, "line-stop") == 0) {
             setLineFollow(false);
