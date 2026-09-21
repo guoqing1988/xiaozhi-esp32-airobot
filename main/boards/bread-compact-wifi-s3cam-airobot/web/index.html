@@ -2175,13 +2175,23 @@
       h.textContent = text;
       h.style.display = 'flex';
     }
-    // 打开画面：**不等设备回应**就先显示（没连设备也要能看到框，框里给提示）
+    // 只出框 + 清提示：设备还没回应时先让用户看到视频区（框里给状态文案）。
+    // **不连流** —— /stream 在设备端 81 端口，服务没起来就设 src 必然会失败。
+    function videoShowBox() {
+      const img = document.getElementById('videoImg');
+      if (img) img.style.visibility = 'visible';  // 上次失败可能被隐藏过
+      const wrap = document.getElementById('videoWrap');
+      if (wrap) wrap.style.display = 'block';
+      videoSetHint('');
+    }
+    // 连流：**必须在设备端 /stream 服务就绪（video_start 返回 ok）之后调用**。
+    // 反例（曾经的 bug）：在 video_start 之前就设 src，此时 81 端口还没监听，
+    // 浏览器立刻拿到 connection refused 触发 error → 首次勾选必现“接口不可用”，
+    // 切走再切回（切走会 removeAttribute('src')，切回重新设）才正常。
     function videoOpen() {
       const img = document.getElementById('videoImg');
       if (!img) return;
-      videoSetHint('');
-      img.style.visibility = 'visible';  // 上次失败可能被隐藏过
-      document.getElementById('videoWrap').style.display = 'block';
+      videoShowBox();
       if (img.getAttribute('src')) return;  // 已连着就不重复设
       img.src = videoStreamUrl();
     }
@@ -2195,13 +2205,16 @@
     }
     function toggleVideo(chk) {
       if (!chk.checked) { videoClose(); wsSend({ action: 'video_stop' }); return; }
-      videoOpen();   // 先出框：设备没连上照样显示，框里再报“接口不可用”
+      videoShowBox();                     // 先出框（不等设备回应，没连设备也看得到框）
+      videoSetHint('正在连接视频…');
       wsSend({ action: 'video_start' })
         .then(function (resp) {
           if (!resp || resp.ok !== true) {
             videoSetHint('接口不可用：' + ((resp && resp.error) || '视频服务启动失败'));
             document.getElementById('videoCorner').textContent = '0fps';
+            return;
           }
+          videoOpen();                    // 服务已就绪，这时设 <img src> 才不会失败
         })
         .catch(function () {
           videoSetHint('接口不可用：未连接设备');

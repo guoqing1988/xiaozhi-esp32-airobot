@@ -516,7 +516,9 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
   | 取消勾选 | 切回 `PIXFORMAT_RGB565` | ✅ | 恢复拍照与预览；切换约 200~300ms |
 
   - 切模式靠 `Esp32Camera::Reinit(config)`（新加的纯增量方法，其它板不受影响），配置由板级 `MakeCameraConfig(format)` 统一生成（引脚/分辨率/质量只写一处）。
-  - **失败必回退**：切 JPEG 失败或服务起不来，都会立刻切回 RGB565，不会把相机丢在“未初始化”状态；切换后重新套用用户 NVS 里的翻转设置。
+  - **开流失败必回退**：切 JPEG 失败或服务起不来，都会立刻切回 RGB565，不会把相机丢在“未初始化”状态；切换后重新套用用户 NVS 里的翻转设置。
+  - ⚠️ **停流时切回 RGB565 可能失败**：VGA RGB565 的 DMA 缓冲要 **16KB 连续内部 SRAM**，开过视频后堆已碎片化就可能拿不到（`largest free block:12800`）→ 相机留在 JPEG 模式 → **拍照 500**。
+    该路径目前 **返回 false 只记 ERROR，`video_stop` 仍回 `ok:true`**（尚无重试/降级）。避开它靠下面这条构建配置，真机现象与根因见踩坑 22。
 - **帧率/分辨率角标**：浏览器对 MJPEG `<img>` 不暴露逐帧事件、拿不到帧率 → 由**设备侧统计**（滚动 1 秒窗口）经**已有 WebSocket** 每秒推一次 `{"video":1,"fps":…,"w":…,"h":…}`，前端更新角标；停止时推 `{"video":0}` 收回角标。
 - **帧率 20fps + 低延时三件套（FPV 遥控用途）**：这条功能的实际用途是**网页遥控机器人走位**（第一视角），
   **延时优先**；实测场景里开视频时不会同时做家里的 ESP-NOW 控制，所以不必为节点控制留空口。为此做了：
@@ -565,6 +567,47 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
   - 勾选后画面不出来 → 浏览器直接打开 `http://<设备IP>:81/stream` 试：能出图说明是前端问题；不出图看网页日志（级别开到「信息」）里 `LocalVideo` 的报错。
   - 日志出现 `not JPEG ... camera mode not switched?` → 相机没切到 JPEG 模式（`VideoStreamStart` 里的 `Reinit` 返回被忽略过？）。
   - **拍照没有 LCD 预览了** → 说明视频流没停干净（相机还在 JPEG 模式）：取消勾选；若页面已关，重进页面让 WS 归零触发自动停流。
+
+### ⚠️ PSRAM DMA 模式（`CONFIG_CAMERA_PSRAM_DMA`）：**实测不可用，不要开**
+
+**背景（为什么曾想开它）**：相机 DMA 缓冲必须在**内部 SRAM** —— 实测 JPEG 模式要 30720 字节、RGB565 要 16384 字节；
+而本板内部 SRAM 空载只剩 20~25KB，**开过一次实时视频后堆被碎片化**，切回 RGB565 就可能分配失败
+（`cam_dma_config: DMA buffer 16384 Byte malloc failed, the current largest free block:12800 Byte`）
+→ 相机留在 JPEG 模式 → **拍照 / AI 拍照全部 500**（详见踩坑 22）。
+8MB PSRAM 表面上看帮不上忙：IDF 里 PSRAM 区域**不带 `MALLOC_CAP_DMA`**（`memory_layout.c`），
+而 esp32-camera 的 DMA 缓冲写死用 `MALLOC_CAP_DMA` 分配（`cam_hal.c:522`）——
+驱动另提供了一个“PSRAM 直采”模式来绕过它（`CONFIG_CAMERA_PSRAM_DMA`，组件 Kconfig 默认 `n`）。
+
+**实测结论（2026-09，本板 OV2640 + IDF v6.0.2）：开启后实时视频完全不能用；关流后拍照仍然 500。已回退。**
+该项默认 `n` 是有原因的：**不要开**。（`CAMERA_PSRAM_DMA_ENABLED = CONFIG_CAMERA_PSRAM_DMA`，
+`cam_hal.c:58-64` —— 开了就真的会走 psram_mode，不是没生效。）
+
+**它为什么在这里坏（源码层面的机理，供后人参考）**：
+- 开了之后 JPEG 模式的 DMA 链从 **16 × 1024 字节**变成 **`recv_size / 1024` 个节点**
+  （SVGA 时 `800×600/5 = 96000` → **93 个描述符**，`esp32s3/ll_cam.c` 的 `ll_cam_dma_sizes`），
+  而且全部**直接链到 PSRAM 帧缓冲**（`cam_hal.c:510-516`），改由 GDMA 直接写 PSRAM。
+- 对齐依赖 `ll_cam_get_dma_align()`：`16 << GDMA.channel[].in.conf1.in_ext_mem_bk_size`
+  （`esp32s3/ll_cam.c:455`）—— 访问外部存储的 burst 配置没按预期生效时，
+  PSRAM 侧的对齐 / cache 一致性就会出问题（本板 `CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y`）。
+- 即：**“让 DMA 直接写 PSRAM”这条路在本板 + 本 IDF 版本下没走通**，不是配置写错。
+
+**如何回退**（若已开）：
+
+```
+idf.py menuconfig → Component config → Camera configuration
+  → [ ] Enable PSRAM DMA mode by default      # 取消勾选
+idf.py build
+```
+
+回退后确认 `sdkconfig` 里是 `# CONFIG_CAMERA_PSRAM_DMA is not set`。
+
+> ⚠️ 不要为了“记住这个设置”把它写进 `config.json` / `sdkconfig.defaults`：
+> 它是**已验证会坏**的模式，写进持久入口等于把坑固化给以后的自己和别人。
+> （它原本只存在本地 `sdkconfig` 里，而 `sdkconfig` 是构建生成物、不入库，所以回退后不会残留。）
+
+**如果以后真要再试它**（需先接 USB 串口看 `cam_hal` / `ll_cam` 的报错）：
+先只验证“开视频能不能出画面”，不要在同一轮里同时验证拍照；日记里重点看 `fb_get failed`、
+`FB-OVF`、`cam_dma_config`、以及 “PSRAM DMA mode enabled” 这行后面跟的第一个错误。
 
 ## 网页拍照（按钮 + 页面显示照片）
 
@@ -1655,6 +1698,86 @@ text[len] = '\0';          // ← 关键：此后才能安全地当 C 字符串�
 **教训**：ESP-NOW / UART / socket 这类“字节流 + 长度”的接口，**收到的都是裸字节，不是字符串**。
 只要后面用了 `strcmp`/`strchr`/`strlen`/`printf("%s")`，就必须先按长度拷贝并补 `'\0'`；
 能“大部分时候正常”只是因为没越界到非法字节而已 —— 这种 bug 永远是**概率性的、且只在某类字段上**。
+
+### 22. 关掉实时视频后拍照必 500（内部 SRAM 拿不到 16KB 连续块，2026-09 定位，修复待做）
+
+**现象**：开过「📹 实时视频」再取消勾选，切到「📷 照片」拍照 → 网页 **500**，AI 拍照也失败；
+**不开视频时一切正常**。当时网页日志（级别「错误」）：
+
+```
+E image_to_jpeg: unsupported format: 0x4745504a      # 0x4745504a 小端就是 'JPEG' FOURCC
+E Esp32Camera: EncodeCurrentFrameToJpeg: JPEG encode failed
+```
+
+再试一次，日志又变成：
+
+```
+E cam_hal: cam_dma_config(524): DMA buffer 16384 Byte malloc failed, the current largest free block:12800 Byte
+E camera: Camera config failed with error 0xffffffff
+E Esp32Camera: Reinit: esp_camera_init failed with error 0xffffffff
+```
+
+**根因链**（三步，缺一不可）：
+
+1. **关流要切回 RGB565**：`VideoStreamStop()` 先 `LocalVideoStreamStop()`，再 `camera_->Reinit(PIXFORMAT_RGB565)`。
+   VGA RGB565 的 DMA 缓冲要 **16384 字节连续内部 SRAM**（JPEG 模式是 30720）。
+2. **开过视频后这块内存就拿不到了**：视频流期间分配过约 30KB（30720 字节）内部 DMA（+ 81 端口 httpd 任务栈等），
+   释放后堆已碎片化，最大连续块只剩 12800 → `esp_camera_init` 直接失败。
+   （本板内部 SRAM 空载就只有 20~25KB，碎片敏感，见踩坑 16 与「内存开销」一节。）
+3. **失败后既无兜底也不报错**：`Reinit()` 里 `Release()` 已经 `esp_camera_deinit()`，
+   init 失败就 `return false` → 相机留在“已 deinit / init 失败”的残留态；
+   而 `VideoStreamStop()` **只打一行 ERROR，仍返回 `{"ok":true,"msg":"视频已关闭"}`**。
+
+**⚠️ 失败后的两种状态要分清**（都表现为“拍照 500”，但日志不同、修法也不同）：
+
+| 日志 | 相机实际状态 | 为什么拍照失败 |
+|---|---|---|
+| `Esp32Camera: EncodeCurrentFrameToJpeg: JPEG encode failed`<br>+ `image_to_jpeg: unsupported format: 0x4745504a` | **还能取到帧**，但停在 JPEG 模式 | `EncodeCurrentFrameToJpeg` 把 JPEG 帧送进了不支持 JPEG 输入的 `image_to_jpeg_cb` |
+| `Esp32Camera: Camera capture failed`<br>+ `MCP: tools/call: Failed to capture photo` | **连帧都取不到**（`streaming_on_` 仍为 true，但 `esp_camera_fb_get()` 返回 NULL，`esp32_camera.cc:153`） | `Reinit` 失败后相机停在“已 deinit / init 失败”的残留态 |
+
+> 第二种更坏，也说明 **“让 `EncodeCurrentFrameToJpeg` 支持 JPEG 直通”只能救第一种**：
+> 第二种连帧都没有，直通无从谈起。真正的解法必须让相机**不要停在不可用状态**（见下「待做」）。
+
+> **附带一条范围更大的事实**：切走 Tab 只断开 `<img>`、**不发 `video_stop`**，
+> 设备仍停在 JPEG 模式 —— 所以“开过视频”（哪怕没手动关）之后拍照就已经坏了。
+
+**修复**：
+
+- ~~开 `CONFIG_CAMERA_PSRAM_DMA=y`~~ → **实测不可用**（视频流完全不能用、关流后拍照仍 500），已回退；
+  机理与回退方法见「网页实时视频流 → PSRAM DMA 模式：实测不可用」。根因（2）仍需另想办法（见下）。
+- **前端：`<img src>` 必须等 `video_start` 返回 ok 之后再设**。
+  原来在“先出框”里就把 src 设了，而设备端 81 端口还没监听 → 首次勾选必现“接口不可用：未连接设备，
+  或视频服务未启动”，切走再切回（切走会 `removeAttribute('src')` 重连）才正常。
+  现在拆成 `videoShowBox()`（只出框、不连流）+ `videoOpen()`（服务就绪后才设 src）。
+- ⚠️ **待做（根因第 3 步仍未解决，2026-09 记录时尚未实现）**：
+  - **P2（主）**：`VideoStreamStop()` 切回 RGB565 **失败要重试**（含延时）；**失败时不要把相机留在 deinit 残留态**
+    （尝试回到 JPEG 模式，至少保证能取帧）；并**如实返回 `{"ok":false,...}`**，前端明确提示“相机恢复失败”。
+  - **P2b**：必要时**降级到 QVGA 恢复**（DMA 需求比 VGA 小，LCD 是 240×240，QVGA 预览够用）。
+  - **P3**：`EncodeCurrentFrameToJpeg` 在 `PIXFORMAT_JPEG` 时直接拷出 JPEG 帧 —— 只解决上表**第一种**
+    （视频流**开着**时拍照、或相机停在 JPEG 模式但尚能取帧），**救不了第二种**。
+  - **待确认的证据**（判断 P2 的重试到底有没有用）：开视频 → 关视频前后的 `free sram` 对比 ——
+    少 16~30KB 且不回升 = `esp_camera_deinit()` 有泄漏（重试无用，要改释放顺序）；
+    回升、只是最大连续块变小 = 碎片（重试/延时/降分辨率有效）。
+  - 另一个**尚未查清的疑点**：`Reinit` 释放了 30720 字节后，为何连 16384 都拿不到（最大连续块仅 12800）——
+    这更像“释放了但没合并”或“deinit 未归还”，需要上面那条 `free sram` 证据才能定性。
+
+**过程教训（本条也应当记住）**：拿“源码里看起来能行”的开关去解决内存问题，**必须先在真机上只验证它本身**再往下推 ——
+`CONFIG_CAMERA_PSRAM_DMA` 就是这样一次失败尝试：机理上说得通（跳过内部 DMA 分配），
+实际却让视频流直接不可用。**未实测的推断不要写进文档当结论**。
+
+**教训**：
+
+- 本板的“内存不够”往往不是**总量**不够，而是**连续块**不够：`largest free block` 比 `free sram` 更能定位问题。
+- **8MB PSRAM 不是万能**：IDF 里 PSRAM 区域不带 `MALLOC_CAP_DMA`，凡是用 `MALLOC_CAP_DMA` 分配的
+  大块（相机 DMA、部分驱动缓冲）都只能在内部 SRAM 里找。驱动自带的 PSRAM 模式开关
+  （`CONFIG_CAMERA_PSRAM_DMA` / 运行时 `esp_camera_set_psram_mode()`）是本板试过的**唯一**绕开途径，
+  但**实测不可用**（见上文）—— 所以目前只能从“减少内部连续块需求 / 避免重复 deinit-init”下手。
+- **失败路径必须如实返回**：当时 `video_stop` 失败仍回 `ok:true`，用户看到的是“一切正常 + 拍照莫名 500”，
+  排查成本全转嫁到了现象端（无重试、无降级、无错误文案）。
+
+**回归防护**：`scripts/tests/test_web_realtime_video.py` 的
+`test_img_src_set_only_after_device_ready`（`<img src>` 必须在 `video_start` 之后设）
++ `test_show_box_does_not_open_stream`（出框不许连流）。
 
 ## 与上游合并提示
 

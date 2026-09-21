@@ -137,9 +137,30 @@ class TestFrontendPanel(_Base):
         """勾选就立刻出框（没连设备也出），不能等设备回应、更不能失败就把勾去掉。"""
         m = re.search(r"function toggleVideo\(chk\)\s*\{(.*?)\n    \}", self.html, re.S)
         body = m.group(1)
-        self.assertLess(body.index("videoOpen()"), body.index("'video_start'"), "先出框再问设备")
+        self.assertLess(body.index("videoShowBox()"), body.index("'video_start'"), "先出框再问设备")
         self.assertNotIn("alert(", body, "不该弹 alert，框里提示就够")
         self.assertNotIn("chk.checked = false", body, "设备没连不该把勾去掉")
+
+    def test_img_src_set_only_after_device_ready(self):
+        """连流必须等设备端 /stream 就绪（video_start 返回 ok）之后。
+
+        反例（曾经的真 bug）：在 video_start 之前就设 <img src>，此时设备端 81 端口
+        还没监听，浏览器立刻触发 error → 首次勾选必现“接口不可用”，切走再切回
+        （切走会 removeAttribute('src')）才正常。
+        """
+        m = re.search(r"function toggleVideo\(chk\)\s*\{(.*?)\n    \}", self.html, re.S)
+        body = m.group(1)
+        self.assertIn("videoOpen()", body, "video_start 成功后要真的去连流")
+        self.assertGreater(body.index("videoOpen()"), body.index("'video_start'"),
+                           "videoOpen()（设 src）必须在请求 video_start 之后")
+        self.assertNotIn("img.src", body, "toggleVideo 不该绕过 videoOpen 直接设 src")
+
+    def test_show_box_does_not_open_stream(self):
+        """出框（videoShowBox）只负责显示，不设 src —— 否则又变回“先连流后起服务”。"""
+        m = re.search(r"function videoShowBox\(\)\s*\{(.*?)\n    \}", self.html, re.S)
+        self.assertIsNotNone(m, "找不到 videoShowBox")
+        self.assertNotIn("img.src", m.group(1), "videoShowBox 不能设 src")
+        self.assertIn("videoSetHint('')", m.group(1))
 
     def test_offline_hint_layer(self):
         """连不上时用画面上的提示层说明“接口不可用”（不是空白也不是破图）。"""
