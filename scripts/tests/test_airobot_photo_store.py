@@ -135,7 +135,9 @@ class TestPhotoStore(unittest.TestCase):
         # image_to_jpeg_cb 只收**普通函数指针**：捕获 this 的 lambda 编译不过，
         # 所以回调必须写成静态成员函数（拿不到 ctx 就只能靠 EncodeCtx 打包）
         self.assertIn("size_t Esp32Camera::JpegEncodeCb(", self.camera_cc)
-        m = re.search(r"bool ok = image_to_jpeg_cb\(.*?JpegEncodeCb, &ctx\);", self.camera_cc, re.S)
+        # 普通编码路径（RGB565 → 软件编码）仍要用静态回调 + EncodeCtx；
+        # JPEG 直通路径（本板）复用同一个回调（见 EncodeCurrentFrameToJpeg）。
+        m = re.search(r"image_to_jpeg_cb\(.*?JpegEncodeCb, &ctx\);", self.camera_cc, re.S)
         self.assertIsNotNone(m, "Explain 必须用静态回调 + EncodeCtx")
         body = _func(self.camera_cc, "size_t Esp32Camera::JpegEncodeCb")
         self.assertIn("index == 0", body)

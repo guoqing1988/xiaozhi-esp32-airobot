@@ -52,8 +52,10 @@ public:
     ~Esp32Camera();
 
     // 用新配置重新初始化相机（先彻底释放再 init，并重新套用 sensor 设置）。
-    // 用途：实时视频流期间切到 PIXFORMAT_JPEG（模组直出 JPEG，零编码零拷贝），
-    // 退出视频流时切回 PIXFORMAT_RGB565（恢复拍照与 LCD 预览）。
+    // ⚠ **本板（面包板 AI 机器人）已不再使用它**：相机改为开机按 JPEG 初始化一次、全程
+    //    不切格式（原因见板子 README「为什么要单一模式」：内部 SRAM 最大连续块实测只有
+    //    ~12.8KB，而 RGB565 要 30720、JPEG 要 16384 —— 一旦 deinit 过就再也 init 不回来，
+    //    拍照与视频会双双失效且只能重启）。方法保留给确实需要切换像素格式的调用方。
     // ⚠ 会丢弃 current_fb_ 与 encode_buf_（调用方需确保没有在用）；
     // 失败返回 false 且相机处于**未初始化**状态，调用方必须处理（通常回退到原配置）。
     bool Reinit(const camera_config_t &config);
@@ -65,11 +67,13 @@ public:
     virtual bool SetSwapBytes(bool enabled) override;
     virtual std::string Explain(const std::string &question) override;
 
-    // 把**已捕获**的当前帧(RGB565)编码成 JPEG 写入 out（网页拍照用）。
-    // 为什么不另抓一帧：本板 fb_count=1，帧池只有一块；另开帧缓冲
+    // 把**已捕获**的当前帧编码/取出成 JPEG 写入 out（网页拍照用）。
+    // 为什么不让相机多抓一帧：本板 fb_count=1，帧池只有一块；另开帧缓冲
     // (fb_count=2) 会让 cam_hal 多占 ~30KB DMA **内部** RAM，本板内部 SRAM 扛不住。
     // 前置条件：先调用 Capture() 成功。返回是否成功，成功时 out_len 为 JPEG 字节数。
-    // 复用与 Explain() 相同的字节序处理与编码参数；编码期间不可并发调用 Capture()。
+    // 帧是 RGB565 时按 Explain() 同一套字节序与参数做软件编码；
+    // 帧是 JPEG 时**直接拷贝**（相机已直出，不必也不该再编码）。
+    // 编码期间不可并发调用 Capture()。
     bool EncodeCurrentFrameToJpeg(uint8_t *out, size_t out_capacity, size_t &out_len);
 
     // 注册/注销 JPEG 观察者：Explain() 编码完成时（拿到**完整** JPEG 的那一刻）回调。

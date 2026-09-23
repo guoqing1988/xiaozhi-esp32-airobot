@@ -204,13 +204,14 @@ private:
                                          DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
-    // 构造相机配置。format 决定像素格式：
-    //   平时 PIXFORMAT_RGB565 —— 软件编码 JPEG 供网页拍照/AI 识别，且能在 LCD 上预览；
-    //   视频流期间 PIXFORMAT_JPEG —— 模组自带 JPEG 编码，驱动直接回 JPEG 帧，
-    //                              推送时零编码零拷贝（官方 README 也指出 JPEG 模式帧率更好）。
+    // 构造相机配置。format 决定像素格式（**本板全程固定 JPEG**，见下方 InitializeCamera 的注释）：
+    //   PIXFORMAT_JPEG    —— 模组自带 JPEG 编码，驱动直接回 JPEG 帧：推流零编码零拷贝，
+    //                       拍照也只需一次 memcpy（EncodeCurrentFrameToJpeg 直通），
+    //                       且 DMA 只要 16384 字节内部 SRAM（RGB565 要 30720）。
+    //   PIXFORMAT_RGB565  —— 需要软件编码才能得到 JPEG；本板已不再使用（保留给其它板）。
     // grab 决定取帧策略：
-    //   照片/预览用 CAMERA_GRAB_WHEN_EMPTY（等一帧新的，画面完整）；
-    //   实时视频用 CAMERA_GRAB_LATEST（总是拿最新帧，宁可丢旧帧也不排队 —— 遥控要的是低延时）。
+    //   实时视频用 CAMERA_GRAB_LATEST（总是拿最新帧，宁可丢旧帧也不排队 —— 遥控要的是低延时）；
+    //   本板单一初始化就用它：Capture() 会连取两帧丢掉旧帧，拍照同样拿得到新画面。
     // 引脚/分辨率/质量与 format 无关，故抽成一个函数；切换模式时复用它避免两处不一致。
     static camera_config_t MakeCameraConfig(
         pixformat_t format, camera_grab_mode_t grab = CAMERA_GRAB_WHEN_EMPTY,
@@ -247,7 +248,19 @@ private:
 
     void InitializeCamera() {
         LoadVideoCfg();  // 先读出网页保存的视频参数（内含把帧率同步给流模块）
-        camera_ = new Esp32Camera(MakeCameraConfig(PIXFORMAT_RGB565));
+        // ⚠ 相机**只初始化这一次**，像素格式恒为 JPEG，之后再也不 deinit/Reinit。
+        //
+        // 为什么必须单一模式（真机实测，见 README 踩坑 22）：本板内部 SRAM 的最大连续块
+        // 实测只有 ~12800 字节，而两种像素格式各自要求：RGB565(拍照) 30720、JPEG(视频) 16384。
+        // 开机时堆是干净的，30720 拿得到；一旦开过视频（deinit/init 过一次），堆被切碎且
+        // **最大连续块不再回升**，此后两个模式都分配失败 —— 表现为「拍照 500」+
+        // 「视频也再开不起来」，只能重启。所以：初始化一次，之后只写 sensor 寄存器。
+        //
+        // 按最大档 SVGA 初始化是为了帧缓冲够大（fb_size 按初始化分辨率算），
+        // 运行时可用 set_framesize 在 QVGA~SVGA 间随便切；质量按拍照档起。
+        camera_ = new Esp32Camera(MakeCameraConfig(PIXFORMAT_JPEG, CAMERA_GRAB_LATEST,
+                                                   kVideoMaxFrameSize, kPhotoQuality));
+        ApplyPhotoSensorParams();  // 平时按拍照参数（VGA）待命；开流时再切到用户设的推流参数
     }
 
     // 应用 NVS 保存的摄像头翻转设置(开机调用, 断电重启仍保持)
@@ -1194,7 +1207,7 @@ private:
     // size   ：画面尺寸（0=320×240 更流畅 / 1=640×480 默认 / 2=800×600 更清晰）
     // fps    ：帧率上限（改完下一帧立即生效，不用重启流）
     // quality：JPEG 质量（数字越大越糊、单帧越小、延时越低；10≈清晰 20≈标准 30≈省流）
-    // 改尺寸需要重 init 相机（约 300ms，画面闪一下）；质量只写 sensor 寄存器，立即生效。
+    // 三项都是「只写 sensor 寄存器」，不重 init 相机（见下方 ApplyVideoSensorParams）。
     struct VideoCfg {
         int size = 1;
         int fps = 20;
@@ -1202,14 +1215,18 @@ private:
     };
     VideoCfg video_cfg_;
 
-    // 视频模式固定的初始化分辨率（取最大档）：
-    // JPEG 模式下 DMA 缓冲是固定 32KB（ll_cam.c:478，与分辨率无关），
-    // 但帧缓冲 fb_size = 宽 × 高 / 5 是按「初始化时的分辨率」算的（cam_hal.c:588）。
-    // 所以按最大档初始化（SVGA 800×600 → 94KB PSRAM），运行时就能用 sensor 的
+    // 相机初始化时就用的"最大档"分辨率：
+    // 帧缓冲 fb_size = 宽 × 高 / 5 是按「初始化时的分辨率」算的（cam_hal.c:588），
+    // 所以按最大档初始化（SVGA 800×600 → 96KB PSRAM），运行时就能用 sensor 的
     // set_framesize 在 [QVGA..SVGA] 里随便切，而不用重启相机。
     // 反例：按当前分辨率初始化再往大改 → cam_hal 的 FB-OVF 检查会 ll_cam_stop() 停摆。
     // 必须 >= VideoFrameSizeOf(2)。
     static constexpr framesize_t kVideoMaxFrameSize = FRAMESIZE_SVGA;
+
+    // 不推流时的"拍照参数"：分辨率 VGA + JPEG 质量 12。
+    // 与以前「停流时切回 RGB565」得到的画面完全一致（那时 init 固定 VGA、quality 12）。
+    static constexpr framesize_t kPhotoFrameSize = FRAMESIZE_VGA;
+    static constexpr int kPhotoQuality = 12;
 
     static framesize_t VideoFrameSizeOf(int size) {
         switch (size) {
@@ -1224,6 +1241,24 @@ private:
     void ApplyVideoFramesize() {
         if (sensor_t *s = esp_camera_sensor_get()) {
             s->set_framesize(s, VideoFrameSizeOf(video_cfg_.size));
+        }
+    }
+
+    // 把 sensor 调成「推流」参数：用户设的分辨率 + JPEG 质量。
+    // 两次 I2C 寄存器写，不分配任何内存、不重启相机（这是本板不再 Reinit 的基础）。
+    void ApplyVideoSensorParams() {
+        if (sensor_t *s = esp_camera_sensor_get()) {
+            s->set_framesize(s, VideoFrameSizeOf(video_cfg_.size));
+            s->set_quality(s, video_cfg_.quality);
+        }
+    }
+
+    // 把 sensor 调回「拍照」参数（VGA + 质量 12）：不推流时待命用，
+    // 保证网页拍照/AI 拍照的分辨率与画质和以前一致（不受视频设置影响）。
+    void ApplyPhotoSensorParams() {
+        if (sensor_t *s = esp_camera_sensor_get()) {
+            s->set_framesize(s, kPhotoFrameSize);
+            s->set_quality(s, kPhotoQuality);
         }
     }
 
@@ -1324,8 +1359,10 @@ private:
         return VideoCfgJson();
     }
 
-    // 开启：相机切 JPEG（模组直出，零编码零拷贝）→ 起独立 /stream 服务（端口 81）。
-    // 关闭：停 /stream → 相机切回 RGB565（恢复拍照与 LCD 预览）。
+    // 开启：把 sensor 切到推流参数（分辨率+质量，两次寄存器写）→ 起独立 /stream 服务（端口 81）。
+    // 关闭：停 /stream → sensor 复位成拍照参数（VGA + 质量 12）。
+    // ⚠ 两边都**不 Reinit 相机**：像素格式全程是 JPEG，切换不再申请任何大块内存，
+    //   也就不会再有「切换失败 → 相机卡死 → 拍照/视频全废」这个故障面（见踩坑 22）。
     // 说明：没有浏览器连着 /stream 时不会抓帧，所以只有真有人看时才占射频/CPU。
     std::string VideoStreamStart() {
         if (LocalVideoStreamRunning()) {
@@ -1334,23 +1371,14 @@ private:
         if (camera_ == nullptr) {
             return "{\"ok\":false,\"error\":\"相机不可用\"}";
         }
-        if (!camera_->Reinit(MakeCameraConfig(PIXFORMAT_JPEG, CAMERA_GRAB_LATEST,
-                                             kVideoMaxFrameSize,   // 按最大档分配帧缓冲
-                                             video_cfg_.quality))) {
-            // 切不过去不能把相机丢在未初始化状态：立刻退回原配置
-            camera_->Reinit(MakeCameraConfig(PIXFORMAT_RGB565));
-            ApplyCameraFlip();
-            return "{\"ok\":false,\"error\":\"相机切换 JPEG 模式失败\"}";
-        }
-        ApplyCameraFlip();     // Reinit 只套 Kconfig 默认翻转，用户 NVS 里存的设置要重新生效
-        ApplyVideoFramesize(); // 再切到用户实际选的分辨率（只写寄存器，不重启）
+        // 只改 sensor 寄存器：分辨率 + JPEG 质量（都立即生效，不重启相机、不断流）
+        ApplyVideoSensorParams();
         // 视频流对延时敏感：待机态 WIFI_PS_MAX_MODEM 会让帧等 DTIM beacon（几百毫秒）
         SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         if (!LocalVideoStreamStart([this](float fps, int w, int h) {
                 WebNotifyVideoStat(fps, w, h, fps > 0.0f);
             })) {
-            camera_->Reinit(MakeCameraConfig(PIXFORMAT_RGB565));  // 服务起不来同样退回
-            ApplyCameraFlip();
+            ApplyPhotoSensorParams();  // 服务没起来：恢复拍照参数，不影响其它功能
             SetPowerSaveLevel(web_control_active_ ? PowerSaveLevel::PERFORMANCE
                                                  : PowerSaveLevel::LOW_POWER);
             return "{\"ok\":false,\"error\":\"启动视频服务失败\"}";
@@ -1361,14 +1389,10 @@ private:
 
     std::string VideoStreamStop() {
         LocalVideoStreamStop();
-        WebNotifyVideoStat(0.0f, 0, 0, false);  // 立即把角标收回“--”，不等统计回调
-        if (camera_ != nullptr) {
-            // 切回 RGB565：恢复网页拍照与 LCD 预览（切失败也要继续把流停掉）
-            if (!camera_->Reinit(MakeCameraConfig(PIXFORMAT_RGB565))) {
-                ESP_LOGE(TAG, "restore RGB565 camera failed");
-            }
-            ApplyCameraFlip();
-        }
+        WebNotifyVideoStat(0.0f, 0, 0, false);  // 立即把角标收回"--"，不等统计回调
+        // 把 sensor 复位成拍照参数（VGA + 质量 12）：与以前「切回 RGB565」得到的画面一致；
+        // 相机不动、不释放、不重 init，所以这一步不可能失败。
+        ApplyPhotoSensorParams();
         // 恢复原有省电策略：若 web 控制页还连着则保持性能模式
         SetPowerSaveLevel(web_control_active_ ? PowerSaveLevel::PERFORMANCE
                                              : PowerSaveLevel::LOW_POWER);

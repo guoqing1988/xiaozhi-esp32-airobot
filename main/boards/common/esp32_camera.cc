@@ -20,6 +20,62 @@
 #define TAG "Esp32Camera"
 
 namespace {
+// 把一张 JPEG 解码成 RGB565 挂到 LCD 预览上（本板单一 JPEG 模式的拍照预览）。
+// 刻意放在这个匿名 namespace 里、由 Capture() 一行调用：共享文件里被改动的
+// 「上游代码」就只剩那一行，以后合并官方代码时只需手工解 1 行。
+// 取 uint8_t* 而非 const：esp_jpeg_image_cfg.indata 就是非 const（与 image_to_jpeg_cb 同）。
+void DecodeJpegPreview(uint8_t *jpeg, size_t len) {
+    if (jpeg == nullptr || len == 0) {
+        return;
+    }
+    // tjpgd 草稿纸：ROM 里的解码器固定要 3.1KB（与图像大小无关，见 esp_jpeg 的
+    // JPEG_WORK_BUF_SIZE）。放函数静态区而**不走堆**：本板内部 SRAM 紧张又怕碎片化，
+    // 与 esp32-camera 自带 conversions/to_bmp.c 里的 `static uint8_t work[3100]` 同一做法。
+    static uint8_t work[3100];
+    esp_jpeg_image_cfg_t cfg = {};
+    cfg.indata = jpeg;
+    cfg.indata_size = len;
+    cfg.out_format = JPEG_IMAGE_FORMAT_RGB565;
+    cfg.out_scale = JPEG_IMAGE_SCALE_1_2;  // 1/2 缩放(VGA→320×240)：LCD 才 240×240
+    cfg.flags.swap_color_bytes = 0;  // 小端 RGB565 = LVGL 要的字节序（改这里会红蓝互换）
+    cfg.advanced.working_buffer = work;
+    cfg.advanced.working_buffer_size = sizeof(work);
+
+    // 先只读 JPEG 头问出真实尺寸再分配。不能拿 fb->width/height 算：那是「sensor 当前
+    // 配置的分辨率」，刚改过 set_framesize 时这一帧可能还是旧尺寸，按它算缓冲会写越界。
+    // 再把 outbuf_size 交给解码器，它自己还会校验一次。
+    // 不用组件自带的 jpg2rgb565()：它把 outbuf_size 写死为 UINT32_MAX，没有这两道保护。
+    esp_jpeg_image_output_t info = {};
+    if (esp_jpeg_get_image_info(&cfg, &info) != ESP_OK || info.output_len == 0) {
+        ESP_LOGW(TAG, "JPEG preview: bad header (len=%zu)", len);
+        return;
+    }
+    uint8_t *preview_data =
+        (uint8_t *)heap_caps_malloc(info.output_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (preview_data == nullptr) {
+        return;
+    }
+    cfg.outbuf = preview_data;
+    cfg.outbuf_size = info.output_len;
+    esp_jpeg_image_output_t out = {};
+    if (esp_jpeg_decode(&cfg, &out) != ESP_OK) {
+        // 解码失败只影响 LCD 预览；照片本身仍可用（JPEG 直通）
+        ESP_LOGW(TAG, "JPEG preview decode failed (len=%zu)", len);
+        heap_caps_free(preview_data);
+        return;
+    }
+    auto display = dynamic_cast<LvglDisplay *>(Board::GetInstance().GetDisplay());
+    if (display == nullptr) {
+        heap_caps_free(preview_data);
+        return;
+    }
+    display->SetPreviewImage(std::make_unique<LvglAllocatedImage>(preview_data, info.output_len,
+                                                                 out.width, out.height,
+                                                                 out.width * 2,
+                                                                 LV_COLOR_FORMAT_RGB565));
+    ESP_LOGI(TAG, "JPEG preview decoded: %ux%u (jpeg len=%zu)", out.width, out.height, len);
+}
+
 // 编码线程栈：std::thread 底层是 pthread，默认栈只有 3KB
 // (CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=3072)。这条线程要跑软件 JPEG 编码
 // (image_to_jpeg_cb → esp_new_jpeg)，还要**同步执行**板级 JPEG 观察者
@@ -197,8 +253,8 @@ bool Esp32Camera::Capture() {
             }
         }
     } else if (current_fb_->format == PIXFORMAT_JPEG) {
-        // JPEG format preview usually requires decoding, skip preview display for now, just log
-        ESP_LOGW(TAG, "JPEG capture success, len=%zu, but not supported for preview", current_fb_->len);
+        // 本板相机直出 JPEG：解码成 RGB565 才能给 LVGL 预览（实现见文件头的 DecodeJpegPreview）。
+        DecodeJpegPreview(current_fb_->buf, current_fb_->len);
     }
 
     ESP_LOGI(TAG, "Captured frame: %dx%d, len=%zu, format=%d",
@@ -281,6 +337,8 @@ bool Esp32Camera::EncodeCurrentFrameToJpeg(uint8_t *out, size_t out_capacity, si
             enc_fmt = V4L2_PIX_FMT_GREY;
             break;
         case PIXFORMAT_JPEG:
+            // 相机直出 JPEG（本板单一模式）：不动，走上游 image_to_jpeg_cb 的直通分支
+            // （由 CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT 开启，形状：cb(0,整张)+cb(1,哨兵)）。
             enc_fmt = V4L2_PIX_FMT_JPEG;
             break;
         case PIXFORMAT_RGB888:

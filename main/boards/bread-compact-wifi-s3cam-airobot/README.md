@@ -361,7 +361,7 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 | ⏰ AI 闹钟 | 列表查看/删除 + **弹窗新建**（与上传歌曲同一套弹窗样式）| 「AI 闹钟提醒」|
 | 🕹️ 机器人摇杆 | 麦克纳姆轮方向/速度控制 + 头部舵机 + **下位机指令记录**（与系统日志同源，只看 `[UNO]` 行） | 「Arduino 下位机」|
 | 📷 照片 | 拍照并显示当次那张（含 **🧹 清空**）+ TF 卡相册翻看/删除/「AI 拍照也存卡」开关 | 「网页拍照」「照片相册」|
-| 📹 实时视频 | 「机器人控制」面板摇杆**上方**的勾选框：勾选才启流（MJPEG，画面上有帧率/分辨率角标），取消立即停并恢复拍照预览 | 「网页实时视频流」|
+| 📹 实时视频 | 「机器人控制」面板摇杆**上方**的勾选框：勾选才启流（MJPEG，画面上有帧率/分辨率角标），取消立即停流（拍照与 LCD 预览不受影响）| 「网页实时视频流」|
 
 > 页面有五个 tab（歌曲管理 / 闹钟提醒 / 机器人控制 / 照片 / 系统日志）——「提示音」不占 tab，就在**歌曲管理**页下方；**拍照与照片相册都在「📷 照片」Tab**。
 > 2026-09 起「系统日志」是**独立 tab 且排在最末**（原先是折叠在「🎮 机器人控制」面板底部）：边看日志边切面板排查更顺手，机器人面板也不再被日志占长。
@@ -507,18 +507,70 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
   - 设备侧用 MJPEG：`multipart/x-mixed-replace` + `httpd_resp_send_chunk`，照 `espressif/esp32-camera` README 的 `jpg_stream_httpd_handler` 与 `espressif/esp-iot-solution` 的 `video_stream_server` 示例实现（见 `local_video_stream.cc`）。
   - 前端**零解码代码**：`<img src="http://<设备IP>:81/stream">` 浏览器原生就能显示 MJPEG。
   - 独立 httpd（**端口 81**）：`/stream` 是长循环 handler，挂在主 httpd（80，跑着 WS 控制/日志/上传）上会把那条任务占死。
-- **相机模式按需切换（本功能的关键设计）**：
+- **相机全程单一 JPEG 模式（本功能的关键设计，2026-09 重构）**：
 
-  | 状态 | 相机模式 | LCD 预览 | 说明 |
+  | 状态 | 相机像素格式 | LCD 预览 | 说明 |
   |---|---|---|---|
-  | 平时（默认） | `PIXFORMAT_RGB565` | ✅ | 与以前完全一致：拍照、AI 识别、LCD 预览 |
-  | 勾选实时视频 | `PIXFORMAT_JPEG` | ❌ | 摄像头模组**自带 JPEG 编码**，驱动直接回 JPEG 帧 → 推流**零编码零拷贝**（`fb->buf` 直接发）|
-  | 取消勾选 | 切回 `PIXFORMAT_RGB565` | ✅ | 恢复拍照与预览；切换约 200~300ms |
+  | 全程（开机 init 一次） | `PIXFORMAT_JPEG` | ✅ | 摄像头模组**自带 JPEG 编码**：推流**零编码零拷贝**（`fb->buf` 直接发）、拍照直通上传、LCD 预览现场解码 |
 
-  - 切模式靠 `Esp32Camera::Reinit(config)`（新加的纯增量方法，其它板不受影响），配置由板级 `MakeCameraConfig(format)` 统一生成（引脚/分辨率/质量只写一处）。
-  - **开流失败必回退**：切 JPEG 失败或服务起不来，都会立刻切回 RGB565，不会把相机丢在“未初始化”状态；切换后重新套用用户 NVS 里的翻转设置。
-  - ⚠️ **停流时切回 RGB565 可能失败**：VGA RGB565 的 DMA 缓冲要 **16KB 连续内部 SRAM**，开过视频后堆已碎片化就可能拿不到（`largest free block:12800`）→ 相机留在 JPEG 模式 → **拍照 500**。
-    该路径目前 **返回 false 只记 ERROR，`video_stop` 仍回 `ok:true`**（尚无重试/降级）。避开它靠下面这条构建配置，真机现象与根因见踩坑 22。
+  - **为什么不按需切换（旧设计的坑，真机实测）**：两种格式各自的 DMA 都要一整块**连续内部 SRAM** ——
+    VGA RGB565 要 **30720** 字节，JPEG 只要 **16384**（且与分辨率无关）；
+    而本板实测最大连续块只有约 **12800**，且**开过一次视频后再也不回升**。
+    于是只要 deinit/Reinit 过一次，两个模式就都 init 不回来：网页拍照 500 + 视频也开不起来，**只能重启**。
+    所以改成**开机按 JPEG 初始化一次，之后不再动相机**（真机日志与完整推理见踩坑 22）。
+  - 相机配置只写一处：板级 `MakeCameraConfig()`。初始化用**最大档 SVGA**（帧缓冲 `fb_size = 宽×高/5`
+    按初始化时的分辨率算，按最大档给后续切换才够）、质量按拍照档 12 起。
+  - **推流/停流只写 sensor 寄存器**（各两次 I2C 写、零内存分配、不重启相机）：
+    `ApplyVideoSensorParams()`（用户设的分辨率 + JPEG 质量）/ `ApplyPhotoSensorParams()`
+    （VGA + 质量 12，即不推流时拍照的画面与以前一致）→ 所以 `video_stop` **不可能失败**。
+  - **LCD 预览没丢（用户明确要求保留）**：拍照时把 JPEG 帧用 `esp_jpeg` 的 ROM 解码器解成 RGB565（1/2 缩放）
+    挂给 LVGL，见 `Esp32Camera` 文件头的 `DecodeJpegPreview()`；解码只在拍照路径做（httpd/MCP 任务），
+    输出留在 PSRAM、草稿纸用静态 `work[3100]`（**不占内部堆**）。
+  - JPEG 直通**不自己造**：靠上游 `image_to_jpeg.cpp` 自带的直通分支（需开 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT`，
+    回调形状与软件编码完全一致）—— 这样 `esp32_camera.cc` 里 `Explain()`/`EncodeCurrentFrameToJpeg()`
+    都能保持上游原样（合并官方代码时冲突面最小）。**怎么开见下**。
+
+### ▶ `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` 怎么配（本板必须开）
+
+**它是什么**：上游开关（`main/Kconfig.projbuild` → `Xiaozhi Assistant` → `Camera Configuration` →
+`Allow JPEG Input`，**默认 n**，上游是给 USB 摄像头用的）：开启后 `image_to_jpeg_cb()` 遇到
+`V4L2_PIX_FMT_JPEG` 就直接把这一整帧按回调投出去（`cb(0,整张)` + `cb(1,哨兵)`），不再送进软件编码器。
+本板相机直出 JPEG，就靠它把 JPEG 帧原样送到上传链路。
+
+**推荐做法：写在 `config.json`（已加好），用构建脚本生成 sdkconfig**
+
+两个变体的 `sdkconfig_append` 里都有这一行；**不要手改 `sdkconfig`**（它是生成物、不入库、clean 就没了）：
+
+```jsonc
+// main/boards/bread-compact-wifi-s3cam-airobot/config.json
+"sdkconfig_append": [
+    ...,
+    "CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y",
+    ...
+]
+```
+
+```sh
+# ⚠️ 改完 config.json 必须走构建脚本：idf.py build 根本不读 config.json（见踩坑「改 config.json 后 idf.py build 不生效」）
+source ~/esp/v6.0.2/esp-idf/export.sh
+python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
+#  无 TF 卡变体：  --name bread-compact-wifi-s3cam-airobot-no-tfcard
+
+# 验证：sdkconfig 与生成头里都应该是 y / 1
+grep CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT sdkconfig          # → CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y
+grep XIAOZHI_CAMERA_ALLOW_JPEG_INPUT build/config/sdkconfig.h  # → #define CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT 1
+```
+
+生成一次后，日常照旧 `idf.py build` 即可（该项已在 `sdkconfig` 里，不会丢）。
+
+**手动方式（备查）**：`idf.py menuconfig` → **Xiaozhi Assistant → Camera Configuration → [*] Allow JPEG Input**。
+⚠️ 别与 `XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE` 同时开（上游 help 明确说明二者不兼容；本板该项为 `n`）；
+`XIAOZHI_ENABLE_HARDWARE_JPEG_DECODER` 虽然 `depends on` 它，但只在 P4 可用，S3 上不会被自动打开。
+
+**没开（或 sdkconfig 陈旧）会怎样**：JPEG 帧被当成“原始像素”送进软件编码器 →
+日志 `image_to_jpeg: unsupported format: 0x4745504a`（小端就是 `'JPEG'`）+ `EncodeCurrentFrameToJpeg: JPEG encode failed`
+→ **网页拍照 500、AI 拍照失败**；而**推流仍旧正常**（推流直接发 `fb->buf`，不经编码器）——
+所以“视频好好的、拍照却 500”时要第一个查这里。
 - **帧率/分辨率角标**：浏览器对 MJPEG `<img>` 不暴露逐帧事件、拿不到帧率 → 由**设备侧统计**（滚动 1 秒窗口）经**已有 WebSocket** 每秒推一次 `{"video":1,"fps":…,"w":…,"h":…}`，前端更新角标；停止时推 `{"video":0}` 收回角标。
 - **帧率 20fps + 低延时三件套（FPV 遥控用途）**：这条功能的实际用途是**网页遥控机器人走位**（第一视角），
   **延时优先**；实测场景里开视频时不会同时做家里的 ESP-NOW 控制，所以不必为节点控制留空口。为此做了：
@@ -544,13 +596,14 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
     - 帧率：只是推流的软件节流（每帧算间隔），纯软件。
     - 镜像/翻转：`ov2640.c` 的 `set_hmirror`/`set_vflip` 只写 sensor 寄存器。
     - 画质：`ov2640.c:334` 的 `set_quality` 只写一行寄存器 `QS`，不碰缓冲。
-    - 分辨率：**JPEG 模式下 DMA 缓冲固定 32KB**（`ll_cam.c:478`，与分辨率无关），
+    - 分辨率：**JPEG 模式下 DMA 缓冲固定 16KB**（`esp32s3/ll_cam.c` 的 `dma_half_buffer_cnt = 16` × 1024，与分辨率无关），
       帧缓冲 `fb_size = 宽×高/5` 按**初始化时**的分辨率算（`cam_hal.c:588`）。
-      所以开视频时按**最大档 SVGA** 初始化（94KB PSRAM），之后用 sensor 的 `set_framesize`
+      所以初始化就按**最大档 SVGA**（94KB PSRAM），之后用 sensor 的 `set_framesize`
       在 QVGA~SVGA 之间随便切，**不用重启相机**（只写 I2C 寄存器，下一帧生效）。
     - 反例（踩过的坑）：若按**当前**分辨率初始化再往大改，会触发 `cam_hal` 的 `FB-OVF`
       并 `ll_cam_stop()` 把相机停摆，所以必须按最大档初始化。
-    - 代价：视频模式的帧缓冲从 60KB 变 94KB PSRAM（**+34KB PSRAM，内部 RAM 零变化**，因为 JPEG 模式 DMA 恒为 32KB）。
+    - 代价：帧缓冲固定 94KB PSRAM（SVGA 档；旧实现只在推流时段才这么大，现在全程占用）。
+      **内部 RAM 反而更省**：单一 JPEG 模式的 DMA 恒为 16KB（旧实现待机时是 RGB565 的 30KB）。
   - **镜像/翻转与 AI 工具 `self.camera.set_flip` 共用同一份 NVS**（位含义：bit0=左右镜像 bit1=上下翻转），
     所以网页改的、AI 改的、开机读回的是同一个值，不会两套配置打架。
   - 想再降延时：弹窗里把分辨率降到 320×240、或质量调「省流」（单帧越小传输越快，延时越低）。
@@ -561,19 +614,24 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
     640×480 / 20fps / 默认质量 / 不翻转）；设备连上后以设备为准。离线时点「应用」会提示“设置已暂存，
     连上设备后再点一次”。
 - **同时只服务一个观众**：本板 `fb_count=1`（帧池只有一块），第二个连接直接返回 `503`。
-- **关页面自动停流**：WS 客户端归零（关页面/断网）时板级自动 `VideoStreamStop()`，避免相机一直留在 JPEG 模式导致拍照没预览。
+- **关页面自动停流**：WS 客户端归零（关页面/断网）时板级自动 `VideoStreamStop()`。
+  **这只是为了不白白抓帧**（省 CPU 与空口）—— 相机不用切模式，所以拖不拖流都不影响拍照。
 - **接口**：WS action `{"action":"video_start"}` / `{"action":"video_stop"}`；流地址 `GET http://<设备IP>:81/stream`。
 - **排查**：
   - 勾选后画面不出来 → 浏览器直接打开 `http://<设备IP>:81/stream` 试：能出图说明是前端问题；不出图看网页日志（级别开到「信息」）里 `LocalVideo` 的报错。
-  - 日志出现 `not JPEG ... camera mode not switched?` → 相机没切到 JPEG 模式（`VideoStreamStart` 里的 `Reinit` 返回被忽略过？）。
-  - **拍照没有 LCD 预览了** → 说明视频流没停干净（相机还在 JPEG 模式）：取消勾选；若页面已关，重进页面让 WS 归零触发自动停流。
+  - 拍照时日志出现 `Esp32Camera: JPEG preview decode failed` → JPEG 帧没解成预览图。
+    **照片本身仍正常**（网页能看到、AI 也能识别），只是 LCD 上没那一张；先看上一行 `Captured frame: …` 的 `len` 是否正常。
+  - **LCD 预览颜色反了（红蓝互换）** → `DecodeJpegPreview()` 里的 `swap_color_bytes`（0/1）与 LVGL 期望的字节序不一致，改成另一个试。
 
 ### ⚠️ PSRAM DMA 模式（`CONFIG_CAMERA_PSRAM_DMA`）：**实测不可用，不要开**
 
-**背景（为什么曾想开它）**：相机 DMA 缓冲必须在**内部 SRAM** —— 实测 JPEG 模式要 30720 字节、RGB565 要 16384 字节；
-而本板内部 SRAM 空载只剩 20~25KB，**开过一次实时视频后堆被碎片化**，切回 RGB565 就可能分配失败
-（`cam_dma_config: DMA buffer 16384 Byte malloc failed, the current largest free block:12800 Byte`）
-→ 相机留在 JPEG 模式 → **拍照 / AI 拍照全部 500**（详见踩坑 22）。
+**背景（为什么曾想开它）**：相机 DMA 缓冲必须在**内部 SRAM** —— 实测 **RGB565 要 30720 字节、JPEG 只要 16384 字节**
+（且与分辨率无关，推导见踩坑 22）；而本板内部 SRAM 空载只剩 20~25KB，旧实现“开视频切 JPEG、停流切回 RGB565”
+在 deinit 之后就拿不到那块连续内存（真机日志：`cam_dma_config: DMA buffer 30720 Byte malloc failed,
+the current largest free block:12800 Byte`）→ 相机停在不可用状态 → **拍照 / AI 拍照全部 500**（详见踩坑 22）。
+
+> 2026-09 起本板改为**单一 JPEG 模式**（开机 init 一次，之后不再 deinit/Reinit），上述“切模式导致分配失败”的路径已不存在。
+> 本节保留是因为它记录了一个**踩过的坑**：为省内存去开 PSRAM DMA，结果视频流完全不能用 —— “机理上说得通”不等于实测可行。
 8MB PSRAM 表面上看帮不上忙：IDF 里 PSRAM 区域**不带 `MALLOC_CAP_DMA`**（`memory_layout.c`），
 而 esp32-camera 的 DMA 缓冲写死用 `MALLOC_CAP_DMA` 分配（`cam_hal.c:522`）——
 驱动另提供了一个“PSRAM 直采”模式来绕过它（`CONFIG_CAMERA_PSRAM_DMA`，组件 Kconfig 默认 `n`）。
@@ -624,14 +682,23 @@ idf.py build
 
 - **接口**：`POST /photo/take` 触发抓帧+编码；`GET /photo.jpg` 取最近一次 JPEG。
 - **实现**：`LocalPhotoCapture()`（`local_photo.cc`）→ `Esp32Camera::Capture()` 抓帧 →
-  `EncodeCurrentFrameToJpeg()` 编码进 **PSRAM 常驻缓冲**（128KB 配额，VGA JPEG 通常 30~60KB）→ 页面用
-  `<img src="/photo.jpg?t=时间戳">` 拉取显示。全程**不占用内部 SRAM**（JPEG 与编码临时缓冲都在 PSRAM）。
-- **为什么不多开一块帧缓冲**：`cam_hal` 每帧需要 30720 字节 **DMA 内部 RAM**，`fb_count` 从 1 改成 2 会多占 ~30KB 内部 SRAM——本板本来就只有几十 KB，不能这么花。因此改为**复用已捕获的那一帧**做编码（为此在 `Esp32Camera` 上新增了一个纯增量方法 `EncodeCurrentFrameToJpeg()`，不改任何现有函数，其它用同一份 `esp32_camera.cc` 的板子行为不变）。
+  `EncodeCurrentFrameToJpeg()` 把这一帧写进 **PSRAM 常驻缓冲**（128KB 配额，VGA JPEG 通常 30~60KB）→ 页面用
+  `<img src="/photo.jpg?t=时间戳">` 拉取显示。全程**不占用内部 SRAM**（相机的 JPEG 与输出缓冲都在 PSRAM）。
+  本板相机直出 JPEG，所以这一步是**直通透传**（靠 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT`，不再跑软件编码器）。
+- **为什么不多开一块帧缓冲**：`cam_hal` 每帧需要一整块连续 **DMA 内部 RAM**（本板 JPEG 模式为 16384 字节，
+  旧 RGB565 模式为 30720），`fb_count` 从 1 改成 2 会多占这么多内部 SRAM——本板本来就只有几十 KB、
+  实测最大连续块只有 ~12800，不能这么花。因此改为**复用已捕获的那一帧**做输出
+  （为此在 `Esp32Camera` 上新增了纯增量方法 `EncodeCurrentFrameToJpeg()`，不改任何现有函数，
+  其它用同一份 `esp32_camera.cc` 的板子行为不变）。
+- **LCD 预览**：`Capture()` 里对 JPEG 帧解码（`DecodeJpegPreview()`，1/2 缩放）挂给 LVGL，
+  所以拍照时 LCD 上会出现这张图（用户明确要求保留这个行为）。
 - **与 AI 拍照的关系**：两条路复用同一个 camera 驱动，设备侧已加**带超时的互斥**（300ms）。同一时刻点按钮又喊 AI 拍照，可能有一次失败（按钮弹「拍照失败」/AI 回报网络问题），**不会重启**，重试即可。
 - **排查**：
   - 点了按钮没反应 → 看网页系统日志（级别调到「信息」）有没有 `Esp32Camera: Captured frame`；没有则是 httpd/互斥超时。
-  - **颜色不对（红蓝互换）** → 编码源用错了：RGB565 的字节序在 `Capture()` 里已经换好并存进 `encode_buf_`，
-    `EncodeCurrentFrameToJpeg()` 必须复用它；若自己在编码时再换一次就会红蓝互换（改这块时务必与 `Explain()` 对齐）。
+  - **颜色不对（红蓝互换）** → 两条链路分开查：
+    - **照片（网页/AI 看到的）** 颜色反：直通上传不做任何颜色变换，所以只能是**sensor 侧**的
+      `SetHMirror/SetVFlip` 或 ISP 配置不对；RGB565 时代的“编码源用错 `encode_buf_`”已不适用于本板。
+    - **LCD 预览**颜色反：`DecodeJpegPreview()` 里的 `swap_color_bytes`（0/1）与 LVGL 期望的字节序不一致，换另一个值试一试（不影响照片）。
   - 照片是上一张 → 浏览器缓存：`/photo.jpg` 已带 `Cache-Control: no-store`，前端也加了时间戳；若仍出现请检查代理缓存。
 
 ## 照片相册（TF 卡留档 + 网页查看）
@@ -1237,6 +1304,12 @@ Select-String FATFS_API_ENCODING sdkconfig
 # 应看到 CONFIG_FATFS_API_ENCODING_UTF_8=y
 ```
 
+**本板另一个必须开的开关（2026-09 起）**：`CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y`（相机直出 JPEG 的直通编码）。
+它**只在 `config.json` 的 `sdkconfig_append` 里**（两个变体都有），**没有** `sdkconfig.defaults` 兜底 ——
+因为那是项目级文件，开了会影响其它板（本板专属配置就该放本板 `config.json`）。
+后果：拿一个**陈旧的 `sdkconfig`** 直接 `idf.py build` 编出来的固件，会表现为
+**「网页拍照 500 / AI 拍照失败，而推流正常」**（日志 `image_to_jpeg: unsupported format: 0x4745504a`）。
+完整配置方法、验证命令与失效症状见「网页实时视频流 → ▶ `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` 怎么配」。
 
 ### 1. CH340 新驱动导致 Arduino 上传失败（`cannot set com-state`）
 
@@ -1437,7 +1510,8 @@ ws.send(JSON.stringify(Object.assign({}, obj, { id: id })));  // ← 覆盖调�
 1. **内部 SRAM 余量被 web 功能吃掉**：本板 `free sram`（`MALLOC_CAP_INTERNAL`，**非 PSRAM**）空载只有 20~25KB。
    web 日志功能常驻占用 = 4KB 环形缓冲 + 0.5~1KB 拉取缓冲 + **httpd 任务栈 8KB** + 一条 WS 连接；
    而**拍照上传那一刻**主任务还要开一条到 `api.xiaozhi.me` 的 HTTP 连接、创建 JPEG 编码线程
-   （pthread 默认栈 3KB），同时 LVGL 任务在把 640×480 RGB565 预览图缩放渲染到 240×240 ——
+   （pthread 默认栈 3KB），同时 LVGL 任务在把 640×480 RGB565 预览图缩放渲染到 240×240
+   （2026-09 改单一 JPEG 模式后预览是解码好的 320×240，LVGL 侧工作量更小）——
    多方并发抢内部 SRAM，于是“有时够、有时不够”（第一次成功、第二次崩）。
    崩溃点落在没有 try/catch 的上下文（HTTP 接收任务 / LVGL 任务 / esp_timer），所以表现为直接重启。
 2. **lwIP/WiFi 缓冲不能落 PSRAM**：`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` 默认关闭，
@@ -1699,67 +1773,84 @@ text[len] = '\0';          // ← 关键：此后才能安全地当 C 字符串�
 只要后面用了 `strcmp`/`strchr`/`strlen`/`printf("%s")`，就必须先按长度拷贝并补 `'\0'`；
 能“大部分时候正常”只是因为没越界到非法字节而已 —— 这种 bug 永远是**概率性的、且只在某类字段上**。
 
-### 22. 关掉实时视频后拍照必 500（内部 SRAM 拿不到 16KB 连续块，2026-09 定位，修复待做）
+### 22. 关掉实时视频后拍照必 500（相机 deinit 后再也 init 不回来，2026-09 定位并修复）
 
 **现象**：开过「📹 实时视频」再取消勾选，切到「📷 照片」拍照 → 网页 **500**，AI 拍照也失败；
-**不开视频时一切正常**。当时网页日志（级别「错误」）：
+**不碰视频时一切正常**。真机日志（网页日志，级别「错误」，按时间顺序）：
 
 ```
 E image_to_jpeg: unsupported format: 0x4745504a      # 0x4745504a 小端就是 'JPEG' FOURCC
 E Esp32Camera: EncodeCurrentFrameToJpeg: JPEG encode failed
-```
-
-再试一次，日志又变成：
-
-```
 E cam_hal: cam_dma_config(524): DMA buffer 16384 Byte malloc failed, the current largest free block:12800 Byte
-E camera: Camera config failed with error 0xffffffff
 E Esp32Camera: Reinit: esp_camera_init failed with error 0xffffffff
+E cam_hal: cam_dma_config(524): DMA buffer 30720 Byte malloc failed, the current largest free block:12800 Byte
+E Esp32Camera: restore RGB565 camera failed
+E Esp32Camera: Camera capture failed
+E MCP: tools/call: Failed to capture photo
 ```
 
-**根因链**（三步，缺一不可）：
+**关键数字（源码 + 日志双证）**：两种格式的 DMA 缓冲都要一整块**连续内部 SRAM**，而且**与分辨率无关**：
 
-1. **关流要切回 RGB565**：`VideoStreamStop()` 先 `LocalVideoStreamStop()`，再 `camera_->Reinit(PIXFORMAT_RGB565)`。
-   VGA RGB565 的 DMA 缓冲要 **16384 字节连续内部 SRAM**（JPEG 模式是 30720）。
-2. **开过视频后这块内存就拿不到了**：视频流期间分配过约 30KB（30720 字节）内部 DMA（+ 81 端口 httpd 任务栈等），
-   释放后堆已碎片化，最大连续块只剩 12800 → `esp_camera_init` 直接失败。
-   （本板内部 SRAM 空载就只有 20~25KB，碎片敏感，见踩坑 16 与「内存开销」一节。）
-3. **失败后既无兜底也不报错**：`Reinit()` 里 `Release()` 已经 `esp_camera_deinit()`，
-   init 失败就 `return false` → 相机留在“已 deinit / init 失败”的残留态；
-   而 `VideoStreamStop()` **只打一行 ERROR，仍返回 `{"ok":true,"msg":"视频已关闭"}`**。
+| 格式 | DMA 缓冲 | 来源（`managed_components/espressif__esp32-camera/target/esp32s3/ll_cam.c`） |
+|---|---|---|
+| VGA RGB565 | **30720** 字节 | `ll_cam_calc_rgb_dma()`：half buffer = 12 行 × 1280 B = 15360，`dma_buffer_size = 2 × half` = 30720 |
+| JPEG（任意分辨率） | **16384** 字节 | `ll_cam_dma_sizes()`：`dma_half_buffer_cnt = 16` × 1024 = 16384 |
 
-**⚠️ 失败后的两种状态要分清**（都表现为“拍照 500”，但日志不同、修法也不同）：
+（RGB565 那档依赖 `CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=32768`，本板 `sdkconfig` 正是这个值；日志里的 30720 与推导吻合。）
+
+而本板实测**最大连续块只有 12800 字节**（内部 SRAM 空载也才 20~25KB，见踩坑 16）：
+
+```
+12800  <  16384（JPEG 需要）  <  30720（RGB565 需要）   →  两种模式都 init 不回来
+```
+
+**根因链**（旧实现的致命处）：
+
+1. **旧设计“按需切格式”**：`VideoStreamStart()` → `Reinit(PIXFORMAT_JPEG)`；`VideoStreamStop()` → `Reinit(PIXFORMAT_RGB565)`。
+2. **`Reinit` = deinit + init**：`Release()` 先 `esp_camera_deinit()`，随后 init 又要同一块连续 DMA 内存。
+3. **这块内存回不来**：日志里 21:48 与 21:49 两次相隔 **64 秒**，最大连续块都还是 12800 ——
+   说明不是瞬时碎片，而是**开过视频之后不再回升**（内存归还了，但堆已被切碎/无法合并）。
+4. **失败没有兜底**：`Reinit` 失败后相机停在“已 deinit / init 失败”的残留态，
+   而 `VideoStreamStop()` **只打一行 ERROR，仍返回 `{"ok":true,"msg":"视频已关闭"}`** ——
+   用户看到的是“一切正常 + 拍照莫名 500”。
+
+**两种“拍照 500”要分清**（历史日志对照；新设计下第一种只可能是开关没开）：
 
 | 日志 | 相机实际状态 | 为什么拍照失败 |
 |---|---|---|
-| `Esp32Camera: EncodeCurrentFrameToJpeg: JPEG encode failed`<br>+ `image_to_jpeg: unsupported format: 0x4745504a` | **还能取到帧**，但停在 JPEG 模式 | `EncodeCurrentFrameToJpeg` 把 JPEG 帧送进了不支持 JPEG 输入的 `image_to_jpeg_cb` |
-| `Esp32Camera: Camera capture failed`<br>+ `MCP: tools/call: Failed to capture photo` | **连帧都取不到**（`streaming_on_` 仍为 true，但 `esp_camera_fb_get()` 返回 NULL，`esp32_camera.cc:153`） | `Reinit` 失败后相机停在“已 deinit / init 失败”的残留态 |
+| `Esp32Camera: EncodeCurrentFrameToJpeg: JPEG encode failed`<br>+ `image_to_jpeg: unsupported format: 0x4745504a` | **还能取到帧** | JPEG 帧被送进不支持 JPEG 输入的软件编码器 —— 现在只可能是 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` **没开**（见「网页实时视频流 → 怎么配」）|
+| `Esp32Camera: Camera capture failed`<br>+ `MCP: tools/call: Failed to capture photo` | **连帧都取不到**（`streaming_on_` 仍为 true，但 `esp_camera_fb_get()` 返回 NULL，`esp32_camera.cc:153`） | 旧实现 `Reinit` 失败后相机停在“已 deinit / init 失败”的残留态；新设计不再有这条路径 |
 
-> 第二种更坏，也说明 **“让 `EncodeCurrentFrameToJpeg` 支持 JPEG 直通”只能救第一种**：
-> 第二种连帧都没有，直通无从谈起。真正的解法必须让相机**不要停在不可用状态**（见下「待做」）。
+**修复（2026-09 已实现）：相机全程单一 JPEG 模式，不再 deinit/Reinit**
 
-> **附带一条范围更大的事实**：切走 Tab 只断开 `<img>`、**不发 `video_stop`**，
-> 设备仍停在 JPEG 模式 —— 所以“开过视频”（哪怕没手动关）之后拍照就已经坏了。
+| 环节 | 旧做法 | 现在 |
+|---|---|---|
+| 初始化 | 每次切模式重建相机 | **开机按 JPEG init 一次**（最大档 SVGA、`CAMERA_GRAB_LATEST`、`fb_count=1`）|
+| 开视频 | `Reinit(JPEG)` | 只写 sensor：`set_framesize(用户档)` + `set_quality(用户质量)` |
+| 停视频 | `Reinit(RGB565)`（**会失败**） | 只写 sensor：`set_framesize(VGA)` + `set_quality(12)` → **不可能失败** |
+| 拍照编码 | RGB565 帧 → 软件编码 | JPEG 帧**直通**（`CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y`）|
+| LCD 预览 | RGB565 直接给 LVGL | JPEG 用 `esp_jpeg` 的 ROM 解码器解成 RGB565（1/2 缩放）→ **预览保留** |
 
-**修复**：
+为什么选 JPEG 当“唯一模式”：**JPEG 的 DMA 只要 16384，比 RGB565 的 30720 少一半**，
+而推流本来就要 JPEG，拍照与预览都能由 JPEG 派生出来（预览解码输出在 PSRAM、
+草稿纸用静态 `work[3100]`，**不占内部堆**）。
 
 - ~~开 `CONFIG_CAMERA_PSRAM_DMA=y`~~ → **实测不可用**（视频流完全不能用、关流后拍照仍 500），已回退；
-  机理与回退方法见「网页实时视频流 → PSRAM DMA 模式：实测不可用」。根因（2）仍需另想办法（见下）。
+  机理与回退方法见「网页实时视频流 → PSRAM DMA 模式：实测不可用」。
 - **前端：`<img src>` 必须等 `video_start` 返回 ok 之后再设**。
   原来在“先出框”里就把 src 设了，而设备端 81 端口还没监听 → 首次勾选必现“接口不可用：未连接设备，
   或视频服务未启动”，切走再切回（切走会 `removeAttribute('src')` 重连）才正常。
   现在拆成 `videoShowBox()`（只出框、不连流）+ `videoOpen()`（服务就绪后才设 src）。
-- ⚠️ **待做（根因第 3 步仍未解决，2026-09 记录时尚未实现）**：
-  - **P2（主）**：`VideoStreamStop()` 切回 RGB565 **失败要重试**（含延时）；**失败时不要把相机留在 deinit 残留态**
-    （尝试回到 JPEG 模式，至少保证能取帧）；并**如实返回 `{"ok":false,...}`**，前端明确提示“相机恢复失败”。
-  - **P2b**：必要时**降级到 QVGA 恢复**（DMA 需求比 VGA 小，LCD 是 240×240，QVGA 预览够用）。
-  - **P3**：`EncodeCurrentFrameToJpeg` 在 `PIXFORMAT_JPEG` 时直接拷出 JPEG 帧 —— 只解决上表**第一种**
-    （视频流**开着**时拍照、或相机停在 JPEG 模式但尚能取帧），**救不了第二种**。
-  - **待确认的证据**（判断 P2 的重试到底有没有用）：开视频 → 关视频前后的 `free sram` 对比 ——
-    少 16~30KB 且不回升 = `esp_camera_deinit()` 有泄漏（重试无用，要改释放顺序）；
-    回升、只是最大连续块变小 = 碎片（重试/延时/降分辨率有效）。
-  - 另一个**尚未查清的疑点**：`Reinit` 释放了 30720 字节后，为何连 16384 都拿不到（最大连续块仅 12800）——
-    这更像“释放了但没合并”或“deinit 未归还”，需要上面那条 `free sram` 证据才能定性。
+- ✅ **旧方案的“待做项”已全部作废**（不是没做，是换了解法）：
+  - 不需要“停流失败重试”：停流现在**不可能失败**（只写 sensor 寄存器，零内存分配）。
+  - 不需要“降级 QVGA 恢复”：**降 QVGA 也救不了 RGB565** —— 那 30720 是 `ll_cam_calc_rgb_dma()`
+    算出的双缓冲总量，真正的瓶颈是**连续块**不够（12800），不是总量不够。
+  - 不需要“JPEG 直通补丁”：改由上游开关提供（见上表），`Explain()` / `EncodeCurrentFrameToJpeg()` 保持上游原样。
+  - 历史疑点（`free sram` 是否回升、deinit 是否归还）**不再影响决策**（新设计根本不走 deinit），
+    但第 3 条“最大连续块不回升”的实测事实**必须保留** —— 它正是“永不 deinit”的依据。
+
+**真机验证要点**：开机日志 `cam_hal: buffer_size:` 应为 **16384**；
+「开视频 → 关视频 → 网页拍照 → AI 拍照 → 再开视频」来回 ≥10 次不坏（照片、LCD 预览、AI 识别都正常）。
 
 **过程教训（本条也应当记住）**：拿“源码里看起来能行”的开关去解决内存问题，**必须先在真机上只验证它本身**再往下推 ——
 `CONFIG_CAMERA_PSRAM_DMA` 就是这样一次失败尝试：机理上说得通（跳过内部 DMA 分配），
@@ -1771,15 +1862,36 @@ E Esp32Camera: Reinit: esp_camera_init failed with error 0xffffffff
 - **8MB PSRAM 不是万能**：IDF 里 PSRAM 区域不带 `MALLOC_CAP_DMA`，凡是用 `MALLOC_CAP_DMA` 分配的
   大块（相机 DMA、部分驱动缓冲）都只能在内部 SRAM 里找。驱动自带的 PSRAM 模式开关
   （`CONFIG_CAMERA_PSRAM_DMA` / 运行时 `esp_camera_set_psram_mode()`）是本板试过的**唯一**绕开途径，
-  但**实测不可用**（见上文）—— 所以目前只能从“减少内部连续块需求 / 避免重复 deinit-init”下手。
+  但**实测不可用**（见上文）—— 所以只能从“减少内部连续块需求 / **永不 deinit 相机**”下手
+  （本板即如此：全程单一 JPEG 模式，见上）。
 - **失败路径必须如实返回**：当时 `video_stop` 失败仍回 `ok:true`，用户看到的是“一切正常 + 拍照莫名 500”，
   排查成本全转嫁到了现象端（无重试、无降级、无错误文案）。
 
-**回归防护**：`scripts/tests/test_web_realtime_video.py` 的
-`test_img_src_set_only_after_device_ready`（`<img src>` 必须在 `video_start` 之后设）
+**回归防护**：`scripts/tests/test_web_realtime_video.py` 的 `TestSingleCameraMode`：
+板级不得再出现 `Reinit`、`Capture()` 的 JPEG 分支只允许一行调用、
+`config.json` 两个变体都必须带 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y`、
+预览解码必须有两道越界保护（先读 JPEG 头定尺寸 + 把 `outbuf_size` 交给解码器）；
+另有 `test_img_src_set_only_after_device_ready`（`<img src>` 必须在 `video_start` 之后设）
 + `test_show_box_does_not_open_stream`（出框不许连流）。
 
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。
 本板新增的 `local_photo.*`、`photo_store.*` 由 `main/CMakeLists.txt` 的 `file(GLOB boards/<BOARD_DIR>/*.cc)` 自动纳入，无需在核心 CMake 里登记。
+
+### 共享文件的改动面（2026-09 重构后，刻意压到最小）
+
+“相机全程单一 JPEG 模式”这个设计，落在共享文件 `main/boards/common/esp32_camera.cc` 上的改动只有两处：
+
+| 位置 | 改了什么 | 为什么不用改更多 |
+|---|---|---|
+| 文件头的匿名 namespace | **新增** `DecodeJpegPreview()`（约 55 行，纯新增，本项目自有区）| 解码逻辑集中在这里，不往上游函数里塞 |
+| `Capture()` | 上游那 2 行“JPEG 不解码、只打日志” → **1 行调用** | 解上游冲突时只需手工解这 1 行 |
+
+`Explain()`（编码线程体）与 `EncodeCurrentFrameToJpeg()`（本项目自有方法）**均为上游/原样**，
+JPEG 直通改由上游开关 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` 提供（见「网页实时视频流 → 怎么配」）。
+同样，`Esp32Camera::Reinit()` 保留但本板不再调用（其它板可能用）。
+
+板级文件（`compact_wifi_board_s3cam_airobot.cc`）里唯一需要上游留意的是它对 `Board`/`Display` 接口的依赖：
+`DecodeJpegPreview()` 用了 `Board::GetInstance().GetDisplay()` + `LvglDisplay::SetPreviewImage()`，
+上游若改这两个接口的签名，这里要跟着改（编译期就能发现）。
