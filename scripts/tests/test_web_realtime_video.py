@@ -109,30 +109,41 @@ class TestFrontendPanel(_Base):
         """流走独立端口 81（主 httpd 的 80 要留给 WS 控制/日志）。"""
         self.assertIn(":81/stream", self.html)
 
+    def _css_rule(self, selector):
+        """取某条 CSS 规则的内容（⚙️ 的定位/层级已从内联样式挪到 .video-gear 类里 ——
+        内联样式优先级更高，会把 :hover 盖掉，见 test_web_ui_affordance.py）。"""
+        m = re.search(re.escape(selector) + r"\s*\{(.*?)\}", self.html, re.S)
+        self.assertIsNotNone(m, f"找不到 CSS 规则 {selector}")
+        return m.group(1)
+
     def test_gear_button_and_config_modal(self):
-        """视频区左上有 ⚙️、右上角是帧率角标；点 ⚙️ 弹出参数弹窗。"""
+        """视频区左上是帧率角标、右上是 ⚙️；点 ⚙️ 弹出参数弹窗。"""
         self.assertIn("openVideoCfg()", self.html)
         for el in ('id="videoCfgModal"', 'id="vcfgSize"', 'id="vcfgFps"', 'id="vcfgQuality"',
                    'id="vcfgMirror"', 'id="vcfgFlip"'):
             self.assertEqual(self.html.count(el), 1, f"{el} 应恰好出现一次")
-        self.assertIn("top:6px;left:6px", self.html, "⚙️ 应在左上角")
-        self.assertIn("top:6px;right:6px", self.html, "帧率角标应在右上角")
+        self.assertIn("top:6px;left:6px", self.html, "帧率角标应在左上角")
+        gear = self._css_rule(".video-gear")
+        self.assertIn("top: 6px", gear, "⚙️ 应在右上角")
+        self.assertIn("right: 6px", gear, "⚙️ 应在右上角")
 
     def test_gear_on_video_corner(self):
         """画面右上角是 ⚙️、左上角是帧率角标（用户要求：设置放右边、帧率放左边）。"""
         wrap = self.html.index('id="videoWrap"')
         corner = self.html.index('id="videoCorner"')
-        gear = self.html.index('onclick="openVideoCfg()"')
+        gear = self.html.index('class="video-gear"')
         self.assertGreater(corner, wrap, "角标应在视频框内")
         self.assertGreater(gear, wrap, "⚙️ 应在视频框内")
         self.assertLess(corner, gear, "帧率角标（左上）应排在 ⚙️（右上）之前")
         self.assertIn("top:6px;left:6px", self.html[corner:corner + 260], "角标在左上")
-        self.assertIn("top:6px;right:6px", self.html[gear:gear + 260], "⚙️ 在右上")
+        rule = self._css_rule(".video-gear")
+        self.assertIn("top: 6px", rule, "⚙️ 在右上")
+        self.assertIn("right: 6px", rule, "⚙️ 在右上")
 
     def test_gear_is_clickable(self):
         """提示层铺满整个框，必须不拦点击，否则 ⚙️ 点不动。"""
         self.assertIn("pointer-events:none", self.html, "提示层不能拦截点击")
-        self.assertIn("z-index:2", self.html, "⚙️ 要压在提示层之上")
+        self.assertIn("z-index: 2", self._css_rule(".video-gear"), "⚙️ 要压在提示层之上")
 
     def test_corner_has_default_fps(self):
         """帧率角标默认就显示 0fps（不能空白，否则只剩一条小黑条）。"""
