@@ -457,7 +457,7 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 
 ### WiFi 网页上传与 IP 显示
 - **IP 显示**：待机（待命）状态下，屏幕底部会显示本机 IP（如 `192.168.31.74`），照着输入浏览器即可打开上传页；其他状态（说话中/聆听中等）自动隐藏。
-- **上传页**（`http://<设备IP>/`）：多选文件（支持 .mp3 / .lrc / .wav / .m4a / .flac 等）、**自动参数检测 + 按需转码**（非 MP3 一律转码；MP3 看声道/采样率/码率，歌词看编码；已是 UTF-8 的歌词原样上传）、实时进度条、**同名覆盖开关**（默认勾选=覆盖；取消勾选=同名跳过，页面提示“同名已存在，跳过”）。
+- **上传页**（`http://<设备IP>/`）：多选文件（支持 .mp3 / .lrc / .wav / .m4a / .flac 等）、**自动参数检测 + 按需转码**（非 MP3 一律转码；MP3 看声道/采样率/码率，歌词看编码；已是 UTF-8 的歌词原样上传）、**同名覆盖开关**（默认勾选=覆盖；取消勾选=同名跳过，页面提示“同名已存在，跳过”）。
 - **提示音与歌曲共用一套接口**，靠 `dir` 参数区分：上传 `POST /upload?dir=announce&name=motion.mp3`（不带 `dir` 就是歌曲）；列表/删除同理（WS `music_list` / `music_delete` 带 `dir: 'announce'`）。提示音目录只收 `.mp3`，没有 `.lrc` 歌词。
 - 上传成功回调会自动刷新歌曲列表，AI 立刻能查到新歌（无需重启）。
 - 上传/播放源码位于本板目录：`http_upload_server.h` / `http_upload_server.cc`（由 CMake `file(GLOB)` 自动编译）。
@@ -529,6 +529,11 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
   - JPEG 直通**不自己造**：靠上游 `image_to_jpeg.cpp` 自带的直通分支（需开 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT`，
     回调形状与软件编码完全一致）—— 这样 `esp32_camera.cc` 里 `Explain()`/`EncodeCurrentFrameToJpeg()`
     都能保持上游原样（合并官方代码时冲突面最小）。**怎么开见下**。
+  - **拍照后必须归还驱动帧（`fb_count=1` 的硬约束，2026-09 真机踩坑）**：`Capture()` 借走的是驱动**唯一**
+    那块帧缓冲，用完要由 `ReleaseCurrentFrame()` 显式还回去（AI 拍照在 `Explain()` 出口自动还、
+    网页拍照在编码后还）。攥着不放 → cam_hal 没空闲缓冲可采集 → 视频流每 ~4 秒刷一次
+    `cam_hal: Failed to get frame: timeout` + `LocalVideo: fb_get failed`，**只能重启**。
+    现象、根因与验证判据见踩坑 23。
 
 ### ▶ `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` 怎么配（本板必须开）
 
@@ -574,11 +579,11 @@ grep XIAOZHI_CAMERA_ALLOW_JPEG_INPUT build/config/sdkconfig.h  # → #define CON
 - **帧率/分辨率角标**：浏览器对 MJPEG `<img>` 不暴露逐帧事件、拿不到帧率 → 由**设备侧统计**（滚动 1 秒窗口）经**已有 WebSocket** 每秒推一次 `{"video":1,"fps":…,"w":…,"h":…}`，前端更新角标；停止时推 `{"video":0}` 收回角标。
 - **帧率 20fps + 低延时三件套（FPV 遥控用途）**：这条功能的实际用途是**网页遥控机器人走位**（第一视角），
   **延时优先**；实测场景里开视频时不会同时做家里的 ESP-NOW 控制，所以不必为节点控制留空口。为此做了：
-  1. 帧率上限 20fps（`local_video_stream.cc` 的 `kTargetFps`）。实际还受 OV2640 出帧能力限制（VGA JPEG 约 15~20fps），看画面角标即可。
+  1. 帧率上限 20fps（`local_video_stream.cc` 的 `s_target_fps`，默认 20，网页「⚙️ 视频设置」可改）。实际还受 OV2640 出帧能力限制（VGA JPEG 约 15~20fps），看画面角标即可。
   2. **禁用 Nagle**（`TCP_NODELAY`）：否则内核要攒够一个 MSS 才发，每帧白等几十毫秒；摇杆小包也不再被视频大帧拖在发送缓冲里。
   3. 取帧用 `CAMERA_GRAB_LATEST`，且**落后了不补帧**——宁可丢一帧，也不让队列堆积把延时越拖越长（遥控最忌延迟持续增长）。
 - **与 ESP-NOW 节点控制的关系**：两者共用同一个 2.4G 射频，开视频时节点指令会被大帧排队拖慢。
-  若确实要同时用（一边看视频一边管家里的节点），把 `kTargetFps` 调低（如 12）给节点控制让出空口。
+  若确实要同时用（一边看视频一边管家里的节点），把帧率调低（如 12fps）给节点控制让出空口。
 - **网页直接改参数（不用重烧固件）**：视频画面**左上角 ⚙️** 打开设置弹窗，改完即时生效：
 
   | 设置项 | 可选值 | 生效方式 |
@@ -622,6 +627,9 @@ grep XIAOZHI_CAMERA_ALLOW_JPEG_INPUT build/config/sdkconfig.h  # → #define CON
   - 拍照时日志出现 `Esp32Camera: JPEG preview decode failed` → JPEG 帧没解成预览图。
     **照片本身仍正常**（网页能看到、AI 也能识别），只是 LCD 上没那一张；先看上一行 `Captured frame: …` 的 `len` 是否正常。
   - **LCD 预览颜色反了（红蓝互换）** → `DecodeJpegPreview()` 里的 `swap_color_bytes`（0/1）与 LVGL 期望的字节序不一致，改成另一个试。
+  - 日志 **每 ~4 秒成对**刷 `cam_hal: Failed to get frame: timeout` + `LocalVideo: fb_get failed`，
+    且「停流→重开」也救不回来 → 不是网络/编码问题，而是驱动侧**已经没有可用帧**（本板 `fb_count=1`，
+    那块帧被拍照链路借走后没归还，相机就此停摆，只能重启）—— 见踩坑 23（已由 `ReleaseCurrentFrame()` 修复）。
 
 ### ⚠️ PSRAM DMA 模式（`CONFIG_CAMERA_PSRAM_DMA`）：**实测不可用，不要开**
 
@@ -729,6 +737,9 @@ idf.py build
   只有 AI 拍照崩」是它们共同的症状：AI 拍照多了「上传给大模型解释」这条 HTTP 路径）：
   - `vApplicationStackOverflowHook` / `A stack overflow in task pthread` → 编码线程栈溢出，见踩坑 18；
   - `xQueueSemaphoreTake` / `OnTcpDisconnected` → ml307 `HttpClient` 析构竞态，见踩坑 19。
+- **拍完照后实时视频再也出不了画**（照片本身正常）→ 驱动帧用完没归还，相机停摆：日志每 ~4 秒成对刷
+  `cam_hal: Failed to get frame: timeout` + `LocalVideo: fb_get failed`，且「停流→重开」也无效，只能重启。
+  见踩坑 23（已在 `ReleaseCurrentFrame()` 修复）。
 
 ## 待机全屏大时钟（AI 控制 + 多主题 + 本地持久化）
 
@@ -1845,12 +1856,14 @@ E MCP: tools/call: Failed to capture photo
   - 不需要“停流失败重试”：停流现在**不可能失败**（只写 sensor 寄存器，零内存分配）。
   - 不需要“降级 QVGA 恢复”：**降 QVGA 也救不了 RGB565** —— 那 30720 是 `ll_cam_calc_rgb_dma()`
     算出的双缓冲总量，真正的瓶颈是**连续块**不够（12800），不是总量不够。
-  - 不需要“JPEG 直通补丁”：改由上游开关提供（见上表），`Explain()` / `EncodeCurrentFrameToJpeg()` 保持上游原样。
+  - 不需要“JPEG 直通补丁”：改由上游开关提供（见上表），`EncodeCurrentFrameToJpeg()` 保持上游原样；
+    `Explain()` 只多了一个归还驱动帧的守卫（见踩坑 23，同一块 `current_fb_` 的释放时机问题）。
   - 历史疑点（`free sram` 是否回升、deinit 是否归还）**不再影响决策**（新设计根本不走 deinit），
     但第 3 条“最大连续块不回升”的实测事实**必须保留** —— 它正是“永不 deinit”的依据。
 
 **真机验证要点**：开机日志 `cam_hal: buffer_size:` 应为 **16384**；
-「开视频 → 关视频 → 网页拍照 → AI 拍照 → 再开视频」来回 ≥10 次不坏（照片、LCD 预览、AI 识别都正常）。
+「开视频 → 关视频 → 网页拍照 → AI 拍照 → 再开视频」来回 ≥10 次不坏（照片、LCD 预览、AI 识别都正常），
+且**拍照后视频画面必须能继续出画**（这条当时漏验，随即暴露了踩坑 23）。
 
 **过程教训（本条也应当记住）**：拿“源码里看起来能行”的开关去解决内存问题，**必须先在真机上只验证它本身**再往下推 ——
 `CONFIG_CAMERA_PSRAM_DMA` 就是这样一次失败尝试：机理上说得通（跳过内部 DMA 分配），
@@ -1874,6 +1887,74 @@ E MCP: tools/call: Failed to capture photo
 另有 `test_img_src_set_only_after_device_ready`（`<img src>` 必须在 `video_start` 之后设）
 + `test_show_box_does_not_open_stream`（出框不许连流）。
 
+### 23. 拍照后实时视频再也出不了画（驱动帧不归还，2026-09 修复）
+
+**现象**（用户真机报告，两条路径都中招）：
+
+- 先开「📹 实时视频」→ 再拍照：**照片能拍成**，但拍完之后视频**再也不动**（定格/全黑）；
+- 先拍照 → 再开视频：视频**从头一帧都没有**；
+- 两者都**只能重启设备**恢复，且「停流 → 重开」也救不回来。
+
+真机日志（网页「🐞 系统日志」）特征极固定 —— 两条 WARN **成对出现、每 ~4 秒一次**：
+
+```
+W (149619) cam_hal: Failed to get frame: timeout
+W (149619) LocalVideo: fb_get failed
+W (153669) cam_hal: Failed to get frame: timeout
+W (153669) LocalVideo: fb_get failed
+I (153789) LocalVideo: stream server stopped
+I (153799) CompactWifiBoardS3CamAirobot: video stream stopped
+I (159979) LocalVideo: stream server started on port 81
+I (159979) CompactWifiBoardS3CamAirobot: video stream started (jpeg mode)
+W (164029) cam_hal: Failed to get frame: timeout   ← 停流重开照样失败
+```
+
+**关键线索**：间隔 **4.05 秒** —— 正好是驱动取帧超时 `FB_GET_TIMEOUT = 4000ms`
+（`managed_components/espressif__esp32-camera/driver/esp_camera.c:387`）。
+“超时”意味着驱动侧**根本没有可用帧**，与网络/编码无关，所以“停流重开”当然无效。
+
+**根因（驱动源码双证）**：本板 `fb_count=1`（帧池只有一块），cam_hal 判断某块帧“可用”看的是
+`frames[x].en`：`cam_give()`（= `esp_camera_fb_return()`）置 1、采集时置 0。
+`Esp32Camera::Capture()` 取走帧后放进 `current_fb_` **长期不还** —— 旧实现靠 `Reinit()` 里的
+`Release()` 顺手归还，所以从不暴露；而“单一 JPEG 模式永不 Reinit”之后，那块帧的 `en` 永远是 0，
+cam_task 的 `cam_get_next_frame()` 找不到空闲缓冲 → 相机停摆 → 之后每次 `esp_camera_fb_get()`
+都等满 4 秒返回 NULL。
+**拍照本身反而正常**（`Capture()` 读的是自己 `current_fb_` 里那份数据），所以现象看起来是“照片好、视频坏”。
+
+**为什么“先拍照”更惨**：网页拍照/AI 拍照都不归还，于是**开机后第一张照片就是相机停摆的时刻**，
+此后视频无论怎么开都拿不到帧 —— 与用户描述完全一致。
+
+**修复（2026-09）**：新增 `Esp32Camera::ReleaseCurrentFrame()`（幂等：还了就置空），拍照链路用完即还：
+
+| 链路 | 归还点 | 备注 |
+|---|---|---|
+| AI 拍照（`Explain()`）| 函数**最开头**的 `FrameReleaser` 守卫 | 覆盖全部出口（含 6 处 `throw`）；必须等编码线程 join 之后 |
+| 网页拍照（`LocalPhotoCapture()`）| `EncodeCurrentFrameToJpeg()` 之后 | 成功失败都要还：编码要读 `current_fb_` |
+| `Capture()` 自己 | 取新帧之前先 `ReleaseCurrentFrame()` | 连取两帧时先还再取，取帧失败也不会把旧帧扣住 |
+| 实时视频流（`local_video_stream.cc`）| 每帧 `fb_get` → 发送 → `fb_return(fb)` | 本来就是配对的，本次未改动 |
+
+> ⚠️ 不要图省事改成“等下一次 `Capture()` 再归还”：那样一次拍照之后到下次拍照之间帧一直被攥着，
+> 期间只要开视频（或视频正在跑）必然全黑 —— 那就正是本次的 bug。
+
+**真机验证要点**（上一节的“≥10 次来回”按这三条判）：
+
+1. 开视频 → 拍照（网页 + AI 各一次）→ 画面应在 1~2 帧内恢复；
+2. 拍照 → 开视频必须能出画；
+3. 日志里**不应**再出现 `cam_hal: Failed to get frame: timeout` + `LocalVideo: fb_get failed` 成对刷屏。
+
+**教训**：
+
+- `fb_count=1` 不只是“少占内存”，它把帧变成了**全局唯一资源**：谁 `Capture()` 谁就必须
+  **显式归还**，而且归还时机要写进接口注释（否则下一个改代码的人一定会漏）。
+- 单一模式/长生命周期对象会把“借用”变成“持有”：旧代码里那条顺手归还的路径一消失，问题才浮出来 ——
+  **删掉/绕过一条清理路径时，要顺查它顺带兜住了什么**。
+- 日志里**稳定的时间间隔**往往就是某个超时常量（这里 4.05s ≈ 4000ms）：先把它和源码对上，再往下查会少走很多弯路。
+
+**回归防护**：`scripts/tests/test_web_realtime_video.py` 的 `TestPhotoReturnsDriverFrame`（归还接口存在且幂等、
+`Explain()` 的守卫必须在启动编码线程之前就装好、`Capture()` 先还再取且不再手写裸 `fb_return`、
+网页拍照必须在编码后归还、取帧超时只重试不退出）
++ `test_airobot_web_photo.py::test_reuses_captured_frame`（“不得自己取帧”的另一半：**拍完必须归还**）。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。
@@ -1886,9 +1967,10 @@ E MCP: tools/call: Failed to capture photo
 | 位置 | 改了什么 | 为什么不用改更多 |
 |---|---|---|
 | 文件头的匿名 namespace | **新增** `DecodeJpegPreview()`（约 55 行，纯新增，本项目自有区）| 解码逻辑集中在这里，不往上游函数里塞 |
-| `Capture()` | 上游那 2 行“JPEG 不解码、只打日志” → **1 行调用** | 解上游冲突时只需手工解这 1 行 |
+| `Capture()` | 上游那 2 行“JPEG 不解码、只打日志” → **1 行调用**；归还旧帧的 `if` 块（2 行）→ `ReleaseCurrentFrame()`（1 行）| 解上游冲突时只需手工解这几行 |
+| `Explain()` | 函数开头**新增** 1 个归还驱动帧的 `FrameReleaser` 守卫（+4 行注释）| 守卫放在函数出口，不逐条改 `return`/`throw`；见踩坑 23 |
 
-`Explain()`（编码线程体）与 `EncodeCurrentFrameToJpeg()`（本项目自有方法）**均为上游/原样**，
+`EncodeCurrentFrameToJpeg()`（本项目自有方法）保持上游原样，
 JPEG 直通改由上游开关 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` 提供（见「网页实时视频流 → 怎么配」）。
 同样，`Esp32Camera::Reinit()` 保留但本板不再调用（其它板可能用）。
 

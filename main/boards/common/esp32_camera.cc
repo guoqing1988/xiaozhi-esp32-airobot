@@ -173,6 +173,15 @@ Esp32Camera::~Esp32Camera() {
     Release();
 }
 
+// 归还借来的驱动帧（见头文件注释：本板 fb_count=1，不还就等于把相机停摆）。
+// 幂等：还过就把指针清空，重复调用无副作用（也避免悬垂指针被二次归还）。
+void Esp32Camera::ReleaseCurrentFrame() {
+    if (current_fb_ != nullptr) {
+        esp_camera_fb_return(current_fb_);
+        current_fb_ = nullptr;
+    }
+}
+
 bool Esp32Camera::Reinit(const camera_config_t &config) {
     Release();  // 彻底释放旧帧池与编码缓冲，避免跨模式残留
     esp_err_t err = esp_camera_init(&config);
@@ -201,9 +210,7 @@ bool Esp32Camera::Capture() {
 
     // Get the latest frame, discard old frames for real-time performance
     for (int i = 0; i < 2; i++) {
-        if (current_fb_) {
-            esp_camera_fb_return(current_fb_);
-        }
+        ReleaseCurrentFrame();  // 取新帧前先把上一帧还给驱动（也覆盖“上一次取帧失败留下的帧”）
         current_fb_ = esp_camera_fb_get();
         if (!current_fb_) {
             ESP_LOGE(TAG, "Camera capture failed");
@@ -395,6 +402,16 @@ size_t Esp32Camera::JpegEncodeCb(void *arg, size_t index, const void *data, size
 }
 
 std::string Esp32Camera::Explain(const std::string &question) {
+    // Explain 的**任何**出口（正常 return 或下面 6 处 throw）都要把驱动帧还回去，
+    // 否则本板唯一的帧缓冲被永远攥住 → 视频流再也取不到帧（只能重启，见头文件注释）。
+    // 用守卫而不是逐条 return：漏一处就是这个 bug 复发。
+    // 析构在函数退出时发生（晚于 `return result;` 里 result 的求值），所以函数末尾
+    // 那句打印 current_fb_->width/height 的日志依然安全；且此时编码线程已 join（见下）。
+    struct FrameReleaser {
+        Esp32Camera *self;
+        ~FrameReleaser() { self->ReleaseCurrentFrame(); }
+    } frame_releaser{this};
+
     if (explain_url_.empty()) {
         throw std::runtime_error("Image explain URL or token is not set");
     }

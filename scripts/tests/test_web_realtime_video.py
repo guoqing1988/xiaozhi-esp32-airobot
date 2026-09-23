@@ -24,6 +24,7 @@ BOARD = os.path.join(
 )
 PAGE = os.path.join(BOARD, "web", "index.html")
 VIDEO_CC = os.path.join(BOARD, "local_video_stream.cc")
+LOCAL_PHOTO_CC = os.path.join(BOARD, "local_photo.cc")
 BOARD_CC = os.path.join(BOARD, "compact_wifi_board_s3cam_airobot.cc")
 UPLOAD_CC = os.path.join(BOARD, "http_upload_server.cc")
 UPLOAD_H = os.path.join(BOARD, "http_upload_server.h")
@@ -512,6 +513,95 @@ class TestSingleCameraMode(_Base):
                       self.board, re.S)
         self.assertIsNotNone(m, "找不到带 flip 的 VideoCfgApply")
         self.assertIn("SetCameraFlip(flip)", m.group(1))
+
+
+class TestPhotoReturnsDriverFrame(_Base):
+    """拍照链路用完必须把驱动帧还回去 —— 本板 fb_count=1 的硬约束（2026-09 真机回归）。
+
+    真机现象（用户报告 + 日志）：开视频后拍照（或先拍照再开视频），照片能拍成，
+    但视频从此再也出不了一帧，日志每 ~4 秒刷一次
+        W cam_hal: Failed to get frame: timeout
+        W LocalVideo: fb_get failed
+    只有重启才能恢复。
+
+    根因（日志 + 驱动源码双证）：单一 JPEG 模式下相机不再 Reinit，而 Capture() 把驱动
+    **唯一**那块帧（fb_count=1）留在 current_fb_ 里不还；cam_hal 的可用帧是 cam_give()
+    里 en=1 的计数，被拿走的那块永远是 en=0 → cam_get_next_frame() 找不到空闲缓冲 →
+    cam_start_frame() 失败、相机停摆 → 之后每次 esp_camera_fb_get() 都等满
+    FB_GET_TIMEOUT（4000ms）返回 NULL —— 与日志里 4.05 秒的间隔完全吻合。
+
+    修法：拍照链路用完即还（AI 拍照在 Explain 任何出口都还、网页拍照编码完就还）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.local_photo = _read(LOCAL_PHOTO_CC)
+
+    def test_driver_exposes_release_api(self):
+        """归还接口必须存在，且注释写清「不还的后果」，否则容易被当成可选调用删掉。"""
+        self.assertIn("void ReleaseCurrentFrame();", self.camera_h)
+        idx = self.camera_h.index("void ReleaseCurrentFrame();")
+        doc = self.camera_h[max(0, idx - 1200):idx]
+        self.assertIn("fb_count=1", doc, "要写明本板只有一块驱动帧")
+        self.assertIn("timeout", doc, "要写明不还的后果：视频流取帧永远超时")
+
+    def test_release_helper_is_idempotent(self):
+        """归还必须是「还了就置空」的幂等操作（多处调用、重复调用都安全）。"""
+        m = re.search(r"void Esp32Camera::ReleaseCurrentFrame\(\)\s*\{(.*?)\n\}",
+                      self.camera_cc, re.S)
+        self.assertIsNotNone(m, "找不到 ReleaseCurrentFrame 实现")
+        body = m.group(1)
+        self.assertIn("esp_camera_fb_return(current_fb_)", body, "要真的还给驱动")
+        self.assertIn("current_fb_ = nullptr", body, "还完必须置空，避免悬垂指针被再次归还")
+        self.assertIn("if (current_fb_ != nullptr)", body, "要判空，允许重复调用")
+
+    def test_explain_releases_frame_on_every_exit(self):
+        """AI 拍照：Explain() 有 throw 分支，归还必须覆盖所有出口（用守卫，不靠逐条 return）。"""
+        m = re.search(r"std::string Esp32Camera::Explain\(.*?\n\}", self.camera_cc, re.S)
+        self.assertIsNotNone(m, "找不到 Explain 实现")
+        body = m.group(0)
+        # 守卫类型：析构里归还驱动帧
+        guard = re.search(r"struct FrameReleaser\s*\{(.*?)\n    \}", body, re.S)
+        self.assertIsNotNone(guard, "Explain 里要有归还守卫（throw 路径靠它覆盖）")
+        self.assertIn("~FrameReleaser()", guard.group(1), "必须在析构里归还")
+        self.assertIn("ReleaseCurrentFrame()", guard.group(1))
+        # 守卫必须在启动编码线程**之前**就装好，否则中途 throw 的路径不会归还
+        inst = re.search(r"\}\s*(\w+)\s*\{\s*this\s*\}\s*;", body)
+        self.assertIsNotNone(inst, "守卫要真的实例化（只定义类型不装就白搭）")
+        self.assertLess(inst.start(), body.index("CreateEncoderThread"),
+                        "守卫要在启动编码线程之前装好")
+
+    def test_capture_releases_previous_frame_before_grabbing(self):
+        """Capture() 也要走同一个归还入口：连取两帧时先还再取（取帧失败也不会把旧帧扣住）。"""
+        m = re.search(r"bool Esp32Camera::Capture\(\)\s*\{(.*?)\n\}", self.camera_cc, re.S)
+        self.assertIsNotNone(m, "找不到 Capture 实现")
+        body = m.group(1)
+        self.assertLess(body.index("ReleaseCurrentFrame()"), body.index("esp_camera_fb_get()"),
+                        "必须在取新帧之前先归还上一帧")
+        self.assertNotIn("esp_camera_fb_return(current_fb_)", body,
+                         "归还统一走 ReleaseCurrentFrame()，别再手写一份（容易漏置空）")
+
+    def test_web_photo_releases_frame_after_encode(self):
+        """网页拍照：编码一结束（无论成败）就归还，别等到下一次拍照。"""
+        m = re.search(r"bool LocalPhotoCapture\(\)\s*\{(.*?)\n\}", self.local_photo, re.S)
+        self.assertIsNotNone(m, "找不到 LocalPhotoCapture")
+        body = m.group(1)
+        i_encode = body.index("EncodeCurrentFrameToJpeg")
+        i_release = body.index("ReleaseCurrentFrame()")
+        self.assertLess(i_encode, i_release, "要在编码之后归还")
+        self.assertLess(i_release, body.index("s_len = len"), "要在返回成功之前归还")
+
+    def test_video_stream_keeps_retrying_after_timeout(self):
+        """取帧超时只退让重试，不能让流退出：帧一旦被归还，画面要能自愈。"""
+        m = re.search(r"camera_fb_t \*fb = esp_camera_fb_get\(\);(.*?)if \(fb->format",
+                      self.video, re.S)
+        self.assertIsNotNone(m, "找不到流循环里的取帧失败分支")
+        body = m.group(1)
+        self.assertIn("fb_get failed", body)
+        self.assertIn("vTaskDelay", body, "失败要退让，避免空转烧 CPU")
+        self.assertIn("continue", body, "失败只重试，不能退出循环")
+        self.assertNotIn("return", body, "超时不是致命错误（帧被归还后要能恢复）")
 
 
 class TestWsWiring(_Base):

@@ -54,7 +54,13 @@ bool LocalPhotoCapture() {
         return false;
     }
     size_t len = 0;
-    if (!s_camera->EncodeCurrentFrameToJpeg(s_jpeg, s_capacity, len)) {
+    const bool ok = s_camera->EncodeCurrentFrameToJpeg(s_jpeg, s_capacity, len);
+    // 编码一结束（不论成败）立刻把驱动帧还回去：本板 fb_count=1，驱动只有一块帧缓冲，
+    // 攥着不放会让**实时视频流**的取帧一直等到 4000ms 超时返回 NULL
+    // （日志刷 cam_hal: Failed to get frame: timeout），只能重启才能恢复。
+    // ⚠ 必须放在 EncodeCurrentFrameToJpeg 之后：编码要读 current_fb_（JPEG 直通拷贝）。
+    s_camera->ReleaseCurrentFrame();
+    if (!ok) {
         return false;
     }
     s_len = len;

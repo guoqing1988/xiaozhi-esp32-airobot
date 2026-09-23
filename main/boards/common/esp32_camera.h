@@ -76,6 +76,18 @@ public:
     // 编码期间不可并发调用 Capture()。
     bool EncodeCurrentFrameToJpeg(uint8_t *out, size_t out_capacity, size_t &out_len);
 
+    // 把 Capture() 借来的驱动帧立刻还给驱动（幂等，可重复调用）。
+    //
+    // ⚠ 本板**必须**有人调它：`fb_count=1`（内部 SRAM 只够一块帧缓冲），驱动侧可用帧只有一个 ——
+    //   `Capture()` 取走后不还，cam_hal 就再没有空闲缓冲可采集（cam_give 的 en 标志永远为 0），
+    //   此后**所有** `esp_camera_fb_get()` 都会等满 4000ms 超时返回 NULL：
+    //   现象是网页实时视频流一帧都拿不到（日志每 ~4 秒刷 `cam_hal: Failed to get frame: timeout`
+    //   + `LocalVideo: fb_get failed`），且**只能重启恢复**（真机 2026-09）。
+    //   AI 拍照（Explain）在函数任一出口自动归还；网页拍照（LocalPhotoCapture）编码完必须自己调。
+    // ⚠ 前提：编码线程已结束（`Release()`/`Capture()` 都会先 join）。提前调会让还在读
+    //   `current_fb_->buf` 的编码线程与驱动刚采集的新帧数据打架。
+    void ReleaseCurrentFrame();
+
     // 注册/注销 JPEG 观察者：Explain() 编码完成时（拿到**完整** JPEG 的那一刻）回调。
     // 板级用它把 AI 拍的照片顺手存进 TF 卡；默认未注册 → 行为与以前完全一致。
     // ⚠ 回调运行在 Explain() 的**编码线程**里（栈已显式放大到 16KB，见 .cc 的 CreateEncoderThread），
