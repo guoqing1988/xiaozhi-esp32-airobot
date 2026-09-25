@@ -67,9 +67,12 @@ Emakefun_Servo *servo2 = mMotorDriver.getServo(2);   // 舵机2
 // 电平方向: 默认黑线=HIGH(反射型模块常见); 若反向(黑线=LOW)改为 false
 #define LINE_ACTIVE  true
 // 巡线参数
-#define LINE_BASE_SPEED  170   // 巡线基础速度(低于全局 speed 默认200, 更稳)
-#define LINE_KP          60    // 差速比例系数(越大转向越猛)
-#define LINE_LOST_MS     300   // 连续丢线超过此毫秒数 -> 判定巡线结束
+#define LINE_BASE_SPEED  90    // 巡线基础速度(低于全局 speed 默认200, 更稳; 弯道过不去就再降)
+#define LINE_KP          40    // 差速比例系数(|偏差| 1/2 时差速 ±40/±80; 太大弯道会扭来扭去)
+#define LINE_MIN_SPEED   20    // 内侧轮最低速度(别一下停死, 过渡更顺)
+#define LINE_PIVOT_MAG   3     // |偏差| >= 此值 -> 原地猛拐(一侧轮倒转), 转弯半径最小
+#define LINE_PIVOT_SPEED 110   // 原地猛拐转速(太高容易转过头 -> 左右摆)
+#define LINE_LOST_MS     800   // 连续丢线超过此毫秒数 -> 判定巡线结束(期间朝最后方向原地转着找线)
 #define LINE_MAX_MS      120000 // 巡线总时长上限(2分钟, 防死循环)
 
 // ---------------- 全局状态 ----------------
@@ -235,6 +238,45 @@ void updateSpeed(int delta) {
 bool line_following_ = false;      // 巡线模式开关
 unsigned long line_start_ms_ = 0;  // 巡线开始时间
 unsigned long line_lost_since_ = 0; // 丢线起始时刻(0=未丢线)
+int line_last_pos_ = 0;             // 最后一次正常读到的偏差(负数偏左/正数偏右), 丢线时据此决定往哪边找线
+char line_raw_[5] = "0000";         // 4 路探头原始状态(S1..S4), '1'=踩到黑线 -> 日志里直接看得到探头看到了什么
+
+// 巡线动作日志: 只在动作变化时打一行(并限速 100ms), 防止抖动时刷屏。
+// 文案用大白话, 串口 / 网页日志里直接看得出过程:
+//   巡线: 前进 (0) / 左拐 (-1) / 右拐 (2) / 丢线直行 / 路口直行 / 停止
+// 说明: 非 '@' 开头的行上位机一律忽略, 不影响控制协议。
+void lineLog(char kind, int pos) {
+    static char last_kind = 0;
+    static int  last_pos = 999;
+    static unsigned long last_ms = 0;
+    unsigned long now = millis();
+    if (kind == last_kind && pos == last_pos) return;   // 和上一次一样, 不重复打
+    if (kind != 'S' && now - last_ms < 100) return;     // 抖动时限速(停止不受限)
+    last_kind = kind;
+    last_pos = pos;
+    last_ms = now;
+    Serial.print("巡线: ");
+    switch (kind) {
+        case 'F': Serial.print("前进");     break;
+        case 'L': Serial.print("左拐");     break;
+        case 'R': Serial.print("右拐");     break;
+        case 'X': Serial.print("丢线直行"); break;
+        case 'l': Serial.print("丢线往左找"); break;
+        case 'r': Serial.print("丢线往右找"); break;
+        case 'P': Serial.print("原地左拐"); break;
+        case 'Q': Serial.print("原地右拐"); break;
+        case '+': Serial.print("路口直行"); break;
+        case 'S': Serial.print("停止");     break;
+    }
+    if (pos >= -3 && pos <= 3) {
+        Serial.print(" (");
+        Serial.print(pos);
+        Serial.print(')');
+    }
+    Serial.print(" 探头[");
+    Serial.print(line_raw_);
+    Serial.println(']');
+}
 
 // 读取 4 路传感器并计算线位置(-2..+2, 负数偏左, 正数偏右)。
 // 返回 99 = 全灭(丢线/线断), 100 = 全亮(十字路口/粗线, 按直行处理)。
@@ -245,11 +287,29 @@ int readLinePosition() {
     bool s3 = digitalRead(LINE_S3) == (LINE_ACTIVE ? HIGH : LOW);
     bool s4 = digitalRead(LINE_S4) == (LINE_ACTIVE ? HIGH : LOW);
     int on = s1 + s2 + s3 + s4;
+    line_raw_[0] = s1 ? '1' : '0';   // 日志用: 探头原始状态(S1..S4)
+    line_raw_[1] = s2 ? '1' : '0';
+    line_raw_[2] = s3 ? '1' : '0';
+    line_raw_[3] = s4 ? '1' : '0';
     if (on == 0) return 99;   // 全灭: 丢线
     if (on == 4) return 100;  // 全亮: 路口/粗线, 按直行
     // 加权平均: 权重 S1=-1.5, S2=-0.5, S3=+0.5, S4=+1.5
     int sum = (s1 ? -3 : 0) + (s2 ? -1 : 0) + (s3 ? 1 : 0) + (s4 ? 3 : 0);
     return sum / on;   // -2..+2
+}
+
+// 丢线找线/原地猛拐: 一侧两轮倒转 + 另一侧两轮正转 -> 原地转(转弯半径最小)。
+// 方向复用本工程已验证的原地左转/右转定义(turnLeft/turnRight, 网页端 left/right 同此):
+//   左转 = 四轮 "B", 右转 = 四轮 "F"
+void pivotTurn(char dir, int speed) {
+    for (int i = 0; i < 4; i++) {
+        motorSpeed[i] = speed;
+    }
+    if (dir == 'L') {
+        runMotors("B", "B", "B", "B", 0);   // 同 turnLeft
+    } else {
+        runMotors("F", "F", "F", "F", 0);   // 同 turnRight
+    }
 }
 
 // 巡线一步(非阻塞): 根据线位置差速调整左右轮, 保持沿黑线前进。
@@ -261,30 +321,60 @@ bool lineFollowOnce() {
     if (pos == 99) {  // 丢线
         if (line_lost_since_ == 0) line_lost_since_ = now;
         if (now - line_lost_since_ > LINE_LOST_MS) {
+            lineLog('S', 99);       // 日志: 停止
             stopMove(0);            // 停车
             return false;           // 巡线结束
         }
-        // 丢线初期: 保持直行一小段, 期望重新压线
-        moveForward(0);
+        // 丢线初期: 按"最后看到线的方向"原地猛拐找线。
+        // 千万不能改成直行: 直线接弯道时线一跑出探头范围, 直行就会让车直接冲出弯道。
+        if (line_last_pos_ < 0) {              // 线最后在左边 -> 原地往左转着找
+            pivotTurn('L', LINE_PIVOT_SPEED);
+            lineLog('l', 99);                  // 日志: 丢线往左找
+        } else if (line_last_pos_ > 0) {       // 线最后在右边 -> 原地往右转着找
+            pivotTurn('R', LINE_PIVOT_SPEED);
+            lineLog('r', 99);                  // 日志: 丢线往右找
+        } else {                               // 从没偏过(如起步就在线外) -> 直行找
+            for (int i = 0; i < 4; i++) {
+                motorSpeed[i] = LINE_BASE_SPEED;
+            }
+            runMotors("F", "F", "B", "B", 0);
+            lineLog('X', 99);                  // 日志: 丢线直行
+        }
         return true;
     }
     line_lost_since_ = 0;
 
     if (now - line_start_ms_ > LINE_MAX_MS) {  // 超时保护
+        lineLog('S', 99);       // 日志: 停止
         stopMove(0);
         return false;
     }
 
     if (pos == 100) {  // 路口: 直行
-        moveForward(0);
+        for (int i = 0; i < 4; i++) {
+            motorSpeed[i] = LINE_BASE_SPEED;   // 拉平, 确保真的是直行
+        }
+        runMotors("F", "F", "B", "B", 0);
+        lineLog('+', 100);      // 日志: 路口直行
         return true;
     }
 
-    // 比例差速: 左轮 = base - Kp*pos(偏左时 pos<0 -> 左轮加速右轮减速 -> 向右修正)
-    int left = LINE_BASE_SPEED - LINE_KP * pos;
-    int right = LINE_BASE_SPEED + LINE_KP * pos;
-    left = constrain(left, 60, 255);
-    right = constrain(right, 60, 255);
+    // 转向: 按偏差大小平滑加/减速(线性), 偏差最大才原地猛拐。
+    // 符号: 线偏左(pos<0) -> 左轮慢/右轮快 -> 车往左拐(往线那边拐), 与对照表一致。
+    // 注: 之前是"偏一点给 60 差速, 偏得多直接给 255/0"的开兕式控制, 力度跳变太大
+    //     -> 车在弯道左右扭来扭去。现在按偏差平滑过渡。
+    int mag = pos < 0 ? -pos : pos;
+    if (mag >= LINE_PIVOT_MAG) {             // 偏差最大: 原地猛拐(一侧轮倒转)
+        pivotTurn(pos < 0 ? 'L' : 'R', LINE_PIVOT_SPEED);
+        lineLog(pos < 0 ? 'P' : 'Q', pos);   // 日志: 原地左拐 / 原地右拐
+        return true;
+    }
+    int outer = LINE_BASE_SPEED + LINE_KP * mag;
+    int inner = LINE_BASE_SPEED - LINE_KP * mag;
+    if (inner < LINE_MIN_SPEED) inner = LINE_MIN_SPEED;   // 内侧留一点力, 不要一下停死
+    if (outer > 255) outer = 255;
+    int left  = (pos < 0) ? inner : outer;   // 线在左 -> 左轮是内侧(慢)
+    int right = (pos < 0) ? outer : inner;
     motorSpeed[0] = left;   // 前左
     motorSpeed[2] = left;   // 后左
     motorSpeed[1] = right;  // 前右
@@ -294,6 +384,8 @@ bool lineFollowOnce() {
     motorRun(1, "F");
     motorRun(2, "B");
     motorRun(3, "B");
+    line_last_pos_ = pos;   // 记住最后看到的偏差方向, 丢线时按它决定往哪边找
+    lineLog(pos < 0 ? 'L' : (pos > 0 ? 'R' : 'F'), pos);   // 日志: 左拐 / 右拐 / 前进
     return true;
 }
 
