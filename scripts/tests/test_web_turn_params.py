@@ -3,11 +3,13 @@
 背景（真机问题：点一下左转/右转，转弯幅度偏大）
   转弯幅度 ≈ 角速度 × 转动时长，两个旋钮都在 web/index.html：
 
-      const TURN_SPEED = 110;          // PWM 70-255, 决定角速度
-      const TURN_MIN_PRESS_MS = 250;   // 「点一下」的最短转动时长
+      const TURN_SPEED = 80;          // PWM 70-255, 决定角速度
+      const TURN_MIN_PRESS_MS = 160;  // 「点一下」的最短转动时长
 
-  旧值 400ms @ 140：用户快速点一下（可能只按了 100ms），前端仍会强制转到满 400ms
-  才发 drive-stop，因此"点一下"转得比预期多。现调整为 250ms @ 110。
+  历史调整：400ms @ 140 → 250ms @ 110 → **160ms @ 80**。
+  为什么调两次：400/140 时用户快速点一下（可能只按 100ms）也会被强制转到满 400ms，
+  转得比预期多；改成 250/110 后实测仍反馈“转太快、容易转过头”，
+  于是把角速度与最短时长一起降（点一下的幅度约为最初的四分之一）。
 
   这两个常量集中在「机器人控制」区块顶部, 便于微调——因此必须断言函数体里不能
   再写死数值(否则改了常量却没生效, 排查成本很高)。
@@ -24,8 +26,8 @@ INDEX_HTML = os.path.join(
     "main", "boards", "bread-compact-wifi-s3cam-airobot", "web", "index.html",
 )
 
-EXPECTED_TURN_SPEED = 110
-EXPECTED_TURN_MIN_PRESS_MS = 250
+EXPECTED_TURN_SPEED = 80
+EXPECTED_TURN_MIN_PRESS_MS = 160
 
 # Arduino 侧 handleDrive() 会把速度钳到 70-255；低于 70 会被抬回 70，麦轮还可能转不动。
 SPEED_MIN, SPEED_MAX = 70, 255

@@ -109,6 +109,12 @@
       box-shadow: 0 2px 6px rgba(37, 99, 235, .12)
     }
 
+    /* 未选中的灰标签也要有悬停反馈（用户反馈：灰按钮鼠标放上去一点反应都没有） */
+    .tab:not(.active):hover {
+      background: #e2e8f0;
+      color: #374151
+    }
+
     .panel {
       display: none;
       background: #fff;
@@ -143,6 +149,7 @@
     /* 上传文件列表: 每首一行(文件名 / 探测参数 / 处理方式 / 手动覆盖) */
     .fitem {
       display: flex;
+      flex-wrap: wrap;          /* 进度条要另起一行挤在同一条里（见 .fprog） */
       gap: 8px;
       align-items: center;
       font-size: 12.5px;
@@ -221,6 +228,10 @@
       background: #1d4ed8
     }
 
+    .btn:active {
+      background: #1e40af
+    }
+
     .btn-danger {
       background: #e11d48;
       padding: 5px 10px;
@@ -229,6 +240,63 @@
 
     .btn-danger:hover {
       background: #be123c
+    }
+
+    .btn-danger:active {
+      background: #9f1239
+    }
+
+    /* 次要操作按钮：浅底描边、小尺寸。用在日志面板那排辅助操作上——
+       一堆实心蓝大按钮会把面板撑得又长又抢眼（移动端尤其明显） */
+    .btn-quiet {
+      background: #f1f5f9;
+      color: #374151;
+      border: 1px solid #dbe1ea;
+      border-radius: 10px;
+      padding: 6px 11px;
+      font-size: 12.5px;
+      font-weight: 400;
+      /* 灰底按钮也是按钮：没有手型 + 底色只差一点点时，鼠标放上去像块死板子 */
+      cursor: pointer;
+      transition: background .15s, border-color .15s, color .15s
+    }
+
+    .btn-quiet:hover {
+      background: #e2e8f0;
+      border-color: #cbd5e1;
+      color: #111827
+    }
+
+    .btn-quiet:active {
+      background: #cbd5e1
+    }
+
+    /* 视频框右上角 ⚙️：深色浮层圆角按钮，悬停变亮。
+       background 必须写在类里（内联样式优先级更高，hover 会被盖掉） */
+    .video-gear {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      border: 0;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, .55);
+      color: #fff;
+      font-size: 15px;
+      line-height: 1;
+      cursor: pointer;
+      z-index: 2;
+      transition: background .15s
+    }
+
+    .video-gear:hover {
+      background: rgba(0, 0, 0, .8)
+    }
+
+    .video-gear:active {
+      background: rgba(0, 0, 0, .95)
     }
 
     .check {
@@ -244,23 +312,42 @@
       height: 16px
     }
 
-    .progress {
-      width: 100%;
+    /* 上传/转码进度条：贴在**各自文件那一行**（谁在传就显示在谁下面），
+       不再用按钮下方的全局进度条 —— 一次选几十个文件时，全局条离正在传的那条太远，
+       根本看不出传到哪了（用户反馈）。完成/跳过/失败时整条变色并显示结果。 */
+    .fprog {
+      flex: 1 1 100%;           /* 独占一整行（.fitem 已 flex-wrap） */
       background: #eef0f4;
       border-radius: 6px;
-      height: 18px;
+      height: 16px;
       overflow: hidden;
-      margin: 6px 0 10px
+      margin-top: 2px
     }
 
-    .progress>div {
+    .fprog>div {
       height: 100%;
       background: linear-gradient(90deg, #3b82f6, #2563eb);
       text-align: center;
       color: #fff;
-      line-height: 18px;
-      font-size: 12px;
+      line-height: 16px;
+      font-size: 11.5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      padding: 0 6px;
       transition: width .2s
+    }
+
+    .fprog.done>div {
+      background: #16a34a
+    }
+
+    .fprog.skip>div {
+      background: #d97706
+    }
+
+    .fprog.fail>div {
+      background: #e11d48
     }
 
     #log {
@@ -301,6 +388,28 @@
        见 loadSongs/loadAlarms 渲染处）。没带 data-label 的占位行（如“暂无歌曲”
        的 colspan 单元格）不显示列名，自然退化为普通文本。 */
     @media (max-width: 620px) {
+      /* 日志面板的辅助操作：手机上再收紧一档，尽量一行排下、别抢注意力 */
+      .log-actions {
+        gap: 6px
+      }
+
+      .log-actions .btn-quiet {
+        padding: 5px 9px;
+        font-size: 12px
+      }
+
+      /* 主按钮与转向键在手机上整体收一档：默认 9px 16px / 14px 在窄屏显得笨重。
+         转向键是「按住持续转」的交互控件，只收高度、不瘦宽度（保留点击区）。 */
+      .btn {
+        padding: 7px 12px;
+        font-size: 13px;
+        border-radius: 9px
+      }
+
+      .btn.turn-btn {
+        padding: 9px 4px
+      }
+
       .card-table thead {
         display: none
       }
@@ -586,19 +695,6 @@
       word-break: break-all;
     }
 
-    /* 系统日志折叠区：默认收起，避免机器人面板过长 */
-    .logbox {
-      margin-top: 14px
-    }
-
-    .logbox>summary {
-      cursor: pointer;
-      font-size: 13px;
-      color: #374151;
-      padding: 6px 0;
-      user-select: none
-    }
-
     /* 下位机指令记录：与调试日志同源(同一个环形缓冲)，但只留 [UNO] 行 */
     #unoCmdView {
       background: #0f172a;
@@ -646,6 +742,13 @@
       color: #fff;
       font-size: 15px;
       cursor: pointer;
+      transition: background .15s
+    }
+    .photo-del:hover {
+      background: rgba(0, 0, 0, .8)
+    }
+    .photo-del:active {
+      background: rgba(0, 0, 0, .95)
     }
     .photo-name {
       font-size: 11px;
@@ -685,6 +788,11 @@
     <div class="wsbar">
       <span id="wsdot" class="wsdot off"></span>
       <span id="wslog">连接中…</span>
+      <!-- 全屏开关（页面右上角）：手机浏览器进全屏后地址栏也收起来，视频/摇杆能更宽敞。
+           margin-left:auto 把它推到本行最右；放在 wsbar（不是 .tabs）里 —— .tabs 窄屏会横向滚动，
+           放里面在手机上要滑到最右才看得到，就不叫“右上角”了。 -->
+      <button class="btn-quiet" id="fsBtn" onclick="toggleFullscreen()" title="全屏 / 退出全屏（Esc 退出）"
+        style="margin-left:auto;flex-shrink:0;padding:3px 10px;font-size:12.5px">⛶ 全屏</button>
     </div>
 
     <div class="tabs">
@@ -692,6 +800,7 @@
       <button class="tab" onclick="showTab('alarm',this)">⏰ 闹钟提醒</button>
       <button class="tab" onclick="showTab('uno',this)">🎮 机器人控制</button>
       <button class="tab" onclick="showTab('photos',this)">📷 照片</button>
+      <button class="tab" onclick="showTab('log',this)">🐞 系统日志</button>
     </div>
 
     <!-- 歌曲管理 -->
@@ -700,7 +809,7 @@
       <div class="hint">TF 卡「歌曲」目录下的 MP3 列表；删除会同时删除同名歌词(.lrc)。</div>
       <div class="row">
         <button class="btn" onclick="openUpload()">⬆️ 上传歌曲</button>
-        <button class="btn" onclick="loadSongs()">🔄 刷新列表</button>
+        <button class="btn-quiet" onclick="loadSongs();loadAnnounces()">🔄 刷新列表</button>
       </div>
       <table class="card-table">
         <thead>
@@ -714,30 +823,44 @@
         <tbody></tbody>
       </table>
       <div id="muslog"></div>
+
+      <h3 style="margin-top:26px">🔊 提示音（传感器播报）</h3>
+      <div class="hint">放在 TF 卡 <code>/sdcard/announce/</code>，节点上报事件时由主控播放。
+        文件名<b>固定</b>（必须与节点上报的名字一致），点槽位上传即可，不用管本地文件叫什么；上传同样会自动转码。</div>
+      <table class="card-table" id="announceTable">
+        <thead>
+          <tr>
+            <th>提示音</th>
+            <th>什么时候播</th>
+            <th>状态</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="annlog"></div>
     </div>
 
     <!-- 上传弹窗 -->
     <div class="modal" id="uploadModal">
       <div class="modal-box">
         <div class="modal-head">
-          <h3>🎵 上传歌曲到 TF 卡</h3>
+          <h3 id="uploadTitle">🎵 上传歌曲到 TF 卡</h3>
           <button class="modal-close" onclick="closeUpload()" title="关闭">×</button>
         </div>
-        <div class="hint">选好文件会自动检测参数：<b>单声道 + ≤24kHz + ≤128kbps</b> 的歌直接上传，
-          其余自动转码为 24000Hz 单声道 96kbps（避免设备端解码卡顿、唤醒失灵）；歌词自动转为 UTF-8。<br>
+        <div class="hint" id="uploadHint">选好文件会自动检测参数：<b>单声道 + ≤24kHz + ≤128kbps</b> 的歌直接上传，
+          其余（wav/m4a/flac 等非 MP3）自动转码为 24000Hz 单声道 96kbps（避免设备端解码卡顿、唤醒失灵）；歌词自动转为 UTF-8。<br>
           转码组件按需从 CDN 加载（首次需联网，之后走浏览器缓存；无网时仍可上传本来合格的文件）。
         </div>
         <div class="row">
-          <input type="file" id="f" accept=".mp3,.lrc" multiple onchange="onFilesPicked()">
+          <input type="file" id="f" accept=".mp3,.lrc,.wav,.m4a,.aac,.flac,.ogg,.opus,.weba" multiple onchange="onFilesPicked()">
         </div>
         <div id="flist"></div>
         <div class="row">
           <button class="btn" onclick="up()">上传</button>
           <label class="check"><input type="checkbox" id="ov" checked> 同名文件覆盖</label>
         </div>
-        <div class="progress">
-          <div id="bar">0%</div>
-        </div>
+        <!-- 进度条已移到每行文件里（见 .fprog）；这里只留汇总/异常信息，避免页面被日志拉得很长 -->
         <div id="log"></div>
       </div>
     </div>
@@ -748,7 +871,7 @@
       <div class="hint">创建后到点自动播报与屏幕提醒；也支持语音「30分钟后提醒我喝水」。</div>
       <div class="row">
         <button class="btn" onclick="openAlarm()">➕ 新建闹钟</button>
-        <button class="btn" onclick="loadAlarms()">🔄 刷新列表</button>
+        <button class="btn-quiet" onclick="loadAlarms()">🔄 刷新列表</button>
       </div>
       <table class="card-table">
         <thead>
@@ -798,8 +921,64 @@
         </div>
         <div class="row">
           <button class="btn" onclick="addAlarm()">添加</button>
-          <button class="btn" onclick="closeAlarm()">取消</button>
+          <button class="btn-quiet" onclick="closeAlarm()">取消</button>
         </div>
+      </div>
+    </div>
+
+    <!-- 视频参数设置（视频区左上角 ⚙️ 打开）：改完即时生效 + 存进设备 NVS，不用重烧固件 -->
+    <div class="modal" id="videoCfgModal">
+      <div class="modal-box">
+        <div class="modal-head">
+          <h3>⚙️ 实时视频设置</h3>
+          <button class="modal-close" onclick="closeVideoCfg()" title="关闭">×</button>
+        </div>
+        <div class="hint">改完点「应用」全部立即生效（分辨率、帧率、镜像/翻转、画质都不用重开相机，画面不断）。
+          设置存在设备里，断电重启仍有效；没连设备时也能打开这个窗口查看/修改。</div>
+        <div class="frow">
+          <label title="画面尺寸">分辨率</label>
+          <select id="vcfgSize">
+            <option value="0">320×240（更流畅、延时低）</option>
+            <option value="1" selected>640×480（默认）</option>
+            <option value="2">800×600（更清晰、更占带宽）</option>
+          </select>
+        </div>
+        <div class="frow">
+          <label title="帧率上限">帧率</label>
+          <select id="vcfgFps">
+            <option value="5">5 fps</option>
+            <option value="10">10 fps</option>
+            <option value="15">15 fps</option>
+            <option value="20" selected>20 fps（默认）</option>
+            <option value="25">25 fps</option>
+          </select>
+        </div>
+        <div class="frow">
+          <label title="JPEG 画面质量">质量</label>
+          <select id="vcfgQuality">
+            <option value="10">清晰（单帧大、延时略高）</option>
+            <option value="12" selected>默认</option>
+            <option value="20">标准（省带宽）</option>
+            <option value="30">省流（最省带宽）</option>
+          </select>
+        </div>
+        <div class="frow">
+          <label title="左右镜像 / 上下翻转">翻转</label>
+          <div style="display:flex;align-items:center;gap:14px;font-size:13.5px;color:#374151">
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+              <input type="checkbox" id="vcfgMirror" style="margin:0"> 左右镜像
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+              <input type="checkbox" id="vcfgFlip" style="margin:0"> 上下翻转
+            </label>
+          </div>
+        </div>
+        <div class="row">
+          <button class="btn" onclick="saveVideoCfg()">应用</button>
+          <button class="btn-quiet" onclick="resetVideoCfg()">恢复默认</button>
+          <button class="btn-quiet" onclick="closeVideoCfg()">取消</button>
+        </div>
+        <div id="vcfgMsg" style="font-size:12.5px;color:#6b7280;margin-top:6px"></div>
       </div>
     </div>
 
@@ -807,6 +986,29 @@
     <div class="panel" id="panel-uno">
       <!-- <h3>🎮 机器人控制</h3> -->
       <!-- <div class="hint">拖动摇杆控制麦克纳姆轮机器人：前后左右及斜向均为平移（左右=横向挪移），推得越远速度越快，松手回中即停止；原地转圈请用下方「左转/右转」按钮。</div> -->
+      <!-- 实时视频：勾选才启用（设备端会把相机切到 JPEG 模式并启 /stream 服务），
+           取消立即停流并释放（相机切回 RGB565，拍照与 LCD 预览恢复）。
+           视频与节点控制共用 2.4G 空口，开启期间节点指令可能变慢。 -->
+      <label class="check" style="display:flex;align-items:center;gap:6px;margin:0 0 8px">
+        <input type="checkbox" id="videoChk" onchange="toggleVideo(this)"> 📹 实时视频<span
+          style="color:#9ca3af;font-size:12px">（占用带宽；同时用节点控制会变慢）</span>
+      </label>
+      <!-- 深色背景：画面未连上/断开时也是一块“屏幕”，不会白到看不出是视频区 -->
+      <div id="videoWrap" style="display:none;position:relative;margin-bottom:8px;background:#111;border-radius:8px;overflow:hidden">
+        <!-- aspect-ratio 固定 4:3：流未连上/断开时高度不塔陷，不会让下方摇杆跳一下 -->
+        <img id="videoImg" alt=""
+          style="width:100%;aspect-ratio:4/3;object-fit:contain;display:block">
+        <!-- 帧率/分辨率角标（左上角）：设备端统计后经 WS 推来（浏览器拿不到 MJPEG 的逐帧事件）。
+             默认写 0fps：没数据时也要有个值，不能只剩一条空的小黑条。 -->
+        <span id="videoCorner"
+          style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.55);color:#fff;font-size:11.5px;padding:2px 7px;border-radius:6px;font-variant-numeric:tabular-nums">0fps</span>
+        <!-- ⚙️ 视频参数（右上角）：点开弹窗改，设备侧即时生效并存进 NVS，不用重新编译烧固件。 -->
+        <button class="video-gear" onclick="openVideoCfg()" title="视频设置（分辨率 / 帧率 / 质量 / 镜像）">⚙️</button>
+        <!-- 提示层：设备没连上/服务没起时给一行说明。
+             ⚠ 必须 pointer-events:none：它铺满整个框，否则会把上面的 ⚙️ 盖住点不动。 -->
+        <div id="videoHint"
+          style="position:absolute;inset:0;display:none;align-items:center;justify-content:center;color:#9ca3af;font-size:13px;line-height:1.6;text-align:center;padding:0 14px;pointer-events:none"></div>
+      </div>
       <div class="joy-wrap">
         <!-- 左转/右转与摇杆同行：紧贴摇杆两侧，与摇杆内的「左移/右移」标签同高，
              比原来单独占一行更紧凑（原来那行已删除） -->
@@ -830,22 +1032,22 @@
       </div>
       <div class="row" style="align-items:center;margin-top:6px;flex-wrap:nowrap">
         <span style="font-size:13px;color:#6b7280;min-width:60px">🔧 头部舵机</span>
-        <button class="btn" style="padding:6px 12px;font-size:20px;line-height:1;flex-shrink:0"
+        <button class="btn-quiet" style="font-size:16px;line-height:1;flex-shrink:0"
           onclick="servoStep(-SERVO_STEP)">−</button>
         <input type="range" id="servoRange" min="0" max="180" value="82" style="flex:1;min-width:0;height:28px"
           oninput="onServoInput(this)" onchange="setServoDeg(this.value, true)">
-        <button class="btn" style="padding:6px 12px;font-size:20px;line-height:1;flex-shrink:0"
+        <button class="btn-quiet" style="font-size:16px;line-height:1;flex-shrink:0"
           onclick="servoStep(SERVO_STEP)">+</button>
         <span id="servoLabel" style="font-size:13px;color:#2563eb;min-width:40px;text-align:right">82°</span>
-        <button class="btn" style="padding:4px 8px;font-size:12px;margin-left:2px;flex-shrink:0"
+        <button class="btn-quiet" style="padding:4px 8px;font-size:12px;margin-left:2px;flex-shrink:0"
           onclick="servoHome()">回正</button>
       </div>
       <div class="row" style="align-items:center;margin-top:4px;flex-wrap:nowrap">
         <span style="font-size:13px;color:#6b7280;min-width:60px">🎯 回正值</span>
-        <button class="btn" style="padding:6px 14px;font-size:18px;flex-shrink:0" onclick="homeStep(-1)">−</button>
+        <button class="btn-quiet" style="font-size:16px;line-height:1;flex-shrink:0" onclick="homeStep(-1)">−</button>
         <input type="number" id="servoHomeVal" min="0" max="180" value="82" inputmode="numeric"
           style="flex:1;text-align:center;height:38px;min-width:0" onchange="onServoHomeInput(this)">
-        <button class="btn" style="padding:6px 14px;font-size:18px;flex-shrink:0" onclick="homeStep(1)">+</button>
+        <button class="btn-quiet" style="font-size:16px;line-height:1;flex-shrink:0" onclick="homeStep(1)">+</button>
       </div>
       <!-- <div class="hint">头部舵机：拖动滑块或点 − / + 微调（每次 5°），「回正」转到下方回正值。<br>
         回正值即「回正」按钮让头部停靠的角度，可直接输入数字（回车/失焦生效）或点 − / +；实时写入设备(NVS)，断电保留。</div> -->
@@ -857,37 +1059,12 @@
       <div class="row" style="align-items:center">
         <span style="font-size:12.5px;color:#6b7280;flex:1;line-height:1.4">下位机指令记录（<code>&gt;</code> 已发出 ·
           <code>!</code> 被防抖拦截 · <code>×</code> 发送失败 · <code>&lt;</code> 下位机回执）</span>
-        <button class="btn" onclick="copyPre('unoCmdView', this)">📋 复制</button>
+        <button class="btn-quiet" onclick="copyPre('unoCmdView', this)">📋 复制</button>
       </div>
       <pre id="unoCmdView"></pre>
 
-      <!-- 系统日志（折叠）：原顶部「🐞 调试日志」tab 的内容搬到这里，
-           平时收起不占地方，排查时点开即可（数据与上面的指令记录同源） -->
-      <details class="logbox">
-        <summary>🐞 系统日志（排查用，点开查看）</summary>
-        <div class="hint">设备实时日志。<b>日志不走串口</b>，所以开到「信息/调试」也不会干扰 Arduino 下位机控制；
-          排查完记得把级别调回「错误」。</div>
-        <div class="row" style="align-items:center">
-          <span style="font-size:13px;color:#6b7280">级别</span>
-          <select id="logLevel" onchange="setLogLevel()">
-            <option value="0">无</option>
-            <option value="1">错误</option>
-            <option value="2">警告</option>
-            <option value="3">信息</option>
-            <option value="4">调试</option>
-          </select>
-          <label class="check"><input type="checkbox" id="logMirror" onchange="setLogMirror()"> 同时输出到串口（会干扰
-            Arduino）</label>
-        </div>
-        <div class="row">
-          <button class="btn" onclick="clearLogView()">🧹 清空显示</button>
-          <button class="btn" onclick="clearDeviceLog()">🗑 清空设备缓冲</button>
-          <button class="btn" id="logPauseBtn" onclick="toggleLogPause()">⏸ 暂停</button>
-          <button class="btn" onclick="copyPre('logView', this)">📋 复制</button>
-        </div>
-        <pre id="logView"></pre>
-      </details>
     </div>
+
 
     <!-- 照片相册：列表只拉元数据，图片逐个按需拉取（设备从 TF 卡逐张读发，
          一次拉 100 张会把单线程 httpd 卡住）。12 张/批 + 滚到底自动加载。 -->
@@ -906,7 +1083,7 @@
         <img id="photoImg" alt="照片" style="max-width:100%;border-radius:8px">
         <div class="row" style="align-items:center;margin-top:4px">
           <span id="photoStatus" style="font-size:12.5px;color:#6b7280;flex:1"></span>
-          <button class="btn" onclick="clearPhotoView()" title="只清这里的显示，不删卡上的照片">🧹 清空显示</button>
+          <button class="btn-quiet" onclick="clearPhotoView()" title="只清这里的显示，不删卡上的照片">🧹 清空</button>
         </div>
       </div>
 
@@ -920,14 +1097,39 @@
       </div>
       <div class="row" style="align-items:center">
         <label class="check"><input type="checkbox" id="aiSaveChk" onchange="setAiSave()"> AI 拍照也存卡</label>
-        <button class="btn" onclick="loadPhotos()">🔄 刷新</button>
-        <button class="btn" onclick="clearPhotos()">🗑 清空本相册</button>
+        <button class="btn-quiet" onclick="loadPhotos()">🔄 刷新</button>
+        <button class="btn-quiet" onclick="clearPhotos()">🗑 清空本相册</button>
       </div>
       <div id="photoGrid" class="photo-grid"></div>
       <div id="photoEmpty" class="hint" style="display:none">还没有照片。</div>
       <div class="row" style="justify-content:center">
         <button class="btn" id="photoMoreBtn" style="display:none" onclick="loadMorePhotos()">加载更多</button>
       </div>
+    </div>
+
+    <!-- 系统日志（独立 tab，排在最后）：设备内存环形缓冲的实时日志，不落串口（见 log_capture.h）。
+         与「机器人控制」面板的「下位机指令记录」同源：那里只留 [UNO] 行，这里看全文。 -->
+    <div class="panel" id="panel-log">
+      <div class="hint"><b>日志不走串口</b>；排查完把级别调回「错误」。</div>
+      <div class="row" style="align-items:center">
+        <span style="font-size:13px;color:#6b7280">级别</span>
+        <select id="logLevel" onchange="setLogLevel()">
+          <option value="0">无</option>
+          <option value="1">错误</option>
+          <option value="2">警告</option>
+          <option value="3">信息</option>
+          <option value="4">调试</option>
+        </select>
+        <label class="check"><input type="checkbox" id="logMirror" onchange="setLogMirror()"> 同时输出到串口（会干扰
+          Arduino）</label>
+      </div>
+      <div class="row log-actions">
+        <button class="btn-quiet" onclick="clearLogView()">🧹 清空</button>
+        <button class="btn-quiet" onclick="clearDeviceLog()" title="清空设备内存缓冲（含崩溃前保留的日志）">🗑 清空设备</button>
+        <button class="btn-quiet" id="logPauseBtn" onclick="toggleLogPause()">⏸ 暂停</button>
+        <button class="btn-quiet" onclick="copyPre('logView', this)">📋 复制</button>
+      </div>
+      <pre id="logView"></pre>
     </div>
   </div>
 
@@ -957,6 +1159,8 @@
         let j = null; try { j = JSON.parse(ev.data); } catch (e) { return; }
         // 若带 id 说明是某次请求的回执; 否则(如含 mode 的状态推送)直接当作状态更新
         if (j && j.id != null && wsPending.has(j.id)) { const r = wsPending.get(j.id); wsPending.delete(j.id); r(j); return; }
+        // 视频流状态推送（无 id）：设备侧每秒推一次实测帧率/分辨率
+        if (j && j.video != null) { updateVideoStat(j); return; }
         if (j && j.mode) { updateUnoStatus(j); }
       };
     }
@@ -988,40 +1192,73 @@
       clearTimeout(wsStatusTimer);
       wsStatusTimer = setTimeout(function () { renderWs(wsStatusText); }, 2500);
     }
+    // ===== 全屏（页首右上角按钮）=====
+    // 只切 documentElement，不改布局；按钮文字随全屏状态同步（按 Esc/F11 退出也要跟上）。
+    // ⚠ iPhone 上的 Safari 不支持元素级全屏（只有 iPad/桌面支持），点了给一行提示，不静默失败。
+    function fsSupported() {
+      const el = document.documentElement;
+      return !!(el.requestFullscreen || el.webkitRequestFullscreen);
+    }
+    function fsActive() {
+      return !!(document.fullscreenElement || document.webkitFullscreenElement);
+    }
+    function syncFsBtn() {
+      const b = document.getElementById('fsBtn');
+      if (b) b.textContent = fsActive() ? '⛶ 退出全屏' : '⛶ 全屏';
+    }
+    function toggleFullscreen() {
+      if (!fsSupported()) {
+        logWs('此浏览器不支持全屏（iPhone 可「添加到主屏幕」再打开）');
+        return;
+      }
+      if (!fsActive()) {
+        const el = document.documentElement;
+        // webkit 前缀：老版 Safari / 部分国产浏览器只认它
+        const p = el.requestFullscreen ? el.requestFullscreen() : el.webkitRequestFullscreen();
+        // 浏览器要求全屏必须由用户手势触发，被拒时提示一下（否则用户以为按钮坏了）
+        if (p && p.catch) p.catch(function () { logWs('进入全屏失败：浏览器未允许'); });
+      } else if (document.exitFullscreen) {
+        document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      }
+    }
+    document.addEventListener('fullscreenchange', syncFsBtn);
+    document.addEventListener('webkitfullscreenchange', syncFsBtn);
     // ===== 调试日志（实时） =====
     // 设备把日志与下位机指令写进内存环形缓冲（不落串口，见 log_capture.h），这里按 seq 增量拉取。
     // 只在需要它的面板可见时轮询，切走即停，避免无谓的 WS 流量。
     const LOG_MAX_CHARS = 40000;   // 前端保留的日志量上限（超出丢最早的）
     const UNO_CMD_MAX_CHARS = 6000;   // 下位机指令记录保留量
-    // 拉取频率分层：日志区展开时 1s（看日志要跟手）；收起时 3s。
-    // 收起时**不能停**：下位机指令记录与系统日志同源，停了指令回执就不刷新了。
+    // 拉取频率分层：停在「系统日志」面板时 1s（看日志要跟手）；停在「机器人控制」
+    // 面板时 3s 就够（那里的「下位机指令记录」与日志同源，不能停，否则指令回执不刷新）。
     const LOG_POLL_MS = 1000;
     const LOG_POLL_IDLE_MS = 3000;
-    let logSeq = 0, logTimer = null, logText = '', logPaused = false, logBusy = false;
+    let logSeq = 0, logTimer = null, logTimerMs = 0, logText = '', logPaused = false, logBusy = false;
     let unoCmdText = '', unoCmdPending = '';   // pending: 跨批次未成行的残余
+    function logPanelActive() {
+      const p = document.getElementById('panel-log');
+      return !!p && p.classList.contains('active');
+    }
     function logPollIntervalMs() {
-      const d = document.querySelector('details.logbox');
-      return (d && d.open) ? LOG_POLL_MS : LOG_POLL_IDLE_MS;
+      return logPanelActive() ? LOG_POLL_MS : LOG_POLL_IDLE_MS;
     }
     function startLogPolling() {
-      if (logTimer) return;
+      const want = logPollIntervalMs();
+      if (logTimer) {
+        if (logTimerMs === want) return;          // 频率没变直接复用现有定时器
+        clearInterval(logTimer);                  // uno / log 面板互相切换 → 按新频率重建
+        logTimer = null;
+      }
       logPaused = false; syncLogPauseBtn();
       pullLog();                                  // 进入面板先补一次
-      logTimer = setInterval(pullLog, logPollIntervalMs());
+      logTimerMs = want;
+      logTimer = setInterval(pullLog, want);
     }
     function stopLogPolling() {
       if (logTimer) { clearInterval(logTimer); logTimer = null; }
+      logTimerMs = 0;
     }
-    // 展开/收起系统日志时调整拉取频率（收起仍要拉：下位机指令记录同源）
-    (function () {
-      const d = document.querySelector('details.logbox');
-      if (!d) return;
-      d.addEventListener('toggle', function () {
-        if (!logTimer) return;                    // 不在机器人面板，不用管
-        clearInterval(logTimer);
-        logTimer = setInterval(pullLog, logPollIntervalMs());
-      });
-    })();
     function pullLog() {
       // logBusy: 上一枪还没回来就不再发，避免设备慢时 pending 堆积
       if (logPaused || !wsOk || logBusy) return;
@@ -1189,11 +1426,17 @@
         }
       }
       if (id === 'alarm') loadAlarms();
-      if (id === 'upload') loadSongs();
+      if (id === 'upload') { loadSongs(); loadAnnounces(); }
       if (id === 'photos') loadPhotos();
       if (id === 'uno') { startUnoPolling(); }   // 由 WS 推送更新状态, 此处只主动问一次
       else { stopUnoPolling(); unoStop(); }
-      if (id === 'uno') startLogPolling(); else stopLogPolling();   // 日志区就在机器人面板里
+      // 视频流只在「机器人控制」面板可见时拉：切走即断开（设备随即停止抓帧，不白占空口），
+      // 但保留勾选状态，切回来自动重连（相机模式不动，省掉一次约 300ms 的切换）。
+      if (id === 'uno') { if (document.getElementById('videoChk').checked) videoOpen(); }
+      else { videoClose(); }
+      // 日志轮询：独立「系统日志」面板要拉；「机器人控制」面板的「下位机指令记录」
+      // 与日志同源，也得拉（停了指令回执就不刷新）。频率由 logPollIntervalMs() 按面板定。
+      if (id === 'uno' || id === 'log') startLogPolling(); else stopLogPolling();
     }
 
     // ===== 照片相册 =====
@@ -1368,13 +1611,35 @@
     function loadActivePanel() {
       const p = document.querySelector('.panel.active');
       if (!p) return;
-      if (p.id === 'panel-upload') loadSongs();
+      if (p.id === 'panel-upload') { loadSongs(); loadAnnounces(); }
       else if (p.id === 'panel-alarm') loadAlarms();
       else if (p.id === 'panel-uno') { loadServoHome(); startLogPolling(); }
       else if (p.id === 'panel-photos') loadPhotos();
     }
     // ===== 上传弹窗 =====
-    function openUpload() { document.getElementById('uploadModal').classList.add('show'); }
+    // dir: 'music'(默认) | 'announce'；fixedName: 提示音槽位名(不含 .mp3)，上传时强制用它当文件名
+    let uploadTarget = { dir: 'music', fixedName: '' };
+    function openUpload(dir, fixedName) {
+      uploadTarget = { dir: (dir === 'announce') ? 'announce' : 'music', fixedName: fixedName || '' };
+      const isAnn = uploadTarget.dir === 'announce';
+      const t = document.getElementById('uploadTitle');
+      const h = document.getElementById('uploadHint');
+      if (t) t.textContent = isAnn ? ('🔊 上传提示音：' + uploadTarget.fixedName + '.mp3') : '🎵 上传歌曲到 TF 卡';
+      if (h) {
+        if (!h.dataset.orig) h.dataset.orig = h.innerHTML;   // 首次记录歌曲模式的原文案
+        if (isAnn) {
+          h.innerHTML = '选一个音频文件（mp3 / wav / m4a / flac 等均可），会自动转码为 24000Hz 单声道 96kbps，'
+            + '并保存为 <b>/sdcard/announce/' + escHtml(uploadTarget.fixedName) + '.mp3</b>（文件名固定，不用管本地叫什么）。';
+        } else {
+          h.innerHTML = h.dataset.orig;   // 从提示音模式切回来时恢复原文案
+        }
+      }
+      uploadItems = [];
+      renderFileList();
+      const lg = document.getElementById('log');
+      if (lg) lg.innerHTML = '';
+      document.getElementById('uploadModal').classList.add('show');
+    }
     function closeUpload() { document.getElementById('uploadModal').classList.remove('show'); }
     // 点击遮罩空白处关闭弹窗
     (function () {
@@ -1616,7 +1881,10 @@
     // ===== 歌词转码 END =====
 
     // ===== 上传列表(探测结果 + 逐首处理方式) =====
-    let uploadItems = [];     // [{file, kind:'mp3'|'lrc', info, mode:'auto'|'transcode'|'skip'}]
+    // [{file, kind:'mp3'|'lrc'|'audio', info, mode:'auto'|'transcode'|'skip',
+    //   state:''|'transcode'|'upload'|'done'|'skip'|'fail', pct:0~100, text:行内状态文字}]
+    // state/pct 留在 item 上：setFileMode() 会整表重渲染，重渲染后进度条能照旧显示。
+    let uploadItems = [];
     let uploading = false;
 
     function escHtml(s) {
@@ -1625,8 +1893,17 @@
       });
     }
 
+    // 最终保存到设备上的文件名：提示音槽位强制固定名；非 MP3 转码后统一存为 .mp3
+    function uploadTargetName(it) {
+      if (it.kind === 'lrc') return it.file.name;
+      if (uploadTarget.fixedName) return uploadTarget.fixedName + '.mp3';
+      if (it.kind === 'audio') return it.file.name.replace(/\.[^.]+$/, '') + '.mp3';
+      return it.file.name;
+    }
+
     // 最终是否转码: 手动选择优先, auto 时按探测结果(解析失败/VBR 保守转码)。
     function willTranscode(it) {
+      if (it.kind === 'audio') return true;   // 非 MP3 一律转码（设备只认 MP3）
       if (it.kind !== 'mp3') return false;
       if (it.mode === 'transcode') return true;
       if (it.mode === 'skip') return false;
@@ -1643,6 +1920,20 @@
     };
     function lrcMarkText(enc) { return LRC_MARK[enc] || LRC_MARK['gbk']; }
 
+    // 行内进度条的一条（id 带上 idx，上传时靠它直接改那一行的进度，不整表重渲染）。
+    // state 为空（还没轮到这个文件）时先 hidden 占位，轮到它再显示 —— 这样 DOM 一直存在，
+    // 进度更新只需改样式，既不闪屏也不用重建表格。
+    function fprogHtml(it, idx) {
+      const st = it.state || '';
+      const cls = st ? (' ' + st) : '';
+      const hidden = st ? '' : ' hidden';
+      const width = (st === 'done' || st === 'skip' || st === 'fail') ? '100%'
+        : (st ? (it.pct || 0) + '%' : '0%');
+      return '<div class="fprog' + cls + '" id="fprog-' + idx + '"' + hidden + '>'
+        + '<div id="fbar-' + idx + '" style="width:' + width + '">'
+        + escHtml(it.text || '') + '</div></div>';
+    }
+
     function renderFileList() {
       const el = document.getElementById('flist');
       if (!el) return;
@@ -1651,21 +1942,48 @@
       uploadItems.forEach(function (it, idx) {
         const will = willTranscode(it);
         const mark = it.kind === 'lrc' ? lrcMarkText(it.lrcEnc)
-          : (will ? '将转码 → 24kHz 单声道 96kbps' : '无需转码，直接上传');
-        html += '<div class="fitem">'
-          + '<span class="fname">' + escHtml(it.file.name) + '</span>'
-          + '<span class="finfo">' + escHtml(it.kind === 'lrc' ? '' : mp3InfoText(it.info)) + '</span>'
+          : (it.kind === 'audio' ? '非 MP3 → 转码为 MP3' : (will ? '将转码 → 24kHz 单声道 96kbps' : '无需转码，直接上传'));
+        const savedAs = uploadTargetName(it);
+        html += '<div class="fitem" id="fit-' + idx + '">'
+          + '<span class="fname">' + escHtml(it.file.name)
+          + (savedAs !== it.file.name ? ' → ' + escHtml(savedAs) : '') + '</span>'
+          + '<span class="finfo">' + escHtml(it.kind === 'mp3' ? mp3InfoText(it.info) : '') + '</span>'
           + '<span class="fmark' + (will ? ' work' : '') + '">' + mark + '</span>';
         if (it.kind === 'mp3') {
-          html += '<select onchange="setFileMode(' + idx + ', this.value)">'
+          // 上传中禁用：改处理方式会整表重渲染，正在跑的进度条会跟丢
+          html += '<select' + (uploading ? ' disabled' : '') + ' onchange="setFileMode(' + idx + ', this.value)">'
             + '<option value="auto"' + (it.mode === 'auto' ? ' selected' : '') + '>自动</option>'
             + '<option value="transcode"' + (it.mode === 'transcode' ? ' selected' : '') + '>强制转码</option>'
             + '<option value="skip"' + (it.mode === 'skip' ? ' selected' : '') + '>不转码</option>'
             + '</select>';
         }
+        html += fprogHtml(it, idx);
         html += '</div>';
       });
       el.innerHTML = html;
+    }
+
+    // 更新某一条的状态 / 进度条（不重渲染整个列表）。
+    // pct 省略时保留原值；state 为空字符串表示清掉该条的进度显示。
+    function setItemState(idx, state, text, pct) {
+      const it = uploadItems[idx];
+      if (!it) return;
+      it.state = state;
+      it.text = text || '';
+      if (pct !== undefined) it.pct = pct;
+      const wrap = document.getElementById('fprog-' + idx);
+      const bar = document.getElementById('fbar-' + idx);
+      if (!wrap || !bar) return;
+      const firstShow = !!wrap.hidden;
+      wrap.hidden = false;
+      wrap.className = 'fprog' + (state ? ' ' + state : '');
+      const finished = (state === 'done' || state === 'skip' || state === 'fail');
+      bar.style.width = finished ? '100%' : (it.pct || 0) + '%';
+      bar.textContent = it.text;
+      bar.title = it.text;
+      // 该条刚出现进度条时滚到视野内：文件多时正在传的往往不在屏幕上（用户要“方便看现在在传哪个”）
+      const row = firstShow ? document.getElementById('fit-' + idx) : null;
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
     }
 
     // 选完文件立刻探测(只读文件头, 毫秒级; 不解码、不联网)
@@ -1676,37 +1994,54 @@
       renderFileList();
       if (!files.length) return;
       log.innerHTML = '<div>⏳ 正在检测文件参数 ...</div>';
-      for (const f of files) {
-        const isLrc = /\.lrc$/i.test(f.name);
-        if (!isLrc && !/\.mp3$/i.test(f.name)) {
-          log.innerHTML += '<div>⚠️ 跳过不支持的文件：' + escHtml(f.name) + '</div>';
+      // 提示音模式：一次只能传一个文件、且固定用槽位名（避免名字传错导致节点播报找不到文件）
+      const oneShot = uploadTarget.dir === 'announce';
+      const picked = oneShot ? (files.length ? [files[0]] : []) : Array.from(files);
+      const skipped = [];      // 不支持的文件：最后和「已选 N 个」一起显示（以前追加后会被下一句覆盖掉）
+      for (const f of picked) {
+        const isLrc = !oneShot && /\.lrc$/i.test(f.name);
+        const isMp3 = /\.mp3$/i.test(f.name);
+        const isAudio = !isLrc && !isMp3 && /\.(wav|m4a|mp4|aac|flac|ogg|opus|weba|webm|mpeg|mpga)$/i.test(f.name);
+        if (!isLrc && !isMp3 && !isAudio) {
+          skipped.push(f.name);
           continue;
         }
         let info = null, lrcEnc = null;
         if (isLrc) {
           // 探测失败按 gbk 处理(保守: 转一遍总比设备端整篇不显示好)
           try { lrcEnc = await lrcProbe(f); } catch (e) { lrcEnc = 'gbk'; }
-        } else {
+        } else if (isMp3) {
           try { info = await mp3ProbeFile(f); } catch (e) { info = null; }
         }
         uploadItems.push({
-          file: f, kind: isLrc ? 'lrc' : 'mp3', info: info, mode: 'auto',
+          file: f,
+          kind: isLrc ? 'lrc' : (isMp3 ? 'mp3' : 'audio'),
+          info: info,
+          // 非 MP3 必须转码成 MP3 才能在设备上播放，不能走"直接上传"分支
+          mode: isAudio ? 'transcode' : 'auto',
           lrcEnc: lrcEnc
         });
       }
-      log.innerHTML = '<div>已选 ' + uploadItems.length + ' 个文件，确认处理方式后点「上传」</div>';
+      let tip = '<div>已选 ' + uploadItems.length + ' 个文件，确认处理方式后点「上传」</div>';
+      if (skipped.length) {
+        tip += '<div>⚠️ 跳过不支持的文件：' + escHtml(skipped.join('、')) + '</div>';
+      }
+      log.innerHTML = tip;
       renderFileList();
     }
 
-    // 上传一个 Blob/File 到设备端 /upload
-    function uploadOne(name, blob) {
-      const bar = document.getElementById('bar');
+    // 上传一个 Blob/File 到设备端 /upload；进度直接写回**第 idx 条文件自己**的进度条
+    function uploadOne(name, blob, idx) {
       return new Promise(function (resolve, reject) {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/upload?name=' + encodeURIComponent(name) +
+          '&dir=' + encodeURIComponent(uploadTarget.dir) +
           '&overwrite=' + (document.getElementById('ov').checked ? 1 : 0));
         xhr.upload.onprogress = function (e) {
-          if (e.lengthComputable) { const p = Math.round(e.loaded / e.total * 100); bar.style.width = p + '%'; bar.textContent = p + '%'; }
+          if (e.lengthComputable) {
+            const p = Math.round(e.loaded / e.total * 100);
+            setItemState(idx, 'upload', '上传 ' + p + '%', p);
+          }
         };
         xhr.onload = function () { resolve({ status: xhr.status, text: xhr.responseText }); };
         xhr.onerror = function () { reject(new Error('网络错误')); };
@@ -1715,59 +2050,78 @@
     }
 
     // ===== 上传 =====
+    // 进度与结果都落在**各自文件那一行**（用户反馈：按钮下方的全局进度条离正在传的那条太远，
+    // 一次几十个文件时根本看不出传到哪了）；#log 只留汇总和需要细看的异常，
+    // 不再逐条写「上传 xxx / 成功 xxx」，否则几十个文件会把弹窗拉得很长。
     async function up() {
       const log = document.getElementById('log');
-      const bar = document.getElementById('bar');
       if (uploading) return;
       if (!uploadItems.length) { log.innerHTML = '<div>请先选择文件</div>'; return; }
       uploading = true;
+      renderFileList();        // 上传中把下拉框置灰（改动会整表重渲染，进度条会跟丢）
+      log.innerHTML = '';
       let ok = 0, fail = 0;
       try {
-        for (const it of uploadItems) {
-          const name = it.file.name;
-          let blob = it.file, note = '';
+        for (let idx = 0; idx < uploadItems.length; idx++) {
+          const it = uploadItems[idx];
+          const name = uploadTargetName(it);
+          let blob = it.file;
+          let doneText = '✅ 完成';
           try {
             if (it.kind === 'lrc') {
               if (it.lrcEnc === 'utf-8') {
-                note = '（已是 UTF-8，原样上传）';   // 一个字节都不改, 直接传原文件
+                // 一个字节都不改, 直接传原文件（处理方式已在行首写着）
               } else {
                 blob = await lrcToUtf8(it.file);
-                note = it.lrcEnc === 'gbk' ? '（歌词 GBK → UTF-8）' : '（歌词去 BOM）';
+                doneText = it.lrcEnc === 'gbk' ? '✅ 完成（歌词 GBK → UTF-8）' : '✅ 完成（歌词去 BOM）';
               }
             } else if (willTranscode(it)) {
-              log.innerHTML += '<div>⏳ 转码 ' + escHtml(name) + ' ...</div>';
+              setItemState(idx, 'transcode', '转码 0%', 0);
               blob = await transcodeMp3(it.file, function (p) {
-                bar.style.width = Math.round(p * 100) + '%';
-                bar.textContent = '转码 ' + Math.round(p * 100) + '%';
+                const q = Math.round(p * 100);
+                setItemState(idx, 'transcode', '转码 ' + q + '%', q);
               });
-              note = '（已转码 24kHz 单声道 96kbps）';
-            } else {
-              note = '（无需转码）';
+              doneText = '✅ 完成（已转码 24kHz 单声道 96kbps）';
             }
           } catch (e) {
-            // 转码组件加载失败(通常是无网络)时回退为直接上传原文件, 不阻断整个流程
-            log.innerHTML += '<div>⚠️ 转码失败（' + escHtml(e && e.message ? e.message : e) +
-              '），改为直接上传原文件（设备端可能卡顿）</div>';
-            blob = it.file;
-            note = '（未转码）';
+            const msg = (e && e.message) ? e.message : e;
+            if (it.kind === 'mp3') {
+              // 转码组件加载失败(通常是无网络)时回退为直接上传原文件, 不阻断整个流程
+              log.innerHTML += '<div>⚠️ ' + escHtml(name) + ' 转码失败（' + escHtml(msg) +
+                '），改为直接上传原文件（设备端可能卡顿）</div>';
+              blob = it.file;
+              doneText = '✅ 完成（未转码，设备端可能卡顿）';
+            } else {
+              // 非 MP3 无法回退：设备端只能播 MP3，传原文件等于传了个播不出来的东西
+              setItemState(idx, 'fail', '❌ 必须转码后才能播放');
+              log.innerHTML += '<div>❌ ' + escHtml(name) + ' 转码失败（' + escHtml(msg) +
+                '）：该格式必须转码后才能播放；请联网后重试，或先把文件转成 MP3</div>';
+              fail++;
+              continue;
+            }
           }
-          log.innerHTML += '<div>⏳ 上传 ' + escHtml(name) + ' ' + note + ' ...</div>';
+          setItemState(idx, 'upload', '上传 0%', 0);
           try {
-            const r = await uploadOne(name, blob);
-            if (r.status >= 200 && r.status < 300) { log.innerHTML += '<div>✅ 成功 ' + escHtml(name) + '</div>'; ok++; }
-            else if (r.status === 403) { log.innerHTML += '<div>⚠️ 同名已存在，跳过 ' + escHtml(name) + '</div>'; ok++; }
-            else { log.innerHTML += '<div>❌ 失败(' + r.status + ') ' + escHtml(name) + ' ' + escHtml(r.text || '') + '</div>'; fail++; }
+            const r = await uploadOne(name, blob, idx);
+            if (r.status >= 200 && r.status < 300) { setItemState(idx, 'done', doneText); ok++; }
+            else if (r.status === 403) { setItemState(idx, 'skip', '⚠️ 同名文件已存在，跳过'); ok++; }
+            else {
+              setItemState(idx, 'fail', '❌ 失败(' + r.status + ')');
+              log.innerHTML += '<div>❌ ' + escHtml(name) + ' 上传失败(' + r.status + ') ' +
+                escHtml(r.text || '') + '</div>';
+              fail++;
+            }
           } catch (e) {
-            log.innerHTML += '<div>❌ 网络错误 ' + escHtml(name) + '</div>';
+            setItemState(idx, 'fail', '❌ 网络错误');
+            log.innerHTML += '<div>❌ ' + escHtml(name) + ' 网络错误</div>';
             fail++;
           }
-          bar.style.width = '0%'; bar.textContent = '0%';
         }
         log.innerHTML += '<div><b>全部完成</b>：成功 ' + ok + '，失败 ' + fail + '</div>';
-        loadSongs();
+        if (uploadTarget.dir === 'announce') loadAnnounces(); else loadSongs();
       } finally {
         uploading = false;
-        bar.style.width = '0%'; bar.textContent = '0%';
+        renderFileList();      // 解锁下拉框（进度状态存在 item 上，重渲染后照旧显示）
       }
     }
     // ===== 歌曲管理 =====
@@ -1830,6 +2184,82 @@
         })
         .catch(() => { document.getElementById('muslog').innerHTML = '<div>❌ 删除失败（接口不可用）</div>'; });
     }
+    // ===== 提示音（TF 卡 /sdcard/announce）=====
+    // 文件名必须与节点上报的事件名一致（固件里 queueSay("motion"/"hot"/"beam")），
+    // 所以这里用固定槽位：用户只需点"上传"，不用关心本地文件叫什么，不可能传错名字。
+    const ANNOUNCE_SLOTS = [
+      { name: 'motion', desc: '有人靠近、自动开灯时' },
+      { name: 'hot', desc: '温度超过阈值时' },
+      { name: 'beam', desc: '红外避障检测到障碍时' }
+    ];
+    let announceFiles = null;   // null = 接口不可用；[] = 目录为空
+    function loadAnnounces() {
+      wsSend({ action: 'music_list', dir: 'announce' })
+        .then(t => {
+          announceFiles = (t && Array.isArray(t.data)) ? t.data : null;
+          renderAnnounces();
+          const log = document.getElementById('annlog');
+          if (log) log.innerHTML = '';
+        })
+        .catch(() => { announceFiles = null; renderAnnounces(); });
+    }
+    function renderAnnounces() {
+      const tb = document.querySelector('#announceTable tbody');
+      if (!tb) return;
+      tb.innerHTML = '';
+      ANNOUNCE_SLOTS.forEach(function (slot) {
+        const fname = slot.name + '.mp3';
+        const f = (announceFiles || []).find(function (x) {
+          return String(x.name).toLowerCase() === fname;
+        });
+        const tr = document.createElement('tr');
+        const tdN = document.createElement('td');
+        tdN.setAttribute('data-label', '提示音');
+        tdN.textContent = fname;
+        const tdD = document.createElement('td');
+        tdD.setAttribute('data-label', '什么时候播');
+        tdD.textContent = slot.desc;
+        const tdS = document.createElement('td');
+        tdS.setAttribute('data-label', '状态');
+        if (announceFiles === null) {
+          tdS.innerHTML = '<span class="finfo">接口不可用</span>';
+        } else if (f) {
+          tdS.textContent = '✅ 已上传 ' + fmtSize(f.size || 0);
+        } else {
+          tdS.innerHTML = '<b style="color:#c62828">未上传</b>';
+        }
+        const tdO = document.createElement('td');
+        tdO.setAttribute('data-label', '操作');
+        const btnUp = document.createElement('button');
+        btnUp.className = 'btn';
+        btnUp.textContent = f ? '替换' : '上传';
+        btnUp.onclick = function () { openUpload('announce', slot.name); };
+        tdO.appendChild(btnUp);
+        if (f) {
+          const btnDel = document.createElement('button');
+          btnDel.className = 'btn btn-danger';
+          btnDel.style.marginLeft = '6px';
+          btnDel.textContent = '删除';
+          btnDel.onclick = function () { delAnnounce(slot.name); };
+          tdO.appendChild(btnDel);
+        }
+        tr.appendChild(tdN); tr.appendChild(tdD); tr.appendChild(tdS); tr.appendChild(tdO);
+        tb.appendChild(tr);
+      });
+    }
+    function delAnnounce(name) {
+      if (!confirm('确定删除提示音「' + name + '.mp3」？')) return;
+      wsSend({ action: 'music_delete', name: name + '.mp3', dir: 'announce' })
+        .then(j => {
+          document.getElementById('annlog').innerHTML = '<div>' +
+            (j.ok ? '✅ 已删除 ' + name + '.mp3' : '❌ 删除失败: ' + (j.error || '未知错误')) + '</div>';
+          loadAnnounces();
+        })
+        .catch(() => {
+          document.getElementById('annlog').innerHTML = '<div>❌ 删除失败（接口不可用）</div>';
+        });
+    }
+
     // ===== 闹钟 =====
     function fmtSec(s) { var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return ('0' + h).slice(-2) + ':' + ('0' + m).slice(-2); }
     // 填充"选择铃声"下拉：每次切入闹钟 tab 都刷新，保证能选到刚上传的歌
@@ -1901,11 +2331,164 @@
         })
         .catch(() => { document.getElementById('alarmlog').innerHTML = '<div>❌ 删除失败（接口不可用）</div>'; });
     }
+    // ===== 实时视频流（MJPEG）=====
+    // 设备端用官方做法推 multipart/x-mixed-replace（独立 httpd，端口 81），
+    // 浏览器 <img> 原生即可显示，**前端不需要任何解码代码**。
+    // 勾选才向设备申请：设备切相机到 JPEG 模式（模组直出、零编码零拷贝）并启服务；
+    // 取消则断流 + 让设备切回 RGB565（拍照与 LCD 预览恢复）。没人看时设备不抓帧。
+    function videoStreamUrl() { return 'http://' + location.hostname + ':81/stream'; }
+    // 画面上的提示层：设备没连上/服务没起时给一行说明，不留空白也不显破图。
+    function videoSetHint(text) {
+      const h = document.getElementById('videoHint');
+      if (!h) return;
+      if (!text) { h.style.display = 'none'; h.textContent = ''; return; }
+      h.textContent = text;
+      h.style.display = 'flex';
+    }
+    // 只出框 + 清提示：设备还没回应时先让用户看到视频区（框里给状态文案）。
+    // **不连流** —— /stream 在设备端 81 端口，服务没起来就设 src 必然会失败。
+    function videoShowBox() {
+      const img = document.getElementById('videoImg');
+      if (img) img.style.visibility = 'visible';  // 上次失败可能被隐藏过
+      const wrap = document.getElementById('videoWrap');
+      if (wrap) wrap.style.display = 'block';
+      videoSetHint('');
+    }
+    // 连流：**必须在设备端 /stream 服务就绪（video_start 返回 ok）之后调用**。
+    // 反例（曾经的 bug）：在 video_start 之前就设 src，此时 81 端口还没监听，
+    // 浏览器立刻拿到 connection refused 触发 error → 首次勾选必现“接口不可用”，
+    // 切走再切回（切走会 removeAttribute('src')，切回重新设）才正常。
+    function videoOpen() {
+      const img = document.getElementById('videoImg');
+      if (!img) return;
+      videoShowBox();
+      if (img.getAttribute('src')) return;  // 已连着就不重复设
+      img.src = videoStreamUrl();
+    }
+    function videoClose() {
+      const img = document.getElementById('videoImg');
+      if (!img) return;
+      img.removeAttribute('src');   // 断开 MJPEG 长连接（浏览器随即关掉这个请求）
+      document.getElementById('videoWrap').style.display = 'none';
+      document.getElementById('videoCorner').textContent = '0fps';  // 角标回到默认值
+      videoSetHint('');
+    }
+    function toggleVideo(chk) {
+      if (!chk.checked) { videoClose(); wsSend({ action: 'video_stop' }); return; }
+      videoShowBox();                     // 先出框（不等设备回应，没连设备也看得到框）
+      videoSetHint('正在连接视频…');
+      wsSend({ action: 'video_start' })
+        .then(function (resp) {
+          if (!resp || resp.ok !== true) {
+            videoSetHint('接口不可用：' + ((resp && resp.error) || '视频服务启动失败'));
+            document.getElementById('videoCorner').textContent = '0fps';
+            return;
+          }
+          videoOpen();                    // 服务已就绪，这时设 <img src> 才不会失败
+        })
+        .catch(function () {
+          videoSetHint('接口不可用：未连接设备');
+          document.getElementById('videoCorner').textContent = '0fps';
+        });
+    }
+    // <img> 连不上（设备没连/服务没起）时别显浏览器的破图图标
+    (function () {
+      const img = document.getElementById('videoImg');
+      if (!img) return;
+      img.addEventListener('error', function () {
+        img.style.visibility = 'hidden';
+        videoSetHint('接口不可用：未连接设备，或视频服务未启动');
+        document.getElementById('videoCorner').textContent = '0fps';
+      });
+    })();
+    // 设备侧每秒经 WS 推一次实测帧率/分辨率：浏览器对 MJPEG <img> 不暴露逐帧事件，拿不到帧率。
+    function updateVideoStat(j) {
+      const corner = document.getElementById('videoCorner');
+      if (!corner) return;
+      if (!j.video) { corner.textContent = '0fps'; return; }
+      corner.textContent = (j.fps ? j.fps.toFixed(1) : '0') + 'fps ' + j.w + '×' + j.h;
+    }
+    // ===== 视频参数设置（⚙️ 弹窗）=====
+    // 参数存**设备 NVS**：改一次永久有效，断电重启仍生效，不用重烧固件。
+    // 帧率、镜像/翻转、质量、分辨率全部立即生效（分辨率走 sensor 的 set_framesize，不重启相机）。
+    //
+    // 没连设备也要能看能改：把最近一次的值缓存在浏览器 localStorage，
+    // 打开弹窗先用缓存填上（否则离线时下拉全是默认值、看不出真实设置），
+    // 设备连上后再以设备为准。
+    function videoCfgCacheGet() {
+      try { return JSON.parse(localStorage.getItem('videoCfg') || 'null'); } catch (e) { return null; }
+    }
+    function videoCfgCacheSet(o) {
+      try { localStorage.setItem('videoCfg', JSON.stringify(o)); } catch (e) { }
+    }
+    function fillVideoCfg(o) {
+      document.getElementById('vcfgSize').value = String(o.size);
+      document.getElementById('vcfgFps').value = String(o.fps);
+      document.getElementById('vcfgQuality').value = String(o.quality);
+      document.getElementById('vcfgMirror').checked = !!(o.flip & 1);
+      document.getElementById('vcfgFlip').checked = !!(o.flip & 2);
+    }
+    function openVideoCfg() {
+      const msg = document.getElementById('vcfgMsg');
+      document.getElementById('videoCfgModal').classList.add('show');  // 先开窗：离线也能看/改
+      const cached = videoCfgCacheGet();
+      // 没缓存时也要填成**设备默认值**：否则下拉会停在第一项（320×240/5fps），
+      // 看着像真实设置，实际不是。
+      fillVideoCfg(cached || { size: 1, fps: 20, quality: 12, flip: 0 });
+      msg.textContent = cached ? '显示上次保存的值，正在读取设备…' : '读取中…';
+      wsSend({ action: 'video_cfg_get' })
+        .then(function (r) {
+          if (!r || r.ok !== true) {
+            msg.textContent = '读不到设备：显示的是上次保存的值，连上设备后再点「应用」';
+            return;
+          }
+          fillVideoCfg(r);
+          videoCfgCacheSet({ size: r.size, fps: r.fps, quality: r.quality, flip: r.flip });
+          msg.textContent = '';
+        })
+        .catch(function () {
+          msg.textContent = '读不到设备：显示的是上次保存的值，连上设备后再点「应用」';
+        });
+    }
+    function closeVideoCfg() { document.getElementById('videoCfgModal').classList.remove('show'); }
+    function applyVideoCfg(size, fps, quality, flip) {
+      const msg = document.getElementById('vcfgMsg');
+      videoCfgCacheSet({ size: size, fps: fps, quality: quality, flip: flip });  // 离线也能记住
+      msg.textContent = '应用中…';
+      wsSend({ action: 'video_cfg_set', size: size, fps: fps, quality: quality, flip: flip })
+        .then(function (r) {
+          if (!r || r.ok !== true) { msg.textContent = '应用失败：' + ((r && r.error) || '未知错误'); return; }
+          msg.textContent = '已应用';
+          // 分辨率变化也不用重连 <img>：MJPEG 里每帧是独立 JPEG（自带尺寸），
+          // 浏览器逐帧替换显示，流本身从没断过 → 重连只会白断画面 500ms。
+          setTimeout(closeVideoCfg, 700);
+        })
+        .catch(function () { msg.textContent = '连不上设备：设置已暂存，连上后再点一次「应用」'; });
+    }
+    function saveVideoCfg() {
+      const flip = (document.getElementById('vcfgMirror').checked ? 1 : 0) |
+        (document.getElementById('vcfgFlip').checked ? 2 : 0);
+      applyVideoCfg(Number(document.getElementById('vcfgSize').value),
+        Number(document.getElementById('vcfgFps').value),
+        Number(document.getElementById('vcfgQuality').value), flip);
+    }
+    function resetVideoCfg() {
+      fillVideoCfg({ size: 1, fps: 20, quality: 12, flip: 0 });
+      applyVideoCfg(1, 20, 12, 0);
+    }
+    (function () {
+      const m = document.getElementById('videoCfgModal');
+      if (m) m.addEventListener('click', function (e) { if (e.target === this) closeVideoCfg(); });
+    })();
+
     // ===== 机器人控制(遥感摇杆) =====
     // 手感参数集中在此处便于微调(改完需重新编译固件 + 浏览器强刷 Ctrl+F5)
     const JOY_R = 72, JOY_DEAD = 0.14;         // 摇杆半径(px) / 回中死区
-    const TURN_SPEED = 110;                    // 「左转/右转」按钮的固定转速(PWM 70-255)
-    const TURN_MIN_PRESS_MS = 250;             // 「左转/右转」点一下的最短转动时长(ms)
+    // 2026-09 实测反馈：转得太快、容易转过头 → 从 110/250 调低。
+    // 点一下的转弯幅度 ≈ TURN_SPEED × TURN_MIN_PRESS_MS（现约原来的一半，角速度也慢一些）。
+    // 下限提醒：TURN_SPEED 不能低于 70（下位机 PWM 下限），否则可能转不动。
+    const TURN_SPEED = 80;                     // 「左转/右转」按钮的固定转速(PWM 70-255)
+    const TURN_MIN_PRESS_MS = 160;             // 「左转/右转」点一下的最短转动时长(ms)
     const JOY_SECTORS = ['forward', 'rightup', 'rightmove', 'rightdown', 'back', 'leftdown', 'leftmove', 'leftup'];
     const JOY_NAMES = { forward: '前进', back: '后退', left: '左转', right: '右转', leftmove: '左移', rightmove: '右移', leftup: '左前', rightup: '右前', leftdown: '左后', rightdown: '右后' };
     let unoInterval = null, unoPollTimer = null, unoCurDir = '', unoCurSpeed = 0;

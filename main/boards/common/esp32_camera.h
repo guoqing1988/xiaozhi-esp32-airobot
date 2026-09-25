@@ -42,9 +42,23 @@ private:
     };
     static size_t JpegEncodeCb(void *arg, size_t index, const void *data, size_t len);
 
+    // 释放当前帧/编码缓冲并 deinit（析构与 Reinit 共用；可重复调用）
+    void Release();
+    // 套用与构造函数相同的 sensor 设置（GC0308 特例 + Kconfig 的 mirror/flip）
+    void ApplySensorSettings(const camera_config_t &config);
+
 public:
     Esp32Camera(const camera_config_t &config);
     ~Esp32Camera();
+
+    // 用新配置重新初始化相机（先彻底释放再 init，并重新套用 sensor 设置）。
+    // ⚠ **本板（面包板 AI 机器人）已不再使用它**：相机改为开机按 JPEG 初始化一次、全程
+    //    不切格式（原因见板子 README「为什么要单一模式」：内部 SRAM 最大连续块实测只有
+    //    ~12.8KB，而 RGB565 要 30720、JPEG 要 16384 —— 一旦 deinit 过就再也 init 不回来，
+    //    拍照与视频会双双失效且只能重启）。方法保留给确实需要切换像素格式的调用方。
+    // ⚠ 会丢弃 current_fb_ 与 encode_buf_（调用方需确保没有在用）；
+    // 失败返回 false 且相机处于**未初始化**状态，调用方必须处理（通常回退到原配置）。
+    bool Reinit(const camera_config_t &config);
 
     virtual void SetExplainUrl(const std::string &url, const std::string &token) override;
     virtual bool Capture() override;
@@ -53,12 +67,26 @@ public:
     virtual bool SetSwapBytes(bool enabled) override;
     virtual std::string Explain(const std::string &question) override;
 
-    // 把**已捕获**的当前帧(RGB565)编码成 JPEG 写入 out（网页拍照用）。
-    // 为什么不另抓一帧：本板 fb_count=1，帧池只有一块；另开帧缓冲
+    // 把**已捕获**的当前帧编码/取出成 JPEG 写入 out（网页拍照用）。
+    // 为什么不让相机多抓一帧：本板 fb_count=1，帧池只有一块；另开帧缓冲
     // (fb_count=2) 会让 cam_hal 多占 ~30KB DMA **内部** RAM，本板内部 SRAM 扛不住。
     // 前置条件：先调用 Capture() 成功。返回是否成功，成功时 out_len 为 JPEG 字节数。
-    // 复用与 Explain() 相同的字节序处理与编码参数；编码期间不可并发调用 Capture()。
+    // 帧是 RGB565 时按 Explain() 同一套字节序与参数做软件编码；
+    // 帧是 JPEG 时**直接拷贝**（相机已直出，不必也不该再编码）。
+    // 编码期间不可并发调用 Capture()。
     bool EncodeCurrentFrameToJpeg(uint8_t *out, size_t out_capacity, size_t &out_len);
+
+    // 把 Capture() 借来的驱动帧立刻还给驱动（幂等，可重复调用）。
+    //
+    // ⚠ 本板**必须**有人调它：`fb_count=1`（内部 SRAM 只够一块帧缓冲），驱动侧可用帧只有一个 ——
+    //   `Capture()` 取走后不还，cam_hal 就再没有空闲缓冲可采集（cam_give 的 en 标志永远为 0），
+    //   此后**所有** `esp_camera_fb_get()` 都会等满 4000ms 超时返回 NULL：
+    //   现象是网页实时视频流一帧都拿不到（日志每 ~4 秒刷 `cam_hal: Failed to get frame: timeout`
+    //   + `LocalVideo: fb_get failed`），且**只能重启恢复**（真机 2026-09）。
+    //   AI 拍照（Explain）在函数任一出口自动归还；网页拍照（LocalPhotoCapture）编码完必须自己调。
+    // ⚠ 前提：编码线程已结束（`Release()`/`Capture()` 都会先 join）。提前调会让还在读
+    //   `current_fb_->buf` 的编码线程与驱动刚采集的新帧数据打架。
+    void ReleaseCurrentFrame();
 
     // 注册/注销 JPEG 观察者：Explain() 编码完成时（拿到**完整** JPEG 的那一刻）回调。
     // 板级用它把 AI 拍的照片顺手存进 TF 卡；默认未注册 → 行为与以前完全一致。

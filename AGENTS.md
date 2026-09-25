@@ -36,7 +36,7 @@ Read the closest existing implementation before adding a new one. Prefer the nar
 - Keep shared message semantics in `Protocol`; verify both transports when changing its contract.
 - Validate network input and preserve `cJSON` ownership. NVS keys are persistent API and require migration when changed.
 - Guard target-specific features with Kconfig/component rules. Do not assume every target has PSRAM or S3/P4 resources.
-- Do not manually edit generated/vendor output: `build/`, `releases/`, `managed_components/`, `components/`, `sdkconfig*`, `main/assets/lang_config.h`, or generated mmap headers.
+- Do not manually edit generated/vendor output: `build/`, `releases/`, `managed_components/`, `components/`, `sdkconfig*`, `main/assets/lang_config.h`, or generated mmap headers. The only exception is temporary debugging: you may modify such a file to diagnose an issue (e.g. adding a missing `managed_components/<name>/.component_hash` to confirm a component-integrity failure), but you must restore the original state once debugging is done. Never leave a hand-edited vendor/build file behind — state what you changed and confirm the restore.
 - Format only touched C/C++ files with the repository `.clang-format`; avoid unrelated mass formatting.
 - Prefer official Espressif/vendor components and the C/C++ standard library over writing custom parsers or decoders. Reuse existing in-repo implementations before writing new code; keep any change to core modules additive and minimal.
 

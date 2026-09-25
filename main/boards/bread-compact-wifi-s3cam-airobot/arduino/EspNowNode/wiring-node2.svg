@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 节点 2「玄关感应」接线图：ESP32-S3 + DHT11 + 红外避障模块
+     与 EspNowNode.ino（NODE_ID=2）的引脚定义一一对应。
+     画法：线与线交叉处用白底"跳线"断开，表示不相连；模块引脚物理排列以实物丝印为准。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 740" width="1000" height="740"
+     font-family="'Microsoft YaHei','PingFang SC','Noto Sans CJK SC',Arial,sans-serif">
+  <rect x="0" y="0" width="1000" height="740" fill="#ffffff"/>
+
+  <text x="24" y="36" font-size="20" font-weight="bold" fill="#111827">节点 2「玄关感应」接线：ESP32-S3 + DHT11 + 红外避障模块</text>
+
+  <!-- ============ 连线：每条线先画白色粗底再画彩线，
+       后画的线会在交叉处形成"跳线"缺口（表示不相连） ============ -->
+
+  <!-- 信号线（蓝）：GPIO4 -> DHT11 DATA，GPIO5 -> 红外避障 OUT -->
+  <g fill="none">
+    <path d="M250 290 H620" stroke="#ffffff" stroke-width="8"/>
+    <path d="M250 290 H620" stroke="#2563eb" stroke-width="3"/>
+    <path d="M250 520 H620" stroke="#ffffff" stroke-width="8"/>
+    <path d="M250 520 H620" stroke="#2563eb" stroke-width="3"/>
+  </g>
+
+  <!-- 地线（黑）：GND -> DHT11 GND，并从 GND 引出到红外避障 GND -->
+  <g fill="none">
+    <path d="M250 205 H620" stroke="#ffffff" stroke-width="8"/>
+    <path d="M250 205 H620" stroke="#111827" stroke-width="3"/>
+    <path d="M580 205 V485 H620" stroke="#ffffff" stroke-width="8"/>
+    <path d="M580 205 V485 H620" stroke="#111827" stroke-width="3"/>
+  </g>
+
+  <!-- 电源（红）：3V3 -> DHT11 VCC，并从 3V3 引出到红外避障 VCC -->
+  <g fill="none">
+    <path d="M250 170 H620" stroke="#ffffff" stroke-width="8"/>
+    <path d="M250 170 H620" stroke="#dc2626" stroke-width="3"/>
+    <path d="M560 170 V450 H620" stroke="#ffffff" stroke-width="8"/>
+    <path d="M560 170 V450 H620" stroke="#dc2626" stroke-width="3"/>
+  </g>
+
+  <!-- ============ 模块方框 ============ -->
+  <!-- ESP32-S3 -->
+  <rect x="40" y="90" width="210" height="480" rx="12" fill="#f3f4f6" stroke="#374151" stroke-width="2"/>
+  <text x="145" y="122" text-anchor="middle" font-size="17" font-weight="bold" fill="#111827">ESP32-S3</text>
+  <text x="145" y="146" text-anchor="middle" font-size="12" fill="#6b7280">（USB 5V 供电）</text>
+
+  <!-- DHT11 -->
+  <rect x="620" y="90" width="340" height="260" rx="12" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
+  <text x="790" y="122" text-anchor="middle" font-size="17" font-weight="bold" fill="#14532d">DHT11 温湿度（3 线模块）</text>
+  <text x="790" y="146" text-anchor="middle" font-size="12" fill="#166534">模块自带 4.7k 上拉，无需外接</text>
+  <text x="790" y="335" text-anchor="middle" font-size="12" fill="#166534">单总线，固件按 DHT11 类型读（≤1Hz，5 秒一次）</text>
+
+  <!-- 红外避障模块 -->
+  <rect x="620" y="400" width="340" height="200" rx="12" fill="#fae8ff" stroke="#a21caf" stroke-width="2"/>
+  <text x="790" y="432" text-anchor="middle" font-size="17" font-weight="bold" fill="#701a75">红外避障模块（门禁遮挡）</text>
+  <text x="790" y="585" text-anchor="middle" font-size="12" fill="#86198f">只接数字输出 OUT（低电平 = 检测到障碍），反射式 2~30cm</text>
+
+  <!-- ============ 引脚名 + 连接点 ============ -->
+  <g font-size="14" fill="#111827">
+    <text x="232" y="175" text-anchor="end">3V3</text>
+    <text x="232" y="210" text-anchor="end">GND</text>
+    <text x="232" y="295" text-anchor="end">GPIO4</text>
+    <text x="232" y="525" text-anchor="end">GPIO5</text>
+  </g>
+  <g font-size="14" fill="#111827">
+    <text x="640" y="175">VCC（+）</text>
+    <text x="640" y="210">GND（-）</text>
+    <text x="640" y="295">DATA（out）</text>
+  </g>
+  <g font-size="14" fill="#111827">
+    <text x="640" y="455">VCC</text>
+    <text x="640" y="490">GND</text>
+    <text x="640" y="525">OUT</text>
+  </g>
+
+  <!-- 连接点（圆点） -->
+  <g>
+    <circle cx="250" cy="170" r="4" fill="#dc2626"/>
+    <circle cx="250" cy="205" r="4" fill="#111827"/>
+    <circle cx="250" cy="290" r="4" fill="#2563eb"/>
+    <circle cx="250" cy="520" r="4" fill="#2563eb"/>
+    <circle cx="620" cy="170" r="4" fill="#dc2626"/>
+    <circle cx="620" cy="205" r="4" fill="#111827"/>
+    <circle cx="620" cy="290" r="4" fill="#2563eb"/>
+    <circle cx="620" cy="450" r="4" fill="#dc2626"/>
+    <circle cx="620" cy="485" r="4" fill="#111827"/>
+    <circle cx="620" cy="520" r="4" fill="#2563eb"/>
+    <!-- 分支点：3V3 与 GND 的引出点（实心大点 = 电气相连） -->
+    <circle cx="560" cy="170" r="5" fill="#dc2626"/>
+    <circle cx="580" cy="205" r="5" fill="#111827"/>
+  </g>
+
+  <!-- ============ 图例与注意事项 ============ -->
+  <g font-size="13" fill="#374151">
+    <path d="M40 632 H92" stroke="#dc2626" stroke-width="3"/>
+    <text x="100" y="637">3V3 电源</text>
+    <path d="M200 632 H252" stroke="#111827" stroke-width="3"/>
+    <text x="260" y="637">GND</text>
+    <path d="M330 632 H382" stroke="#2563eb" stroke-width="3"/>
+    <text x="390" y="637">信号线（GPIO → 模块）</text>
+  </g>
+  <g font-size="13" fill="#374151">
+    <text x="40" y="670">① DHT11 用 3 线模块（+ / out / -）：VCC→3V3，DATA→GPIO4，GND→GND；模块自带上拉，DHT11 本身 ≤1Hz</text>
+    <text x="40" y="692">② 红外避障模块 OUT→GPIO5（低电平=检测到障碍，反射式 2~30cm，超 30cm/黑色物体测不到）；极性反了就改 OBSTACLE_ACTIVE_LOW</text>
+    <text x="40" y="714">③ 本节点不接 RGB 灯（GPIO6 悬空）；烧录前必须把固件顶部 NODE_ID 改成 2；模块引脚排列以丝印为准</text>
+  </g>
+</svg>

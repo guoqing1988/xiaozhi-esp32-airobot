@@ -104,8 +104,12 @@ class TestWebPageStaticChecks(unittest.TestCase):
         用户以为已转好的歌词又被改写了。
         """
         html = self.page_html()
-        self.assertIn("if (it.lrcEnc === 'utf-8')", html, "up() 缺少已是 UTF-8 的分支")
-        self.assertIn("（已是 UTF-8，原样上传）", html, "缺少原样上传的提示文案")
+        # 分支里**不得**出现 lrcToUtf8：已是 UTF-8 就原样传原文件（文案挪到行首 fmark，
+        # 由 LRC_MARK 提供，见下面的断言）—— 上传结果现在显示在该行的进度条里。
+        m = re.search(r"if \(it\.lrcEnc === 'utf-8'\)\s*\{(.*?)\} else \{", html, re.S)
+        self.assertIsNotNone(m, "up() 缺少已是 UTF-8 的分支")
+        self.assertNotIn("lrcToUtf8", m.group(1), "已是 UTF-8 时不得再转一遍")
+        self.assertIn("已是 UTF-8，直接上传", html, "缺少原样上传的提示文案")
         self.assertIn("lrcEnc = await lrcProbe(f)", html, "选文件时必须探测歌词编码")
         for enc in ("'utf-8'", "'utf-8-bom'", "'gbk'"):
             self.assertIn(enc + ":", html, f"LRC_MARK 缺少 {enc} 的处理方式提示")

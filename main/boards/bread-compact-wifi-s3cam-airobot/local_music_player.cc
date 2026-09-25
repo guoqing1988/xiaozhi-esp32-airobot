@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <algorithm>
 #include <random>
 #include <chrono>
@@ -22,6 +23,9 @@
 #define TAG "LocalMusicPlayer"
 
 #define MUSIC_DIR "/sdcard/music"
+
+// 预录播报音频目录（独立于 MUSIC_DIR：不进歌曲列表/播放队列，避免被 self.music.list 当成歌）
+#define ANNOUNCE_DIR "/sdcard/announce"
 
 namespace {
 // std::thread 底层 pthread 默认栈仅 3KB(CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=3072)，
@@ -177,7 +181,19 @@ LocalMusicPlayer::~LocalMusicPlayer() {
     }
 }
 
+// 确保 /sdcard/announce 存在。该目录过去不随固件生成：若从未上传过提示音，
+// 网页上传会报 "cannot create file on SD card"，播报也永远打不开文件。
+// （上传路径另有一份 EnsureDir，这里是开机/扫描时的双保险。）
+static void EnsureAnnounceDir() {
+    struct stat st = {};
+    if (stat(ANNOUNCE_DIR, &st) == 0) {
+        return;
+    }
+    mkdir(ANNOUNCE_DIR, 0775);
+}
+
 void LocalMusicPlayer::ScanSongs() {
+    EnsureAnnounceDir();
     std::lock_guard<std::mutex> lock(songs_mutex_);
     songs_.clear();
     DIR* dir = opendir(MUSIC_DIR);
@@ -205,9 +221,18 @@ void LocalMusicPlayer::ScanSongs() {
     ESP_LOGI(TAG, "Found %u songs in %s", static_cast<unsigned>(songs_.size()), MUSIC_DIR);
 }
 
-std::vector<std::string> LocalMusicPlayer::ListSongs() const {
+bool LocalMusicPlayer::HasSongs() const {
     std::lock_guard<std::mutex> lock(songs_mutex_);
-    return songs_;
+    return !songs_.empty();
+}
+
+void LocalMusicPlayer::ForEachSong(const std::function<bool(const std::string&)>& cb) const {
+    std::lock_guard<std::mutex> lock(songs_mutex_);
+    for (const auto& s : songs_) {
+        if (!cb(s)) {
+            return;
+        }
+    }
 }
 
 std::string LocalMusicPlayer::ResolveSong(const std::string& name) {
@@ -326,6 +351,45 @@ std::string LocalMusicPlayer::PlaySong(const std::string& name) {
     return "已开始播放: " + found;
 }
 
+bool LocalMusicPlayer::PlayAnnounce(const std::string& name) {
+    if (name.empty() || name.find('/') != std::string::npos ||
+        name.find("..") != std::string::npos) {
+        return false;   // 拒绝路径穿越：只接受纯名文件名
+    }
+    std::string path = std::string(ANNOUNCE_DIR) + "/" + name + ".mp3";
+    FILE* f = fopen(path.c_str(), "rb");
+    if (f == nullptr) {
+        return false;   // 未插卡 / 未放播报音频：静默跳过(不刷日志, 串口与下位机共享)
+    }
+    fclose(f);
+
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        play_queue_.clear();     // 播报不接力播歌
+        queue_pos_ = 0;
+        pending_song_.clear();
+        pending_path_ = path;
+    }
+    if (playing_.load()) {
+        return true;             // 正在播(歌或播报)：下一轮 loop 切到播报
+    }
+    playing_ = true;
+    paused_ = false;
+    stop_requested_ = false;
+    if (play_thread_.joinable()) {
+        play_thread_.join();
+    }
+    try {
+        play_thread_ = CreatePlayThread(&LocalMusicPlayer::PlayTask, this);
+    } catch (const std::exception& e) {
+        playing_ = false;
+        LogMemStats("PlayAnnounce create thread failed");
+        ESP_LOGE(TAG, "Failed to start announce thread: %s", e.what());
+        return false;
+    }
+    return true;
+}
+
 void LocalMusicPlayer::Pause() {
     paused_ = true;
 }
@@ -352,22 +416,29 @@ void LocalMusicPlayer::PlayTask() {
             continue;
         }
         std::string song;
+        std::string path;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            if (!pending_song_.empty()) {
+            if (!pending_path_.empty()) {
+                path = pending_path_;      // 播报(绝对路径)优先
+                pending_path_.clear();
+            } else if (!pending_song_.empty()) {
                 song = pending_song_;
                 pending_song_.clear();
             } else {
                 song = PickNextSong();
             }
         }
-        if (song.empty()) {
-            // 队列播完(顺序/随机均到末尾)或没有任何歌曲
+        if (song.empty() && path.empty()) {
+            // 队列播完(顺序/随机均到末尾)、或没有任何歌曲/播报
             playing_ = false;
             break;
         }
-        PlayOneSong(std::string(MUSIC_DIR) + "/" + song);
+        // 播报（绝对路径）与歌曲的打断策略不同，见 PlayOneSong 里的判定
+        announce_mode_ = !path.empty();
+        PlayOneSong(path.empty() ? (std::string(MUSIC_DIR) + "/" + song) : path);
     }
+    announce_mode_ = false;
     playing_ = false;
     // 自然播完(非外部停止)且状态仍是我们钉住的 Speaking -> 回到待命；
     // 外部停止(MCP stop/唤醒/按钮)时状态由对话/唤醒流程接管，不干预
@@ -437,8 +508,12 @@ void LocalMusicPlayer::PlayOneSong(const std::string& path) {
         // 若按“非Idle即打断”会把会话超时误判为用户交互导致误停(实测: 听歌时服务器
         // 长时间无交互自动结束会话 -> 播放被误停)。唤醒词/按钮打断走明确 hook, 不受影响。
         auto state = Application::GetInstance().GetDeviceState();
-        if (interaction_state_ == kDeviceStateIdle &&
-            (state == kDeviceStateListening || state == kDeviceStateConnecting)) {
+        // 打断判据：歌曲播放中，Idle->Listening/Connecting 都算"用户开始交互"；
+        // 但**播报**（2~3 秒的传感器提示音）不能因 Idle->Connecting 这种网络重连误判被抢断——
+        // 否则现场现象就是"播报不响"（音频刚注入就被停）。唤醒词/按钮打断另有明确 hook，不受影响。
+        bool user_interaction = (state == kDeviceStateListening) ||
+                                (!announce_mode_.load() && state == kDeviceStateConnecting);
+        if (interaction_state_ == kDeviceStateIdle && user_interaction) {
             ESP_LOGI(TAG, "User interaction detected, stop local playback");
             display->ClearChatMessages();
             Stop();

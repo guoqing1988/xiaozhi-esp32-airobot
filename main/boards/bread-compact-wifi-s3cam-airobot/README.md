@@ -270,7 +270,7 @@ idf.py build app-flash monitor
 > - 用「方式一」的 `scripts/build.py` 构建过一次后，也可以直接用这条命令编译+烧录（同一个 `build/` 目录，配置已就绪）；但**改了 `config.json` 的 `sdkconfig_append` 或板子选项时，仍要走 `scripts/build.py`** 重新配置。
 > - **`app-flash` 只写 app 分区**（本板网页页面、字体等嵌入式资源都编在 app 里，所以改网页/改代码只需它），比 `flash` 快，不动 bootloader / 分区表。**但改了 `partitions.csv` 或 bootloader 相关配置（如 console）时，必须改用 `idf.py build flash` 全量烧**，否则改动不生效。
 > - 有多个串口设备时显式指定端口：`idf.py -p COM3 build app-flash monitor`（macOS：`-p /dev/cu.usbserial-XXXX`）。**退出 monitor：`Ctrl+]`**。
-> - ⚠️ **本板 monitor 里看不到 `ESP_LOGx`**：日志默认写内存环形缓冲，请看网页「🎮 机器人控制」面板底部的日志区（详见「实时日志与下位机指令」）。串口只剩上电早期的 ROM/bootloader 输出。
+> - ⚠️ **本板 monitor 里看不到 `ESP_LOGx`**：日志默认写内存环形缓冲，请看网页「🐞 系统日志」Tab（详见「实时日志与下位机指令」）。串口只剩上电早期的 ROM/bootloader 输出。
 
 ### 查看编译日志与运行日志
 
@@ -288,7 +288,7 @@ idf.py -p /dev/cu.usbserial-XXXX flash monitor
 ```
 
 > ⚠️ **本板的运行日志默认不在串口输出**：ESP32 的 console 与 Arduino 下位机控制指令**共用 UART0(GPIO43/44)**，日志走串口会污染指令流（表现为控制失灵/延迟）。
-> 因此运行日志改为写入**内存环形缓冲**，用**网页「🎮 机器人控制」面板底部的日志区**查看（无需断线、无需串口）。
+> 因此运行日志改为写入**内存环形缓冲**，用**网页「🐞 系统日志」Tab**查看（无需断线、无需串口）。
 > 串口 monitor 只能看到上电早期的 ROM/bootloader 输出，看不到 `ESP_LOGx`。
 > 要临时恢复串口日志：网页日志面板勾选「同时输出到串口」，或对 AI 说「打开串口日志」（会干扰 Arduino，用完记得关）。详见「实时日志与下位机指令」。
 
@@ -356,24 +356,34 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 
 | 功能区 | 说明 | 详见 |
 |--------|------|------|
-| 🎵 歌曲上传 | 多选上传 .mp3/.lrc、实时进度条、同名覆盖开关 | 「TF 卡本地歌曲播放」|
+| 🎵 歌曲上传 | 多选上传 .mp3/.lrc/wav/m4a…、**逐条行内进度条**、同名覆盖开关 | 「TF 卡本地歌曲播放」|
+| 🔊 提示音上传 | **同一页**（歌曲管理下方）按固定槽位上传 `motion` / `hot` / `beam` 三个传感器播报音，只有“已上传/未上传”两态 | 「传感器提示音」|
 | ⏰ AI 闹钟 | 列表查看/删除 + **弹窗新建**（与上传歌曲同一套弹窗样式）| 「AI 闹钟提醒」|
-| 🕹️ 机器人摇杆 | 麦克纳姆轮方向/速度控制 + 头部舵机 + **下位机指令记录** + 折叠的系统日志 | 「Arduino 下位机」|
-| 📷 照片 | 拍照并显示当次那张（含 **🧹 清空显示**）+ TF 卡相册翻看/删除/「AI 拍照也存卡」开关 | 「网页拍照」「照片相册」|
+| 🕹️ 机器人摇杆 | 麦克纳姆轮方向/速度控制 + 头部舵机 + **下位机指令记录**（与系统日志同源，只看 `[UNO]` 行） | 「Arduino 下位机」|
+| 📷 照片 | 拍照并显示当次那张（含 **🧹 清空**）+ TF 卡相册翻看/删除/「AI 拍照也存卡」开关 | 「网页拍照」「照片相册」|
+| 📹 实时视频 | 「机器人控制」面板摇杆**上方**的勾选框：勾选才启流（MJPEG，画面上有帧率/分辨率角标），取消立即停流（拍照与 LCD 预览不受影响）| 「网页实时视频流」|
 
-> 页面有四个 tab（歌曲管理 / 闹钟提醒 / 机器人控制 / 照片）。**调试日志没有单独 tab**，而是收在「🎮 机器人控制」面板底部（下位机指令记录 + 折叠的「系统日志」）；**拍照与照片相册都在「📷 照片」Tab**。
+> 页面有五个 tab（歌曲管理 / 闹钟提醒 / 机器人控制 / 照片 / 系统日志）——「提示音」不占 tab，就在**歌曲管理**页下方；**拍照与照片相册都在「📷 照片」Tab**。
+> 2026-09 起「系统日志」是**独立 tab 且排在最末**（原先是折叠在「🎮 机器人控制」面板底部）：边看日志边切面板排查更顺手，机器人面板也不再被日志占长。
+> 「🎮 机器人控制」面板里仍保留**下位机指令记录**——它与系统日志同源（同一个环形缓冲），只筛出 `[UNO]` 行。
+> 2026-09 起该面板**摇杆上方**多了「📹 实时视频」勾选框：勾选才推流，取消立即停（见「网页实时视频流」）。
 
 - **入口与 IP**：待机时屏幕底部显示本机 IP，照输入浏览器即可；其他状态（说话中/聆听中等）自动隐藏。
 - 上传成功自动刷新歌曲列表，AI 立即能查到新歌；具体细节见对应章节。
 - **延迟与功耗**：页面打开（WS 已连接）期间，板级会把 WiFi 强制为**性能模式**，避免待机省电导致遥控几百毫秒延迟（详见踩坑 7）；关闭页面后自动恢复省电。
 - **连接状态（页首常驻）**：`🟢 已连接` / `🔴 断开，重连中…`。上传、遥控、日志都走这条 WebSocket 长连接，**操作没反应时先看这里**；一次性提示（如“舵机命令发送失败，请重试”）会临时覆写文字，2.5 秒后自动回到连接状态（圆点颜色不受影响）。
+- **⛶ 全屏（页首右上角）**：一键切页面全屏（手机浏览器进去后地址栏也收起来，视频/摇杆更宽敞），再点一次或按 `Esc` 退出；按钮文字随全屏状态自动切换。
+  iPhone 上的 Safari **不支持元素级全屏**（只有 iPad/桌面支持），点了会在页首提示一行说明，不会静默失败。
+  > 放在 `.wsbar`（页首那行）里而不是 `.tabs` 里：`.tabs` 窄屏会横向滚动，塞进去在手机上要滑到最右才看得到，就不叫“右上角”了。
+- **按钮反馈约定（改样式时别丢）**：所有可点控件都要有悬停/按下反馈 —— `.btn`/`.btn-danger`/`.btn-quiet`/`.tab`（未选中）/相册 `×`/视频框 ⚙️ 都有 `:hover` + `:active`，浅灰控件还必须带 `cursor:pointer`（否则鼠标放上去像块死板子）。
+  ⚠️ ⚙️、相册 `×` 这类**深色浮层按钮的 `background` 必须写在 CSS 类里**：写成内联样式优先级更高，会把手写的 `:hover` 盖掉（回归防护：`scripts/tests/test_web_ui_affordance.py`）。
 - **一次性命令无重发**：舵机/回正等命令没有心跳重发，发送失败时页面顶部 `#wslog` 会提示“发送失败，请重试”（详见踩坑 8）。
 - **机器人控制面板布局**：摇杆与「左转 / 右转」**同一行**（按钮紧贴摇杆两侧，与摇杆内的「左移 / 右移」标签同高）；**「停止」按钮浮在这一行的左上角**（与摇杆顶部「前进」同一水平线，不单独占行）。
   - 停止按钮是绝对定位在 `.joy-line` 里的。这是安全的：行高由 190px 的摇杆撑开，而「左转」只有 ~30px 高且**垂直居中**，所以贴顶的左侧必然是空地，窄屏也不会压到它；它写在 `#joyBase` **外面**，不会跟摇杆抢 `pointer` 事件。
   - 改 `.joy-line` / `.stop-btn` 时注意别把「左转」改成 `align-self: flex-start`（靠顶），否则两者会重叠。
 - **摇杆 / 转弯手感参数**（集中在 `web/index.html` 的「机器人控制」常量区，改完需重新编译 + 浏览器强刷）：
-  - `TURN_SPEED`：「左转/右转」按钮的固定转速（默认 `110`）。
-  - `TURN_MIN_PRESS_MS`：**点一下**的最短转动时长（默认 `250`ms）——它和 `TURN_SPEED` 相乘决定点一下的转弯幅度，嫌转太多就调小这两个（原为 400ms @ 140，点一下转得多）。
+  - `TURN_SPEED`：「左转/右转」按钮的固定转速（**当前 `80`**；原 110，实测试出来“转太快、容易转过头”后调低）。
+  - `TURN_MIN_PRESS_MS`：**点一下**的最短转动时长（**当前 `160`**ms；原 250）——它和 `TURN_SPEED` 相乘决定点一下的转弯幅度，嫌转太多就调小这两个（历史：400ms @ 140 → 250 @ 110 → 160 @ 80，点一下的幅度逐步减半）。
   - `JOY_DEAD`：摇杆回中死区（默认 `0.14`）。
   - 注意：`TURN_MIN_PRESS_MS` 不能太小，否则“点一下”会因持续转动还没起步就被 `drive-stop` 刹停，表现为“必须按住才动”。
 
@@ -384,6 +394,8 @@ python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-w
 ### TF 卡准备
 - 把歌曲（**MP3** 格式）放入 TF 卡的 `music` 目录：`/sdcard/music/*.mp3`。
 - 播放器启动时会扫描该目录，自动列出歌名。
+- 歌单访问是**按需遍历、不整表拷贝**（`HasSongs()` / `ForEachSong()`，见踩坑 20）：本板内部 SRAM 紧张，
+  `self.music.list` / `self.music.search` / 闹钟响铃前判空都**不会**复制整张歌单。
 
 ### 歌词显示（LRC）
 - 同名歌词文件（`歌曲名.lrc`，与 .mp3 同目录）会被自动解析，播放时逐行显示在屏幕底部字幕条。
@@ -450,11 +462,34 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 
 ### WiFi 网页上传与 IP 显示
 - **IP 显示**：待机（待命）状态下，屏幕底部会显示本机 IP（如 `192.168.31.74`），照着输入浏览器即可打开上传页；其他状态（说话中/聆听中等）自动隐藏。
-- **上传页**（`http://<设备IP>/`）：多选文件（支持 .mp3 / .lrc）、**自动参数检测 + 按需转码**（MP3 看声道/采样率/码率，歌词看编码；已是 UTF-8 的歌词原样上传）、实时进度条、**同名覆盖开关**（默认勾选=覆盖；取消勾选=同名跳过，页面提示“同名已存在，跳过”）。
+- **上传页**（`http://<设备IP>/`）：多选文件（支持 .mp3 / .lrc / .wav / .m4a / .flac 等）、**自动参数检测 + 按需转码**（非 MP3 一律转码；MP3 看声道/采样率/码率，歌词看编码；已是 UTF-8 的歌词原样上传）、**同名覆盖开关**（默认勾选=覆盖；取消勾选=同名跳过，页面提示“同名已存在，跳过”）。
+  - **进度与结果都在各自文件那一行**（2026-09 起，用户反馈）：转码/上传进度条、`✅ 完成` / `⚠️ 同名文件已存在，跳过` / `❌ 失败`
+    都落在**该文件自己那一条**里 —— 谁在传就显示在谁那一行，轮到它时自动滚进视野；完成后该条直接标记完成。
+    不再用【上传】按钮下方的全局进度条：一次选几十个文件（歌 + 歌词）时，那个条离正在传的那条太远，看不出进度。
+    按钮下方只留一个汇总/异常区（失败原因、全部完成统计），不再逐条写“上传 xxx / ✅ 成功 xxx”，否则弹窗会被拉得很长。
+  - 上传期间「自动 / 强制转码 / 不转码」下拉框置灰（改了会整表重渲染，进度条会跟丢）。
+- **提示音与歌曲共用一套接口**，靠 `dir` 参数区分：上传 `POST /upload?dir=announce&name=motion.mp3`（不带 `dir` 就是歌曲）；列表/删除同理（WS `music_list` / `music_delete` 带 `dir: 'announce'`）。提示音目录只收 `.mp3`，没有 `.lrc` 歌词。
 - 上传成功回调会自动刷新歌曲列表，AI 立刻能查到新歌（无需重启）。
 - 上传/播放源码位于本板目录：`http_upload_server.h` / `http_upload_server.cc`（由 CMake `file(GLOB)` 自动编译）。
 - 日志说明：上传成功路径不打日志（避免刷屏），仅错误（缺参数/写卡失败/同名跳过等）以 ERROR 级打印；启动信息（`Upload server started`）为 INFO 级，板子默认日志级别 ERROR 下不显示，排障时调 INFO 可见。
 - **完整性校验**：`/upload` 收完后会核对实收字节数与 `Content-Length`，不符则删除半截文件并返回失败，不再把截断文件当成功（详见踩坑 13）。
+
+### 传感器提示音（录什么、放哪）
+
+节点只上报“要播什么”（`say motion` / `say hot` / `say beam`），**播什么内容由主控 TF 卡决定**，
+所以换台词不用重烧任何固件。文件放 `/sdcard/announce/<名字>.mp3`，名字**必须**一字不差：
+
+| 文件名 | 什么时候播 | 建议台词 |
+|--------|-----------|---------|
+| `motion.mp3` | 超声波发现有人靠近、自动开灯时 | 「检测到有人靠近，已为你开灯。」|
+| `hot.mp3` | 温度越过高温阈值（默认 28℃）时，降到 26℃ 以下才复位 | 「室内温度偏高，请注意通风降温。」|
+| `beam.mp3` | 红外避障模块检测到障碍（约 2~30cm）时 | 「门口有人经过，请注意。」|
+
+- **在哪上传**：`http://<设备IP>/` → 「🎵 歌曲管理」→ 页面下方「🔊 提示音（传感器播报）」→ 点对应槽位的「上传」；
+- **文件名不用管**：槽位名固定，本地文件叫什么都行（手机录音 `xxxx.m4a` 也行），会上传为 `<槽位名>.mp3`；
+- **自动转码**：wav/m4a/flac 等非 MP3 会自动转成 24000Hz 单声道 96kbps（与歌曲同一套浏览器端转码）；
+- **录音建议**：手机录即可，安静环境、语速平稳，**2~3 秒**最好（太长会显得反应慢）；
+- 播报只在主控**待机**状态出声（正在对话时不插嘴）；提示音目录与歌曲目录互相独立，不会被 `self.music.list` 当成歌。
 
 ### 网页上传（自动转码）真机验证要点
 1. 待机状态记下 IP → 浏览器打开 `http://<设备IP>/` → 点「上传歌曲」（注意浏览器请 **Ctrl+F5** 强刷，否则可能是旧页面）；
@@ -471,10 +506,189 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 设置写入 NVS（`camera/flip`），**断电重启自动恢复该设置**。
 - 实现：板级 `ApplyCameraFlip()` 开机应用 + `Esp32Camera::SetHMirror/SetVFlip`（官方 sensor 寄存器接口）。
 
+## 网页实时视频流（MJPEG，勾选才推）
+
+「🎮 机器人控制」面板**摇杆上方**勾选 **📹 实时视频** → 摇杆上方出现实时画面，右上角角标显示**实测帧率与分辨率**（如 `12.3fps 640×480`）；取消勾选立即停流。
+
+> **只有真有人看时才推流**：抓帧写在 `/stream` 的 HTTP handler 循环里，**没有浏览器连着就完全不抓帧**（不占 CPU、不占射频）。
+> 另外，切到别的 Tab 会主动断开画面（设备随即停止抓帧），但保留勾选，切回来自动重连。
+
+- **技术选型（官方标准做法，不自造协议）**：
+  - 设备侧用 MJPEG：`multipart/x-mixed-replace` + `httpd_resp_send_chunk`，照 `espressif/esp32-camera` README 的 `jpg_stream_httpd_handler` 与 `espressif/esp-iot-solution` 的 `video_stream_server` 示例实现（见 `local_video_stream.cc`）。
+  - 前端**零解码代码**：`<img src="http://<设备IP>:81/stream">` 浏览器原生就能显示 MJPEG。
+  - 独立 httpd（**端口 81**）：`/stream` 是长循环 handler，挂在主 httpd（80，跑着 WS 控制/日志/上传）上会把那条任务占死。
+- **相机全程单一 JPEG 模式（本功能的关键设计，2026-09 重构）**：
+
+  | 状态 | 相机像素格式 | LCD 预览 | 说明 |
+  |---|---|---|---|
+  | 全程（开机 init 一次） | `PIXFORMAT_JPEG` | ✅ | 摄像头模组**自带 JPEG 编码**：推流**零编码零拷贝**（`fb->buf` 直接发）、拍照直通上传、LCD 预览现场解码 |
+
+  - **为什么不按需切换（旧设计的坑，真机实测）**：两种格式各自的 DMA 都要一整块**连续内部 SRAM** ——
+    VGA RGB565 要 **30720** 字节，JPEG 只要 **16384**（且与分辨率无关）；
+    而本板实测最大连续块只有约 **12800**，且**开过一次视频后再也不回升**。
+    于是只要 deinit/Reinit 过一次，两个模式就都 init 不回来：网页拍照 500 + 视频也开不起来，**只能重启**。
+    所以改成**开机按 JPEG 初始化一次，之后不再动相机**（真机日志与完整推理见踩坑 22）。
+  - 相机配置只写一处：板级 `MakeCameraConfig()`。初始化用**最大档 SVGA**（帧缓冲 `fb_size = 宽×高/5`
+    按初始化时的分辨率算，按最大档给后续切换才够）、质量按拍照档 12 起。
+  - **推流/停流只写 sensor 寄存器**（各两次 I2C 写、零内存分配、不重启相机）：
+    `ApplyVideoSensorParams()`（用户设的分辨率 + JPEG 质量）/ `ApplyPhotoSensorParams()`
+    （VGA + 质量 12，即不推流时拍照的画面与以前一致）→ 所以 `video_stop` **不可能失败**。
+  - **LCD 预览没丢（用户明确要求保留）**：拍照时把 JPEG 帧用 `esp_jpeg` 的 ROM 解码器解成 RGB565（1/2 缩放）
+    挂给 LVGL，见 `Esp32Camera` 文件头的 `DecodeJpegPreview()`；解码只在拍照路径做（httpd/MCP 任务），
+    输出留在 PSRAM、草稿纸用静态 `work[3100]`（**不占内部堆**）。
+  - JPEG 直通**不自己造**：靠上游 `image_to_jpeg.cpp` 自带的直通分支（需开 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT`，
+    回调形状与软件编码完全一致）—— 这样 `esp32_camera.cc` 里 `Explain()`/`EncodeCurrentFrameToJpeg()`
+    都能保持上游原样（合并官方代码时冲突面最小）。**怎么开见下**。
+  - **拍照后必须归还驱动帧（`fb_count=1` 的硬约束，2026-09 真机踩坑）**：`Capture()` 借走的是驱动**唯一**
+    那块帧缓冲，用完要由 `ReleaseCurrentFrame()` 显式还回去（AI 拍照在 `Explain()` 出口自动还、
+    网页拍照在编码后还）。攥着不放 → cam_hal 没空闲缓冲可采集 → 视频流每 ~4 秒刷一次
+    `cam_hal: Failed to get frame: timeout` + `LocalVideo: fb_get failed`，**只能重启**。
+    现象、根因与验证判据见踩坑 23。
+
+### ▶ `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` 怎么配（本板必须开）
+
+**它是什么**：上游开关（`main/Kconfig.projbuild` → `Xiaozhi Assistant` → `Camera Configuration` →
+`Allow JPEG Input`，**默认 n**，上游是给 USB 摄像头用的）：开启后 `image_to_jpeg_cb()` 遇到
+`V4L2_PIX_FMT_JPEG` 就直接把这一整帧按回调投出去（`cb(0,整张)` + `cb(1,哨兵)`），不再送进软件编码器。
+本板相机直出 JPEG，就靠它把 JPEG 帧原样送到上传链路。
+
+**推荐做法：写在 `config.json`（已加好），用构建脚本生成 sdkconfig**
+
+两个变体的 `sdkconfig_append` 里都有这一行；**不要手改 `sdkconfig`**（它是生成物、不入库、clean 就没了）：
+
+```jsonc
+// main/boards/bread-compact-wifi-s3cam-airobot/config.json
+"sdkconfig_append": [
+    ...,
+    "CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y",
+    ...
+]
+```
+
+```sh
+# ⚠️ 改完 config.json 必须走构建脚本：idf.py build 根本不读 config.json（见踩坑「改 config.json 后 idf.py build 不生效」）
+source ~/esp/v6.0.2/esp-idf/export.sh
+python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot
+#  无 TF 卡变体：  --name bread-compact-wifi-s3cam-airobot-no-tfcard
+
+# 验证：sdkconfig 与生成头里都应该是 y / 1
+grep CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT sdkconfig          # → CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y
+grep XIAOZHI_CAMERA_ALLOW_JPEG_INPUT build/config/sdkconfig.h  # → #define CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT 1
+```
+
+生成一次后，日常照旧 `idf.py build` 即可（该项已在 `sdkconfig` 里，不会丢）。
+
+**手动方式（备查）**：`idf.py menuconfig` → **Xiaozhi Assistant → Camera Configuration → [*] Allow JPEG Input**。
+⚠️ 别与 `XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE` 同时开（上游 help 明确说明二者不兼容；本板该项为 `n`）；
+`XIAOZHI_ENABLE_HARDWARE_JPEG_DECODER` 虽然 `depends on` 它，但只在 P4 可用，S3 上不会被自动打开。
+
+**没开（或 sdkconfig 陈旧）会怎样**：JPEG 帧被当成“原始像素”送进软件编码器 →
+日志 `image_to_jpeg: unsupported format: 0x4745504a`（小端就是 `'JPEG'`）+ `EncodeCurrentFrameToJpeg: JPEG encode failed`
+→ **网页拍照 500、AI 拍照失败**；而**推流仍旧正常**（推流直接发 `fb->buf`，不经编码器）——
+所以“视频好好的、拍照却 500”时要第一个查这里。
+- **帧率/分辨率角标**：浏览器对 MJPEG `<img>` 不暴露逐帧事件、拿不到帧率 → 由**设备侧统计**（滚动 1 秒窗口）经**已有 WebSocket** 每秒推一次 `{"video":1,"fps":…,"w":…,"h":…}`，前端更新角标；停止时推 `{"video":0}` 收回角标。
+- **帧率 20fps + 低延时三件套（FPV 遥控用途）**：这条功能的实际用途是**网页遥控机器人走位**（第一视角），
+  **延时优先**；实测场景里开视频时不会同时做家里的 ESP-NOW 控制，所以不必为节点控制留空口。为此做了：
+  1. 帧率上限 20fps（`local_video_stream.cc` 的 `s_target_fps`，默认 20，网页「⚙️ 视频设置」可改）。实际还受 OV2640 出帧能力限制（VGA JPEG 约 15~20fps），看画面角标即可。
+  2. **禁用 Nagle**（`TCP_NODELAY`）：否则内核要攒够一个 MSS 才发，每帧白等几十毫秒；摇杆小包也不再被视频大帧拖在发送缓冲里。
+  3. 取帧用 `CAMERA_GRAB_LATEST`，且**落后了不补帧**——宁可丢一帧，也不让队列堆积把延时越拖越长（遥控最忌延迟持续增长）。
+- **与 ESP-NOW 节点控制的关系**：两者共用同一个 2.4G 射频，开视频时节点指令会被大帧排队拖慢。
+  若确实要同时用（一边看视频一边管家里的节点），把帧率调低（如 12fps）给节点控制让出空口。
+- **网页直接改参数（不用重烧固件）**：视频画面**左上角 ⚙️** 打开设置弹窗，改完即时生效：
+
+  | 设置项 | 可选值 | 生效方式 |
+  |---|---|---|
+  | 分辨率 | 320×240 / 640×480 / 800×600 | **立即生效**（sensor 换分辨率，不重启相机）|
+
+  > 四项参数都是**原地生效、画面不断流**，前端也不需要重连画面：MJPEG 流里每帧都是独立 JPEG（自带尺寸），
+  > 浏览器是逐帧解码替换显示的。
+  | 帧率上限 | 5 / 10 / 15 / 20 / 25 fps | **立即生效**（下一帧）|
+  | 质量（JPEG）| 清晰 / 默认 / 标准 / 省流 | **立即生效**（只写 sensor 寄存器，不重启相机）|
+  | 左右镜像 / 上下翻转 | 勾选 | **立即生效** |
+
+  - 参数存**设备 NVS**（`video` 命名空间；镜像复用 `camera/flip`）：改一次永久有效，断电重启仍生效。
+  - **为什么四项都能动态改**（依据驱动源码）：
+    - 帧率：只是推流的软件节流（每帧算间隔），纯软件。
+    - 镜像/翻转：`ov2640.c` 的 `set_hmirror`/`set_vflip` 只写 sensor 寄存器。
+    - 画质：`ov2640.c:334` 的 `set_quality` 只写一行寄存器 `QS`，不碰缓冲。
+    - 分辨率：**JPEG 模式下 DMA 缓冲固定 16KB**（`esp32s3/ll_cam.c` 的 `dma_half_buffer_cnt = 16` × 1024，与分辨率无关），
+      帧缓冲 `fb_size = 宽×高/5` 按**初始化时**的分辨率算（`cam_hal.c:588`）。
+      所以初始化就按**最大档 SVGA**（94KB PSRAM），之后用 sensor 的 `set_framesize`
+      在 QVGA~SVGA 之间随便切，**不用重启相机**（只写 I2C 寄存器，下一帧生效）。
+    - 反例（踩过的坑）：若按**当前**分辨率初始化再往大改，会触发 `cam_hal` 的 `FB-OVF`
+      并 `ll_cam_stop()` 把相机停摆，所以必须按最大档初始化。
+    - 代价：帧缓冲固定 94KB PSRAM（SVGA 档；旧实现只在推流时段才这么大，现在全程占用）。
+      **内部 RAM 反而更省**：单一 JPEG 模式的 DMA 恒为 16KB（旧实现待机时是 RGB565 的 30KB）。
+  - **镜像/翻转与 AI 工具 `self.camera.set_flip` 共用同一份 NVS**（位含义：bit0=左右镜像 bit1=上下翻转），
+    所以网页改的、AI 改的、开机读回的是同一个值，不会两套配置打架。
+  - 想再降延时：弹窗里把分辨率降到 320×240、或质量调「省流」（单帧越小传输越快，延时越低）。
+- **没连设备也能用**：
+  - 勾选「实时视频」**立刻出现视频框**（不等设备回应）；连不上时框里显示「接口不可用：未连接设备…」，
+    不会出现“勾不上 / 空白 / 浏览器破图图标”。
+  - ⚙️ 设置弹窗**离线也能打开**：用浏览器 localStorage 缓存上次保存的值回显（从未保存过则显示设备默认值
+    640×480 / 20fps / 默认质量 / 不翻转）；设备连上后以设备为准。离线时点「应用」会提示“设置已暂存，
+    连上设备后再点一次”。
+- **同时只服务一个观众**：本板 `fb_count=1`（帧池只有一块），第二个连接直接返回 `503`。
+- **关页面自动停流**：WS 客户端归零（关页面/断网）时板级自动 `VideoStreamStop()`。
+  **这只是为了不白白抓帧**（省 CPU 与空口）—— 相机不用切模式，所以拖不拖流都不影响拍照。
+- **接口**：WS action `{"action":"video_start"}` / `{"action":"video_stop"}`；流地址 `GET http://<设备IP>:81/stream`。
+- **排查**：
+  - 勾选后画面不出来 → 浏览器直接打开 `http://<设备IP>:81/stream` 试：能出图说明是前端问题；不出图看网页日志（级别开到「信息」）里 `LocalVideo` 的报错。
+  - 拍照时日志出现 `Esp32Camera: JPEG preview decode failed` → JPEG 帧没解成预览图。
+    **照片本身仍正常**（网页能看到、AI 也能识别），只是 LCD 上没那一张；先看上一行 `Captured frame: …` 的 `len` 是否正常。
+  - **LCD 预览颜色反了（红蓝互换）** → `DecodeJpegPreview()` 里的 `swap_color_bytes`（0/1）与 LVGL 期望的字节序不一致，改成另一个试。
+  - 日志 **每 ~4 秒成对**刷 `cam_hal: Failed to get frame: timeout` + `LocalVideo: fb_get failed`，
+    且「停流→重开」也救不回来 → 不是网络/编码问题，而是驱动侧**已经没有可用帧**（本板 `fb_count=1`，
+    那块帧被拍照链路借走后没归还，相机就此停摆，只能重启）—— 见踩坑 23（已由 `ReleaseCurrentFrame()` 修复）。
+
+### ⚠️ PSRAM DMA 模式（`CONFIG_CAMERA_PSRAM_DMA`）：**实测不可用，不要开**
+
+**背景（为什么曾想开它）**：相机 DMA 缓冲必须在**内部 SRAM** —— 实测 **RGB565 要 30720 字节、JPEG 只要 16384 字节**
+（且与分辨率无关，推导见踩坑 22）；而本板内部 SRAM 空载只剩 20~25KB，旧实现“开视频切 JPEG、停流切回 RGB565”
+在 deinit 之后就拿不到那块连续内存（真机日志：`cam_dma_config: DMA buffer 30720 Byte malloc failed,
+the current largest free block:12800 Byte`）→ 相机停在不可用状态 → **拍照 / AI 拍照全部 500**（详见踩坑 22）。
+
+> 2026-09 起本板改为**单一 JPEG 模式**（开机 init 一次，之后不再 deinit/Reinit），上述“切模式导致分配失败”的路径已不存在。
+> 本节保留是因为它记录了一个**踩过的坑**：为省内存去开 PSRAM DMA，结果视频流完全不能用 —— “机理上说得通”不等于实测可行。
+8MB PSRAM 表面上看帮不上忙：IDF 里 PSRAM 区域**不带 `MALLOC_CAP_DMA`**（`memory_layout.c`），
+而 esp32-camera 的 DMA 缓冲写死用 `MALLOC_CAP_DMA` 分配（`cam_hal.c:522`）——
+驱动另提供了一个“PSRAM 直采”模式来绕过它（`CONFIG_CAMERA_PSRAM_DMA`，组件 Kconfig 默认 `n`）。
+
+**实测结论（2026-09，本板 OV2640 + IDF v6.0.2）：开启后实时视频完全不能用；关流后拍照仍然 500。已回退。**
+该项默认 `n` 是有原因的：**不要开**。（`CAMERA_PSRAM_DMA_ENABLED = CONFIG_CAMERA_PSRAM_DMA`，
+`cam_hal.c:58-64` —— 开了就真的会走 psram_mode，不是没生效。）
+
+**它为什么在这里坏（源码层面的机理，供后人参考）**：
+- 开了之后 JPEG 模式的 DMA 链从 **16 × 1024 字节**变成 **`recv_size / 1024` 个节点**
+  （SVGA 时 `800×600/5 = 96000` → **93 个描述符**，`esp32s3/ll_cam.c` 的 `ll_cam_dma_sizes`），
+  而且全部**直接链到 PSRAM 帧缓冲**（`cam_hal.c:510-516`），改由 GDMA 直接写 PSRAM。
+- 对齐依赖 `ll_cam_get_dma_align()`：`16 << GDMA.channel[].in.conf1.in_ext_mem_bk_size`
+  （`esp32s3/ll_cam.c:455`）—— 访问外部存储的 burst 配置没按预期生效时，
+  PSRAM 侧的对齐 / cache 一致性就会出问题（本板 `CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y`）。
+- 即：**“让 DMA 直接写 PSRAM”这条路在本板 + 本 IDF 版本下没走通**，不是配置写错。
+
+**如何回退**（若已开）：
+
+```
+idf.py menuconfig → Component config → Camera configuration
+  → [ ] Enable PSRAM DMA mode by default      # 取消勾选
+idf.py build
+```
+
+回退后确认 `sdkconfig` 里是 `# CONFIG_CAMERA_PSRAM_DMA is not set`。
+
+> ⚠️ 不要为了“记住这个设置”把它写进 `config.json` / `sdkconfig.defaults`：
+> 它是**已验证会坏**的模式，写进持久入口等于把坑固化给以后的自己和别人。
+> （它原本只存在本地 `sdkconfig` 里，而 `sdkconfig` 是构建生成物、不入库，所以回退后不会残留。）
+
+**如果以后真要再试它**（需先接 USB 串口看 `cam_hal` / `ll_cam` 的报错）：
+先只验证“开视频能不能出画面”，不要在同一轮里同时验证拍照；日记里重点看 `fb_get failed`、
+`FB-OVF`、`cam_dma_config`、以及 “PSRAM DMA mode enabled” 这行后面跟的第一个错误。
+
 ## 网页拍照（按钮 + 页面显示照片）
 
 「📷 照片」Tab 点 **📷 拍照** → 照片直接显示在按钮下方（同一张也会出现在 LCD 上，因为复用了带预览的抓帧路径）。
-显示区右侧的 **🧹 清空显示** 只清页面上的这一张（隐藏显示区 + 去掉 `<img>` 的 src）——
+显示区右侧的 **🧹 清空** 只清页面上的这一张（隐藏显示区 + 去掉 `<img>` 的 src）——
 **设备 PSRAM 里的 JPEG 和卡上的照片都不动**，删卡上照片用相册的「🗑 清空本相册」（两者很容易接错，已在单测里钉住）。
 
 有 TF 卡时这张照片还会**存到卡上**（图片下方会显示「已存卡：`20260917_153002.jpg`（3/100）」），
@@ -486,14 +700,23 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 
 - **接口**：`POST /photo/take` 触发抓帧+编码；`GET /photo.jpg` 取最近一次 JPEG。
 - **实现**：`LocalPhotoCapture()`（`local_photo.cc`）→ `Esp32Camera::Capture()` 抓帧 →
-  `EncodeCurrentFrameToJpeg()` 编码进 **PSRAM 常驻缓冲**（128KB 配额，VGA JPEG 通常 30~60KB）→ 页面用
-  `<img src="/photo.jpg?t=时间戳">` 拉取显示。全程**不占用内部 SRAM**（JPEG 与编码临时缓冲都在 PSRAM）。
-- **为什么不多开一块帧缓冲**：`cam_hal` 每帧需要 30720 字节 **DMA 内部 RAM**，`fb_count` 从 1 改成 2 会多占 ~30KB 内部 SRAM——本板本来就只有几十 KB，不能这么花。因此改为**复用已捕获的那一帧**做编码（为此在 `Esp32Camera` 上新增了一个纯增量方法 `EncodeCurrentFrameToJpeg()`，不改任何现有函数，其它用同一份 `esp32_camera.cc` 的板子行为不变）。
+  `EncodeCurrentFrameToJpeg()` 把这一帧写进 **PSRAM 常驻缓冲**（128KB 配额，VGA JPEG 通常 30~60KB）→ 页面用
+  `<img src="/photo.jpg?t=时间戳">` 拉取显示。全程**不占用内部 SRAM**（相机的 JPEG 与输出缓冲都在 PSRAM）。
+  本板相机直出 JPEG，所以这一步是**直通透传**（靠 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT`，不再跑软件编码器）。
+- **为什么不多开一块帧缓冲**：`cam_hal` 每帧需要一整块连续 **DMA 内部 RAM**（本板 JPEG 模式为 16384 字节，
+  旧 RGB565 模式为 30720），`fb_count` 从 1 改成 2 会多占这么多内部 SRAM——本板本来就只有几十 KB、
+  实测最大连续块只有 ~12800，不能这么花。因此改为**复用已捕获的那一帧**做输出
+  （为此在 `Esp32Camera` 上新增了纯增量方法 `EncodeCurrentFrameToJpeg()`，不改任何现有函数，
+  其它用同一份 `esp32_camera.cc` 的板子行为不变）。
+- **LCD 预览**：`Capture()` 里对 JPEG 帧解码（`DecodeJpegPreview()`，1/2 缩放）挂给 LVGL，
+  所以拍照时 LCD 上会出现这张图（用户明确要求保留这个行为）。
 - **与 AI 拍照的关系**：两条路复用同一个 camera 驱动，设备侧已加**带超时的互斥**（300ms）。同一时刻点按钮又喊 AI 拍照，可能有一次失败（按钮弹「拍照失败」/AI 回报网络问题），**不会重启**，重试即可。
 - **排查**：
   - 点了按钮没反应 → 看网页系统日志（级别调到「信息」）有没有 `Esp32Camera: Captured frame`；没有则是 httpd/互斥超时。
-  - **颜色不对（红蓝互换）** → 编码源用错了：RGB565 的字节序在 `Capture()` 里已经换好并存进 `encode_buf_`，
-    `EncodeCurrentFrameToJpeg()` 必须复用它；若自己在编码时再换一次就会红蓝互换（改这块时务必与 `Explain()` 对齐）。
+  - **颜色不对（红蓝互换）** → 两条链路分开查：
+    - **照片（网页/AI 看到的）** 颜色反：直通上传不做任何颜色变换，所以只能是**sensor 侧**的
+      `SetHMirror/SetVFlip` 或 ISP 配置不对；RGB565 时代的“编码源用错 `encode_buf_`”已不适用于本板。
+    - **LCD 预览**颜色反：`DecodeJpegPreview()` 里的 `swap_color_bytes`（0/1）与 LVGL 期望的字节序不一致，换另一个值试一试（不影响照片）。
   - 照片是上一张 → 浏览器缓存：`/photo.jpg` 已带 `Cache-Control: no-store`，前端也加了时间戳；若仍出现请检查代理缓存。
 
 ## 照片相册（TF 卡留档 + 网页查看）
@@ -524,6 +747,9 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
   只有 AI 拍照崩」是它们共同的症状：AI 拍照多了「上传给大模型解释」这条 HTTP 路径）：
   - `vApplicationStackOverflowHook` / `A stack overflow in task pthread` → 编码线程栈溢出，见踩坑 18；
   - `xQueueSemaphoreTake` / `OnTcpDisconnected` → ml307 `HttpClient` 析构竞态，见踩坑 19。
+- **拍完照后实时视频再也出不了画**（照片本身正常）→ 驱动帧用完没归还，相机停摆：日志每 ~4 秒成对刷
+  `cam_hal: Failed to get frame: timeout` + `LocalVideo: fb_get failed`，且「停流→重开」也无效，只能重启。
+  见踩坑 23（已在 `ReleaseCurrentFrame()` 修复）。
 
 ## 待机全屏大时钟（AI 控制 + 多主题 + 本地持久化）
 
@@ -550,6 +776,223 @@ python main/boards/bread-compact-wifi-s3cam-airobot/scripts/mp3_convert_for_esp3
 - 说「当前 IP 是多少 / 连的哪个 WiFi / 信号好不好」→ `self.network.get_status`，返回 JSON：`ip`(局域网 IPv4)、`connected`(是否已连接)、`ssid`(WiFi 名)、`rssi`(信号原始值 dBm)、`signal`(strong/medium/weak，按 rssi>= -60/ -70 划分)。未连接时 `ip`/`ssid` 为空。
 - 用途：AI 引导用户访问本机 Web（如 `http://<ip>/`）、排查网络、判断设备是否在线。
 - 工具为板级可扩展入口（后续可加 `channel`/`mac` 等字段）。
+
+## ESP-NOW 居家设备（自动发现 + 数据驱动，比赛演示）
+
+本板作为**主控**，通过 ESP-NOW 与 1~2 个自制 **ESP32-S3 节点**通信。
+
+**核心设计：节点自描述能力，主控只做“存起来 + 转给 AI”。**
+主控固件里**没有任何**设备名、能力名、事件名或播报文件名——节点上线时上报
+“我叫什么、有什么能力、怎么调”（`@n1 info 客厅灯 light(RGB灯):on(0\|1),rgb(r,g,b)…`），
+主控存进内存注册表，AI 通过三个通用工具查看与控制。
+**因此接入一个新设备只需改节点固件，主控零改动、无需重新烧录。**
+
+节点固件在 `arduino/EspNowNode/`（Arduino 架构，用核心自带 `ESP_NOW` 类，控灯用核心自带 `ledc`，
+**零第三方库**；仅玄关/我的家的 DHT11 需要 `DHT sensor library`）。接线/编译/排错详见该目录的 `README.md`。
+
+### 演示剧本（现场三个场景）
+
+| 场景 | 你的操作 | 设备反应 |
+|---|---|---|
+| ① 语音控灯 | 「打开客厅灯」「调成蓝色」「暗一点」「关灯」 | 节点 1 的 RGB 灯亮/变色/调光/灭 |
+| ② 人来自动开灯 ★ | 手靠近超声波（<30cm），然后拿开 | 灯自动亮 + 喇叭播报「检测到有人靠近，已为你开灯」；**灯本来就亮着时不重复播报、也不动灯**（避免播报说谎）；**人走 30 秒后自动灭** |
+| ③ 环境查询 + 门禁 | 「室内多少度」；手靠近红外避障模块 | 返回节点 2 温湿度；播报「门口有人经过，请注意」 |
+
+②③ 不需要说话，是**节点自己判定并主动触发**，现场最有观赏性。
+（高温同理：节点 2 侧 ≥28℃ 播一次、≤26℃ 复位——阈值属于节点的业务语义，主控不参与判断。）
+这些“自动动作”（如人来自动开灯）都写在**节点固件**里，主控完全不知道。
+
+> **只有一块板时**：把节点固件烧成 **`NODE_ID 3`（我的家）**——一台设备同时接全部四个传感器
+> （RGB + 超声波 + DHT11 + 红外避障，后两个因 GPIO4/5 已被 RGB 占用而改用 GPIO16/17），
+> 上面三个场景能在一块板子上全部演完。接线见 `arduino/EspNowNode/wiring-node3.svg`。
+
+### AI 语音指令（服务端通过 MCP 工具自动调用）
+
+工具只有三个，且都是**语义无关**的通用工具——AI 通过 `self.home.devices` 拿到设备清单后决定怎么调：
+
+| 你对助手说的话 | 触发工具 | 说明 |
+|---|---|---|
+| 「家里有哪些设备 / 客厅灯能做什么」 | `self.home.devices` | 返回所有节点的自描述清单（名字/能力/参数说明/最新状态/在线） |
+| 「打开客厅灯 / 关灯」 | `self.home.control(id=1, cap=light, action=on, args=1)` | 透传给节点执行 |
+| 「调成蓝色 / 暗一点」 | `self.home.control(id=1, cap=light, action=rgb, args="0 0 255")` | 同上 |
+| 「室内多少度」 | `self.home.devices`（读 `state` 里的 `temp`）或 `control(cap=temp, action=read)` | 读数由节点周期上报 |
+| 「居家节点在线吗」 | `self.home.devices` | 看 `online` 字段 |
+| （自测用） | `self.home.announce(name=motion)` | 手动播一次 `motion.mp3` |
+
+> `self.home.control` **调用失败时会在返回值里直接附上设备清单**，AI 一步即可自愈，
+> 所以它不需要“先查后控”两步走。
+
+### 播报音频（本地预录 MP3）
+
+设备侧**无法自行生成 TTS**（协议层只有 wake word/listening/abort 这几个主动发送接口，没有"设备主动请求播报"；
+`NotifyPlayer` 播的是**服务端下发的音频 URL**），所以事件播报走**本地预录 MP3**，复用现成的 TF 卡播放链路：
+
+- 目录：**`/sdcard/announce/`**（独立于 `/sdcard/music/`，因此不会被 `self.music.list` 当成歌曲列出）；
+  **主控启动后第一次扫描歌曲时会自动创建这个目录**——旧固件的上传一律失败就是因为它不存在
+  （`fopen(path,"w")` 对不存在的目录永远失败），所以插卡前先在电脑上建好目录也行，但不需要了；
+- **文件名由节点决定**：节点发 `@n1 say <名字>`，主控就播 `/sdcard/announce/<名字>.mp3`，
+  文件不存在则静默跳过。主控**没有任何“事件名 → 文件名”的映射表**——
+  以后接个烟雾传感器，节点发 `say smoke`、卡上放 `smoke.mp3` 即可生效，主控零改动。
+  当前节点用到的名字：`motion`（有人靠近，并自动开灯）、`beam`（红外避障检测到障碍）、`hot`（温度偏高）；
+- 生成：本板 `scripts/gen_announce_mp3.sh`（macOS `say -v Tingting` + `ffmpeg` → **24kHz 单声道 96kbps**，
+  与网页上传的转码规范一致），也可以自己录真人声直接覆盖同名文件；
+- 只在**待机**状态播，打断判定只看**用户交互**（`Listening`，以及**非播报期间**的 `Connecting`）：
+  即**网络重连/服务端抖动不会掐断正在播的音频**（现场“播到一半就没了”的来源），播完才停；
+- 冷却按 **(节点, 音频名)** 记（8 槽环形表，不是按节点一刀切）：我的家连续上报 `motion`/`beam` 时
+  两条音频互不压制，同一路事件 10 秒内只播一次；没插卡/没放音频则跳过播放。
+  跳过的原因会打在 **`ESP-NOW`** 这个 TAG 上（见下方「排错」表），不再静默：
+  `播报失败: 打不开 /sdcard/announce/motion.mp3 (文件不存在?)` / `播报跳过: 设备忙(非待机)` /
+  `播报跳过: 冷却中(还剩 N ms)` / `播报开始: motion.mp3`。
+
+> **⚠ “从来没播报过、也没有任何日志”的真正原因（已修）**：播报路径原来直接判 `music_player_`
+> 这个成员是不是空，而它**只在“放过歌 / 闹钟响过 / 网页上传过文件”之后才被懒创建** ——
+> 插卡拷好提示音、开机直接挥手触发时它一直是空的，每次都静默跳过；而那条“播报跳过”日志是
+> WARN 级、网页日志默认级别是 ERROR，所以**连日志都看不到**，现场看就是“这功能完全没实现”。
+> 现在播报走 `GetMusicPlayer()` 懒创建（第一次播报顺带建目录 + 扫卡），失败一律按 **ERROR** 打；
+> 并且会顺手把 `/sdcard/announce/` 里**实际有哪些文件**列出来
+> （`提示音目录 /sdcard/announce: 2 个文件 motion.mp3 beam.mp3`）——
+> 名字拼错、传到别的目录、根本没上传，一眼就能分辨。
+- 实现：`LocalMusicPlayer::PlayAnnounce()`（**纯增量**：独立目录 + `pending_path_` 绝对路径优先 +
+  清空歌曲队列，播完即停，不改动原有播放逻辑）。
+
+### 节点侧约定
+
+| 功能 | GPIO | 说明 |
+|---|---|---|
+| RGB 模块 R / G / B | 4 / 5 / 6 | 4 线模块；共阳模块把 `RGB_COMMON_ANODE` 设为 1 |
+| HC-SR04P Trig / Echo | 7 / 15 | **必须 3.3V 版（型号带 P）**；5V 版 Echo 会损伤芯片 |
+| DHT11 DATA | 4 | 3 线模块，自带上拉 |
+| 红外避障模块 OUT | 5 | **低电平 = 检测到障碍**；反射式 2~30cm（极性见 `OBSTACLE_ACTIVE_LOW`）|
+
+- 协议与 Arduino 下位机**同构**（`@` 前缀文本行）：
+
+  | 方向 | 报文 | 用途 |
+  |---|---|---|
+  | 节点→主控 | `@n1 info 客厅灯 light(RGB灯):on(0\|1),rgb(r,g,b);dist(距离cm):read()` | 能力自描述（锁信道后 + 每次收到 beacon 重报） |
+  | 主控→节点 | `@n1#42 do light rgb 0 0 255` | 通用动作，主控原样透传、不解释；`#42` 是**序号信封** |
+  | 节点→主控 | `@n1#42 ok light 0 0 255` | 执行回执（进状态缓存，并给主控销掉该序号） |
+  | 节点→主控 | `@n1 say motion` | 请求播报 `motion.mp3` |
+  | 节点→主控 | `@n1 evt temp 26 55` | 状态上报（只进状态缓存，**不播报**） |
+  | 节点→主控 | `@n1 evt hb 1` | **5 秒心跳**（只刷新在线时间 + 推动未确认命令补发，不进 state、不回调业务） |
+  | 节点→主控 | `@n1 err unknown-cap light` | 错误 |
+
+  > **序号信封（向后兼容）**：序号写在**信封**里（`@n1#42 …`）而不是正文，所以
+  > 旧节点 `atoi("1#42 …")` 仍然得到 `1`、正文一个字节没变——**两侧任一没更新都不会瘫痪**（`#0`/无序号
+  > 即退化为旧的“发了就算”语义）。用途是给下行命令做**应用层 ACK**（官方 `esp_now.rst` 的建议做法：
+  > 应答超时即重传 + 用序号删重复），因为 `esp_now_send()` 返回 `ESP_OK` 只代表“进了驱动队列”，
+  > 不代表对方收到了。
+- **节点零配置**：不写 SSID/密码/主控 MAC/信道。主控每 500ms 广播一条 `@beacon`（30 秒后转 3 秒稳态），
+  节点在信道 1..13 间 hop（每信道停 500ms），收到即锁定当前信道；失联 5 秒自动回 hop
+  （**换热点、双方重启都自恢复，无需重烧固件**）。
+- **主控侧信道看护**：AP 自动换信道（ACS）是路由器行为，改不了，但主控**每秒查一次**当前信道
+  （`esp_wifi_get_channel`），发现变了就立刻进入 **8 秒快速 beacon 窗口**（500ms 一条）并打一条
+  `链路事件(channel)`；另外命令连续 3 次发不出去（`esp_now_register_send_cb` 回报失败）也会触发同样的提速
+  （`链路事件(txfail)`）。节点侧失联 5 秒回 hop，两边叠加，通常 1~2 秒内重锁。
+  这些都**不额外常驻任务**：信道看护蹭 beacon 定时器，重传定时器只在有未确认命令时才存在。
+  （保持信道不用 `esp_now_remain_on_channel`/`esp_now_switch_channel_tx`：官方无使用约束说明，
+  且离开 AP 信道会丢 AP 包、影响音频流，风险大于收益。）
+- **密钥**：`kPmk`/`kLmk` 必须与节点固件一致（`espnow_home.cc` ↔ `EspNowNode.ino`，各 16 字节）。
+  不一致的现象是**完全收不到任何包**（不是偶发失败），排查时优先核对这两处。
+
+### 接入一个新设备（5 步）
+
+**主控完全不用动**，只写节点固件：
+
+1. **填能力表**（`EspNowNode.ino` 顶部）：设备名 + 每个能力的名字与规格
+   ```cpp
+   static const CapDef kCaps[] = {
+       {"fan", "(风扇):on(0|1),speed(0-100)", capFan},   // 可触发的动作配 handler
+       {"co2", "(CO2 ppm,只读):read()",        capCo2Read},
+   };
+   static const char kNodeName[] = "书房风扇";
+   ```
+2. **写 handler**：`bool capFan(action, args, out, out_len)` —— 分辨 `on`/`speed` 等动作，
+   把结果文本写进 `out`（`ok` 回执里会带回主控）。
+3. **配 GPIO 与周期上报**：读传感器的代码放在 `sonarTick()` 同级位置；
+   需要播报就 `queueSay("smoke")`，只需更新状态就 `queueEvt("co2", "800")`。
+4. **烧录**：`arduino-cli compile/upload --fqbn esp32:esp32:esp32s3`（把 `NODE_ID` 改成未占用的编号）。
+5. **上电等 3 秒**：主控收到 `info` 后自动出现在 `self.home.devices` 里，直接对它说话即可。
+
+> 播报音频：把 `smoke.mp3` 之类放进 TF 卡 `/sdcard/announce/`，名字与 `queueSay()` 的参数一致。
+> 能力规格要克制（单包 ≤200B）：节点侧超长会被截断，主控只保留前 4 个能力。
+
+### 设计取舍（改这块前先读）
+
+1. **上行连发 3 次 + 下行应用层 ACK 重传**（两者都非阻塞）：主控待机是 `WIFI_PS_MAX_MODEM`、只在 DTIM 醒来，
+   节点单包上报会被漏掉 → 节点连发 3 次（间隔 150ms）+ 主控按 `(kind, 名字)` 1 秒去重
+   （`say` 与 `evt` 是两条通道，即使同名也互不吞）；
+   下行**不能在 MCP 工具回调里 sleep 着连发**（会阻塞约 300ms，直接卡住对话），
+   所以改成登记后立即返回、由 `esp_timer` 驱动重发：`SendTo()` 给命令编序号（`@n1#42 do …`）
+   并登记 pending（每节点最多 1 条），**首包之后最多重发 4 次、间隔 150ms**，节点回 `ok#42` 即销账；
+   **7 秒**（= 节点跳一圈 6.5 秒 + 余量）仍未确认就报 `链路事件(cmdfail)`，并给调用方一个明确的
+   “已下发但未确认”。为什么不设更长：ESP-NOW 的价值就是实时，超过“节点跳完一圈”还在等，
+   说明节点是真不在（断电/密钥不符），继续等只会让“几秒后灯突然亮”这种事后生效更迷惑。
+   正常链路下的响应时间不受影响：仍是首包直达 + 节点十几毫秒回执。
+   重传定时器周期 100ms 且**只在有在途命令时运行**，发完就销毁；
+   收到该节点任何上行（含 `hb` 心跳）会把它的下次重发提前到现在，等价于“信道刚对上，抓紧补发”。
+   节点侧上行是 **6 槽队列 + 同键合并**（键 = `@n<id> <kind> <名字>`，同键只留最新）：
+   否则 `dist` 这类高频状态会占满队列、把 `say` 挤掉（现场“播报时有时无”）；
+   我的家有 4 路状态（dist/motion/temp/beam），槽位数必须留得下 `say`/`ok`。
+2. **不为 ESP-NOW 全局提频**：待机省电是刻意设计（见踩坑 7），不改 `SetPowerSaveLevel()`；
+   若现场实测仍丢包，再调 `esp_now_set_wake_window()`（IDF v6 API，默认最大窗口）。
+3. **主控侧传输层零日志**（`espnow_home.cc` 内无任何 `ESP_LOG`）：本板 UART0 与 Arduino 指令共用。
+   **但排查节点问题必须看节点自己的串口**：节点是独立 ESP32-S3、串口独占，日志默认开（115200），
+   `[信道] 扫描中…` → `[信道] 已锁定主控` → `[收到]` → `[发送]` 四步即可定位（日志已中文化，
+   各行的含义见该目录 README 的「日志行怎么读」）。
+4. **抗抖动留在节点侧**：超声波 30/40cm 迟滞、红外避障两次采样一致、距离变化 ≥3cm 才上报。
+5. **主控不存业务语义**：传感器字段、能力名、事件名、播报文件名、温度阈值**一律留在节点侧**。
+   状态在传输层只是一个通用的 `key=value` 文本（`temp=26 55 light=1 0 0 255 err=dht`），
+   主控只负责存与转发。DHT 读失败时节点上报 `evt err dht`，**旧读数仍留在 state 里**，
+   AI 能看到“温度 26℃ 但最近一次读取失败”，比清空读数更有用。
+   （DHT11 是单总线，时序会被 WiFi 中断干扰；若读数不稳可换 I2C 的 SHT30/DHT20，
+   只需改节点 10 行读取函数，主控与协议都不变。）
+6. **不做“每个能力注册成独立 MCP 工具”**（这是本项目最初的想法，调研后放弃）：
+   ① 设备侧 `McpServer` **没有** `RemoveTool`，`tools_` 只增不减，节点离线后工具撤不回来；
+   ② 工具列表由云端在连接初始化后**主动拉取一次**（`docs/mcp-protocol.md:234`），
+   而节点 hop 找信道要 2~3 秒，晚于拉取时刻上线的工具**云端根本看不到**。
+   结果就是“演示现场 AI 说没有这个设备”。改成“固定通用工具 + 运行时设备清单”后，
+   AI 每次调用拿到的清单都是实时的，彻底绕开了服务端的拉取时机。
+
+### 真机验证要点
+
+1. 节点上电 → 3 秒内 `self.home.devices` 显示该设备 `online: true` 且 `info_seen: true`；
+2. 「打开客厅灯」→ 灯亮；「调成蓝色」→ 变蓝；「关灯」→ 灭；
+3. 手靠近超声波 <30cm → 灯**自动亮** + 播报（10 秒内不重复）；人拿开后 30 秒灯**自动灭**
+   （但先说了「开灯」再靠近、或亮灯期间又调过颜色 → 不再自动关，控制权已交回人工）；
+   再手靠近一次（灯已亮着）→ **灯不动、也不播报**（播报只跟“真的自动开了灯”走）；
+4. 「室内多少度」→ 与实物温度计接近（DHT11 ±2℃）；
+5. 手靠近红外避障模块 → 播报；温度 ≥28℃ 播报一次（降到 ≤26℃ 之后才能再播）；
+6. 「开灯」后立刻拔掉节点电源再插回 → 命令不会凭空消失：主控最多重发 4 次，节点回 hop 重锁后
+   在下一次收到主控包时补发；反过来节点跳信道期间连点两次「开灯/关灯」，最终状态以最后一次为准；
+7. 网页日志 `ESP-NOW` TAG：正常一次控制应看到 `收到节点N消息: kind=ok …`；
+   只有 `链路事件(cmdfail)` 才代表 7 秒没确认（节点断电/密钥不符）；
+8. 拔节点电源 30 秒再插 → 自动恢复在线（`info` 重报，能力不丢）；
+9. 主控换热点（信道变化）→ 节点自动重锁定，**无需重烧固件**；
+10. **主控重启** → 节点在下一轮 beacon 后重报能力，清单自愈；
+11. 全程 AI 对话不卡顿、无重启；`free sram` 不低于改动前。本次改动内存账单：**运行时零新增堆分配**
+    （链路事件与播报失败路径原本要构造 `std::string`，现全部改定长 `char` 缓冲 + `const char*`；
+    报错路径往往正是内存紧张的时机，绝不在那里做堆分配），静态 `.bss` 仅增约 **0.8KB**
+    （4 槽在途命令表 ≈0.5KB + 8 槽播报冷却表 ≈0.26KB），不占堆、不随运行增长；
+12. 连续跑一整晚不重启（碎片敏感场景）：在「自我检查」里盯 heap 最低水位；
+13. 拔掉 TF 卡 → 播报静默跳过，控制与查询仍正常。
+
+### 排错
+
+| 现象 | 检查 |
+|---|---|
+| 设备没出现在清单里 | 节点是否上电（hop 找信道需约 3 秒）；`self.home.devices` 里若 `info_seen=false`，说明节点没发 `info`（节点固件是否是新版） |
+| 一直离线 | 两侧密钥是否一致；节点是否被同信道的 2.4G 流量干扰 |
+| AI 说没有这个能力 | 看 `self.home.devices` 里该设备的 `caps`；节点能力表里的能力名是否拼写一致（**大小写敏感**） |
+| `state` 里出现 `err=unknown-cap` | 节点能力表里没有这个名字，或主控发的能力名拼错 |
+| `state` 里出现 `err=unknown-action` | 动作名不在该能力的规格里（`spec` 要写全，如 `on(0\|1),rgb(r,g,b)`） |
+| `err=unknown-action`，但动作名**明明在规格里**（回执里还带乱码，如 `unknown-action offxV??`）| **节点侧收包没补 `'\0'`**：ESP-NOW 回调给的是「原始字节 + 长度」，没有字符串终止符，而节点用 C 字符串函数解析 → 越过包尾读到驱动缓冲残留字节；**只有最后一个字段**（`off`/`on`/`read` 这类无参数动作）会被污染，带参数的 `rgb`/`bright` 反而正常 → 表现为「调色一直好、关灯偶发失效」。重烧节点固件即可（见踩坑 21 与节点 README「分隔符约定」）|
+| 播报不响 | 看网页日志的 **`ESP-NOW`** TAG（该 TAG 单独放开到 INFO，**只要发生就一定能在网页看到，不用调级别**）：① `收到节点N消息: kind=say name=motion` → 上行到了；② 若出现 `提示音目录 /sdcard/announce: N 个文件 …`，对照里面有没有 `motion.mp3`（没有 = 没上传 / 名字不一致 / 传到别的目录）；③ `播报失败: 打不开 …` → 文件不在卡上；④ `播报跳过: 设备忙(非待机)` → 正在对话/播音乐；⑤ `播报跳过: 冷却中` → 10 秒冷却未过；⑥ `播报开始: motion.mp3` → 播放在走，问题在音频输出链路（喇叭/音量）。**连 `收到节点N消息` 都没有 = 上行没到主控**。也可用 `self.home.announce(name=motion)` 手动播一次做二分：能响 → 播放链路没问题，问题在上行；不响 → 按 ②③ 查文件 |
+| 播报刷屏 | 检查冷却（10 秒）；节点是否把高频状态也走了 `say`（高频项应走 `evt`） |
+| 温度有值但读取失败 | `state` 里同时有 `temp=..` 和 `err=dht` 属正常（保留旧读数），检查 DHT11 接线/供电 |
+| 网页日志查不出节点问题 | 主控侧只看 **`ESP-NOW`** TAG（`收到节点N消息`）；节点侧的收发细节仍需**看节点串口**（`[信道] 扫描中…`=没锁定/密钥、`[信道] 已锁定主控`=已锁定、`[收到]`=收到指令、`[发送]`=已回执），见节点 README「日志行怎么读」 |
+| **反复掉线**（AI 提示「节点已掉线」） | 先看网页日志 `ESP-NOW` TAG 的 `链路事件(...)`：`链路事件(channel)` = 检测到 AP 换信道，已自动进入 8 秒快速 beacon；`链路事件(txfail)` = 命令连续 3 次发不出去，同样提速。节点侧每 5 秒 `evt hb 1` 心跳，主控 `kOfflineMs`（15 秒）内收到任何包都算在线——所以偶发一次“离线”提示不再等于真的掉线。若仍频繁，再看路由器是否信道跳变过频（ACS），**固定到 6/11 只是“少重锁几次”的优化，不再是必需** |
+| **命令偶发要等很久 / 没反应** | 命令现在带序号 + 应用层 ACK：主控重发最多 4 次（150ms 一次），节点执行后回 `ok#<seq>`；节点重锁信道后收到主控任何包都会触发补发。看 `链路事件(cmdfail)` 判断是否 7 秒都没确认（那才是真没送达：节点断电、密钥不符）；正常链路下命令到达节点仍是 5~30ms |
+| 设备永远不上线（主控重启循环）| `esp_now_init()` 必须在 WiFi 就绪**之后**调用，否则 `LoadProhibited` 重启循环；板级已用每秒轮询（`OnEspNowWifiWait`）等到 WiFi 拿到 IP 再启动 |
 
 ## AI 闹钟提醒（AI 语音 + 网页 + TF 卡持久化）
 
@@ -748,12 +1191,12 @@ ESP32 的 UART0 RX 解析任务维护状态（含 30 秒 busy 看门狗，防 `@
 
 **做法**：用 `esp_log_set_vprintf()` 接管 `ESP_LOGx`，把日志写进**内存环形缓冲**（`log_capture.cc/h`），网页通过 WebSocket 按序号增量拉取。**默认不再写 UART0**，所以日志级别开到信息/调试也不会干扰 Arduino。
 
-- **入口**：网页「🎮 机器人控制」面板底部。下位机指令记录直接展开；**系统日志默认收起**，点「🐞 系统日志（排查用，点开查看）」展开（日志区与指令记录同一份数据，不额外占内存）。
+- **入口**：网页顶部的「🐞 系统日志」Tab（排在最末）。日志区与「🎮 机器人控制」面板底部的**下位机指令记录**是同一份数据（同一个环形缓冲），只是这里看全文、那里只筛 `[UNO]` 行，不额外占内存。
   - **级别**：无 / 错误 / 警告 / 信息 / 调试。默认 `错误`（`ERROR`）；排查完请调回「错误」（级别调高会增加 CPU 与内存环写入量）。
   - **同时输出到串口**：逃生开关。勾上后日志除进网页外**也照旧写 UART0**（会干扰 Arduino，仅网页打不开或需要接 USB-TTL 抓日志时用）。
-  - **清空显示 / 暂停**：只影响浏览器画面，不影响设备缓冲。
-  - **清空设备缓冲**（`🗑`）：清掉**设备侧**环形缓冲历史（含重启后保留的崩溃前日志）。想重新观察一轮重启日志时用它。
-  - **拉取频率**：日志区展开时 1 秒/次，收起时 3 秒/次；切离「🎮 机器人控制」面板则停止。收起仍拉是因为下位机指令记录与系统日志**同源**（停了指令回执就不刷新）。
+  - **清空 / 暂停**：只影响浏览器画面，不影响设备缓冲。
+  - **清空设备**（`🗑`）：清掉**设备侧**环形缓冲历史（含重启后保留的崩溃前日志）。想重新观察一轮重启日志时用它。
+  - **拉取频率**：停在「🐞 系统日志」Tab 时 1 秒/次（跟手）；停在「🎮 机器人控制」Tab 时 3 秒/次（够用）。切到其他 Tab 则停止——但**这两个 Tab 都会拉**，因为下位机指令记录与系统日志**同源**（停了指令回执就不刷新）。
 - **下位机指令记录**：「🎮 机器人控制」面板底部（同一份数据，已按 `[UNO]` 前缀自动筛出）。看懂它就基本能定位控制问题：
 
 | 标记 | 含义 |
@@ -846,7 +1289,7 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 3. 选择板型（Arduino UNO）和端口，编译烧录。
 
 ### 使用注意
-- **看日志不再需要断开 Arduino 接线**：ESP32 运行日志已改写到内存环形缓冲，用网页「🎮 机器人控制」面板底部的日志区查看（详见「实时日志与下位机指令」）。仅**烧录**（USB 接电脑）时仍需断开 Arduino 接线，避免串口冲突。
+- **看日志不再需要断开 Arduino 接线**：ESP32 运行日志已改写到内存环形缓冲，用网页「🐞 系统日志」Tab 查看（详见「实时日志与下位机指令」）。仅**烧录**（USB 接电脑）时仍需断开 Arduino 接线，避免串口冲突。
 - ESP32 默认日志已降到 **`ERROR`**，且命令带 **`@` 前缀**（Arduino 只认 `@` 开头的行），日志乱码会被忽略，命令更稳定。
 - Arduino 程序用**固定 `char` 缓冲**解析命令（不用 `String`），适合 UNO 的 2KB SRAM，抗内存碎片。
 
@@ -882,6 +1325,12 @@ Select-String FATFS_API_ENCODING sdkconfig
 # 应看到 CONFIG_FATFS_API_ENCODING_UTF_8=y
 ```
 
+**本板另一个必须开的开关（2026-09 起）**：`CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y`（相机直出 JPEG 的直通编码）。
+它**只在 `config.json` 的 `sdkconfig_append` 里**（两个变体都有），**没有** `sdkconfig.defaults` 兜底 ——
+因为那是项目级文件，开了会影响其它板（本板专属配置就该放本板 `config.json`）。
+后果：拿一个**陈旧的 `sdkconfig`** 直接 `idf.py build` 编出来的固件，会表现为
+**「网页拍照 500 / AI 拍照失败，而推流正常」**（日志 `image_to_jpeg: unsupported format: 0x4745504a`）。
+完整配置方法、验证命令与失效症状见「网页实时视频流 → ▶ `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` 怎么配」。
 
 ### 1. CH340 新驱动导致 Arduino 上传失败（`cannot set com-state`）
 
@@ -1082,7 +1531,8 @@ ws.send(JSON.stringify(Object.assign({}, obj, { id: id })));  // ← 覆盖调�
 1. **内部 SRAM 余量被 web 功能吃掉**：本板 `free sram`（`MALLOC_CAP_INTERNAL`，**非 PSRAM**）空载只有 20~25KB。
    web 日志功能常驻占用 = 4KB 环形缓冲 + 0.5~1KB 拉取缓冲 + **httpd 任务栈 8KB** + 一条 WS 连接；
    而**拍照上传那一刻**主任务还要开一条到 `api.xiaozhi.me` 的 HTTP 连接、创建 JPEG 编码线程
-   （pthread 默认栈 3KB），同时 LVGL 任务在把 640×480 RGB565 预览图缩放渲染到 240×240 ——
+   （pthread 默认栈 3KB），同时 LVGL 任务在把 640×480 RGB565 预览图缩放渲染到 240×240
+   （2026-09 改单一 JPEG 模式后预览是解码好的 320×240，LVGL 侧工作量更小）——
    多方并发抢内部 SRAM，于是“有时够、有时不够”（第一次成功、第二次崩）。
    崩溃点落在没有 try/catch 的上下文（HTTP 接收任务 / LVGL 任务 / esp_timer），所以表现为直接重启。
 2. **lwIP/WiFi 缓冲不能落 PSRAM**：`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` 默认关闭，
@@ -1096,7 +1546,7 @@ panic 的 `Guru Meditation`、backtrace、`abort()` 消息由 IDF panic handler 
 
 **修复**：
 - 环形缓冲迁到 `.noinit` 段（软重启保留崩溃前日志），并打印 `esp_reset_reason()` 分隔行指明重启原因；
-  新增网页「🗑 清空设备缓冲」按钮。
+  新增网页「🗑 清空设备」按钮。
 - 本板 `config.json`：开 `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`，
   `LWIP_TCP_SND_BUF_DEFAULT` / `LWIP_TCP_WND_DEFAULT` 5760→2920。
   > ⚠️ **这两项只在用 `scripts/build.py` 构建时才会写进 `sdkconfig`**；`idf.py build` 不读 `config.json`，
@@ -1250,7 +1700,290 @@ HttpClient 改成**常驻复用**（`static std::unique_ptr<Http> explain_http`�
 **回归防护**：`scripts/tests/test_airobot_camera_explain_http.py`（不得每次新建、常驻必须判空只建一次、
 Close/超时必须保留、注释必须写明是规避）。
 
+### 20. 歌单“整表按值拷贝”持续碎化内部 SRAM（2026-09 修复）
+
+> **现象**：`self.music.list`（列歌单）、`self.music.search`（搜歌）以及**闹钟响铃前的判空**，
+> 每次都会把整张歌单按值拷贝一份 —— N 首歌就是 N 次堆分配。而本板内部 SRAM 空载只剩
+> 20~25KB、历史最低 6KB（见踩坑 16/18），歌多时这些短命小分配会不断碎化内部堆，
+> 是“偶发分配失败 / 重启”的隐性来源，且**平时完全看不出来**。
+
+**根因**：`LocalMusicPlayer::ListSongs()` 按值返回 `std::vector<std::string>`：
+
+| 调用点 | 实际只需要 | 却做了 |
+|---|---|---|
+| `self.music.list` | 前 30 首歌名 + 总数 | 先拷整表 |
+| `self.music.search` | 匹配的歌名 | 先拷整表 |
+| 闹钟响铃前 | 判断“有没有歌” | `!ListSongs().empty()` —— **只为判空也拷整表** |
+
+**修复**：接口改成按需访问，**锁内零拷贝**（`local_music_player.{h,cc}`）：
+
+```cpp
+bool HasSongs() const;                                        // 判空（不拷贝）
+void ForEachSong(const std::function<bool(const std::string&)>& cb) const;  // 锁内遍历
+```
+
+板级三处调用点全部改走这两个接口；`ListSongs()` 已删除。
+
+> ⚠️ **使用约束**：`ForEachSong` 的回调运行在 `songs_mutex_` 持锁状态下，
+> **回调内不得再调用 `LocalMusicPlayer` 的任何方法**（`std::mutex` 非递归，会死锁）。
+> 当前两处回调只做字符串拼接，安全。
+
+**回归防护**：`scripts/tests/test_music_list_api.py` —— 拦住“把按值返回整张列表的接口加回来”、
+要求遍历持锁且支持提前退出、要求板级不得再出现 `.ListSongs()`。
+
+> **同类检查思路**：本板内部 SRAM 紧张的根因往往不是“一次性大分配”，而是**高频短命小分配**
+> （`std::string` 拷贝、JSON 拼接、`vector<string>` 复制）。改内存相关代码时先问一句：
+> “这个接口是不是为了判空 / 取前几个而复制了全部？”
+
+### 21. 「关灯」偶发失效（节点侧 ESP-NOW 收包未补 `'\0'`，2026-09 修复）
+
+**现象**：对 AI 说「关灯」，灯不灭；节点串口（115200）里动作名后面挂着乱码：
+
+```
+[收到] 主控指令（第15条）：do light offxV??
+[发送] 回执·执行失败：unknown-action offxV??（第1/3次）
+```
+
+> （日志已中文化；更早的固件里这两行显示为 `[cmd] seq=15 …` 与 `[espnow] TX  (1/3) …`。）
+
+更迷惑的是**只有部分命令失效**：调色「调成蓝色」、调暗「暗一点」一直正常，
+关灯 / 开灯 / 查询（`read`）则偶发失效。
+
+**根因**：ESP-NOW 回调给的是「**原始字节 + 长度**」，**没有字符串终止符** ——
+Arduino 核心 `ESP32_NOW.cpp` 的 `_esp_now_rx_cb()` 把 IDF 的 `data`/`len` **原样透传**给
+`onReceive()`（无拷贝、无补零；`esp_now_send()` 发的也是长度不含终止符的裸字节）。
+而节点侧 `handleCommand()` / `nextField()` 全程是 C 字符串函数（`strcmp`/`strchr`/`strlen`）：
+
+```cpp
+// nextField()：取字段时用 strchr 找空格，找不到就 strlen
+const char* sp = strchr(p, ' ');
+size_t n = (sp == nullptr) ? strlen(p) : (size_t)(sp - p);   // ← 越过包尾读残留
+```
+
+**为什么只有“最后一个字段”中招**（这也是“调色正常、关灯失效”的全部原因）：
+
+| 下行报文 | 节点解析到的 action | 结果 |
+|---|---|---|
+| `do light off` | `off` + 残留（无空格可截断）| ❌ `strcmp` 失败 → `err unknown-action` |
+| `do light on` / `do dist read` | 同上 | ❌ |
+| `do light rgb 0 0 255` | `rgb`（后面紧跟空格，截断干净）| ✅ args 虽带残留，但 `parseNums` 只挑数字 |
+| `do light bright 100` | `bright` | ✅ |
+
+残留字节来自驱动接收缓冲（上一次更长的包 / 未初始化内存），所以**命中与否是概率**，
+这就是“偶发”的来源。连带影响：主控收到 `err` 会当作“节点已收到、只是执行不了”而
+`CompletePending(confirmed=true)` **销账不再重传**，连 ACK 重传兜底都失效了。
+
+**修复**：`EspNowNode.ino` 的 `onReceive()` 先拷贝到本地缓冲并按 `len` 补 `'\0'`，之后一律用该缓冲：
+
+```cpp
+char text[256];
+if (len >= sizeof(text)) return;
+memcpy(text, data, len);
+text[len] = '\0';          // ← 关键：此后才能安全地当 C 字符串解析
+```
+
+> **对照**：主控侧 `espnow_home.cc` 的 `HandleRecv()` 一直是对的（`body[body_len] = '\0'` 后才解析），
+> 只有节点侧漏了 —— 所以两侧共用一份协议文本时，**“按长度收包”这条约束必须两侧都写进注释**。
+
+**回归防护**：`scripts/tests/test_espnow_home_protocol.py` 的
+`TestEspNowPayloadTermination`（复刻“无终止符 → 最后字段被污染”，固化旧逻辑必然出错）
++ `test_node_terminates_espnow_payload_before_parsing`（源码必须 `memcpy` + 补 `'\0'`，
+且拷贝后不得再把裸 `data` 当 C 字符串用）。
+
+**教训**：ESP-NOW / UART / socket 这类“字节流 + 长度”的接口，**收到的都是裸字节，不是字符串**。
+只要后面用了 `strcmp`/`strchr`/`strlen`/`printf("%s")`，就必须先按长度拷贝并补 `'\0'`；
+能“大部分时候正常”只是因为没越界到非法字节而已 —— 这种 bug 永远是**概率性的、且只在某类字段上**。
+
+### 22. 关掉实时视频后拍照必 500（相机 deinit 后再也 init 不回来，2026-09 定位并修复）
+
+**现象**：开过「📹 实时视频」再取消勾选，切到「📷 照片」拍照 → 网页 **500**，AI 拍照也失败；
+**不碰视频时一切正常**。真机日志（网页日志，级别「错误」，按时间顺序）：
+
+```
+E image_to_jpeg: unsupported format: 0x4745504a      # 0x4745504a 小端就是 'JPEG' FOURCC
+E Esp32Camera: EncodeCurrentFrameToJpeg: JPEG encode failed
+E cam_hal: cam_dma_config(524): DMA buffer 16384 Byte malloc failed, the current largest free block:12800 Byte
+E Esp32Camera: Reinit: esp_camera_init failed with error 0xffffffff
+E cam_hal: cam_dma_config(524): DMA buffer 30720 Byte malloc failed, the current largest free block:12800 Byte
+E Esp32Camera: restore RGB565 camera failed
+E Esp32Camera: Camera capture failed
+E MCP: tools/call: Failed to capture photo
+```
+
+**关键数字（源码 + 日志双证）**：两种格式的 DMA 缓冲都要一整块**连续内部 SRAM**，而且**与分辨率无关**：
+
+| 格式 | DMA 缓冲 | 来源（`managed_components/espressif__esp32-camera/target/esp32s3/ll_cam.c`） |
+|---|---|---|
+| VGA RGB565 | **30720** 字节 | `ll_cam_calc_rgb_dma()`：half buffer = 12 行 × 1280 B = 15360，`dma_buffer_size = 2 × half` = 30720 |
+| JPEG（任意分辨率） | **16384** 字节 | `ll_cam_dma_sizes()`：`dma_half_buffer_cnt = 16` × 1024 = 16384 |
+
+（RGB565 那档依赖 `CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=32768`，本板 `sdkconfig` 正是这个值；日志里的 30720 与推导吻合。）
+
+而本板实测**最大连续块只有 12800 字节**（内部 SRAM 空载也才 20~25KB，见踩坑 16）：
+
+```
+12800  <  16384（JPEG 需要）  <  30720（RGB565 需要）   →  两种模式都 init 不回来
+```
+
+**根因链**（旧实现的致命处）：
+
+1. **旧设计“按需切格式”**：`VideoStreamStart()` → `Reinit(PIXFORMAT_JPEG)`；`VideoStreamStop()` → `Reinit(PIXFORMAT_RGB565)`。
+2. **`Reinit` = deinit + init**：`Release()` 先 `esp_camera_deinit()`，随后 init 又要同一块连续 DMA 内存。
+3. **这块内存回不来**：日志里 21:48 与 21:49 两次相隔 **64 秒**，最大连续块都还是 12800 ——
+   说明不是瞬时碎片，而是**开过视频之后不再回升**（内存归还了，但堆已被切碎/无法合并）。
+4. **失败没有兜底**：`Reinit` 失败后相机停在“已 deinit / init 失败”的残留态，
+   而 `VideoStreamStop()` **只打一行 ERROR，仍返回 `{"ok":true,"msg":"视频已关闭"}`** ——
+   用户看到的是“一切正常 + 拍照莫名 500”。
+
+**两种“拍照 500”要分清**（历史日志对照；新设计下第一种只可能是开关没开）：
+
+| 日志 | 相机实际状态 | 为什么拍照失败 |
+|---|---|---|
+| `Esp32Camera: EncodeCurrentFrameToJpeg: JPEG encode failed`<br>+ `image_to_jpeg: unsupported format: 0x4745504a` | **还能取到帧** | JPEG 帧被送进不支持 JPEG 输入的软件编码器 —— 现在只可能是 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` **没开**（见「网页实时视频流 → 怎么配」）|
+| `Esp32Camera: Camera capture failed`<br>+ `MCP: tools/call: Failed to capture photo` | **连帧都取不到**（`streaming_on_` 仍为 true，但 `esp_camera_fb_get()` 返回 NULL，`esp32_camera.cc:153`） | 旧实现 `Reinit` 失败后相机停在“已 deinit / init 失败”的残留态；新设计不再有这条路径 |
+
+**修复（2026-09 已实现）：相机全程单一 JPEG 模式，不再 deinit/Reinit**
+
+| 环节 | 旧做法 | 现在 |
+|---|---|---|
+| 初始化 | 每次切模式重建相机 | **开机按 JPEG init 一次**（最大档 SVGA、`CAMERA_GRAB_LATEST`、`fb_count=1`）|
+| 开视频 | `Reinit(JPEG)` | 只写 sensor：`set_framesize(用户档)` + `set_quality(用户质量)` |
+| 停视频 | `Reinit(RGB565)`（**会失败**） | 只写 sensor：`set_framesize(VGA)` + `set_quality(12)` → **不可能失败** |
+| 拍照编码 | RGB565 帧 → 软件编码 | JPEG 帧**直通**（`CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y`）|
+| LCD 预览 | RGB565 直接给 LVGL | JPEG 用 `esp_jpeg` 的 ROM 解码器解成 RGB565（1/2 缩放）→ **预览保留** |
+
+为什么选 JPEG 当“唯一模式”：**JPEG 的 DMA 只要 16384，比 RGB565 的 30720 少一半**，
+而推流本来就要 JPEG，拍照与预览都能由 JPEG 派生出来（预览解码输出在 PSRAM、
+草稿纸用静态 `work[3100]`，**不占内部堆**）。
+
+- ~~开 `CONFIG_CAMERA_PSRAM_DMA=y`~~ → **实测不可用**（视频流完全不能用、关流后拍照仍 500），已回退；
+  机理与回退方法见「网页实时视频流 → PSRAM DMA 模式：实测不可用」。
+- **前端：`<img src>` 必须等 `video_start` 返回 ok 之后再设**。
+  原来在“先出框”里就把 src 设了，而设备端 81 端口还没监听 → 首次勾选必现“接口不可用：未连接设备，
+  或视频服务未启动”，切走再切回（切走会 `removeAttribute('src')` 重连）才正常。
+  现在拆成 `videoShowBox()`（只出框、不连流）+ `videoOpen()`（服务就绪后才设 src）。
+- ✅ **旧方案的“待做项”已全部作废**（不是没做，是换了解法）：
+  - 不需要“停流失败重试”：停流现在**不可能失败**（只写 sensor 寄存器，零内存分配）。
+  - 不需要“降级 QVGA 恢复”：**降 QVGA 也救不了 RGB565** —— 那 30720 是 `ll_cam_calc_rgb_dma()`
+    算出的双缓冲总量，真正的瓶颈是**连续块**不够（12800），不是总量不够。
+  - 不需要“JPEG 直通补丁”：改由上游开关提供（见上表），`EncodeCurrentFrameToJpeg()` 保持上游原样；
+    `Explain()` 只多了一个归还驱动帧的守卫（见踩坑 23，同一块 `current_fb_` 的释放时机问题）。
+  - 历史疑点（`free sram` 是否回升、deinit 是否归还）**不再影响决策**（新设计根本不走 deinit），
+    但第 3 条“最大连续块不回升”的实测事实**必须保留** —— 它正是“永不 deinit”的依据。
+
+**真机验证要点**：开机日志 `cam_hal: buffer_size:` 应为 **16384**；
+「开视频 → 关视频 → 网页拍照 → AI 拍照 → 再开视频」来回 ≥10 次不坏（照片、LCD 预览、AI 识别都正常），
+且**拍照后视频画面必须能继续出画**（这条当时漏验，随即暴露了踩坑 23）。
+
+**过程教训（本条也应当记住）**：拿“源码里看起来能行”的开关去解决内存问题，**必须先在真机上只验证它本身**再往下推 ——
+`CONFIG_CAMERA_PSRAM_DMA` 就是这样一次失败尝试：机理上说得通（跳过内部 DMA 分配），
+实际却让视频流直接不可用。**未实测的推断不要写进文档当结论**。
+
+**教训**：
+
+- 本板的“内存不够”往往不是**总量**不够，而是**连续块**不够：`largest free block` 比 `free sram` 更能定位问题。
+- **8MB PSRAM 不是万能**：IDF 里 PSRAM 区域不带 `MALLOC_CAP_DMA`，凡是用 `MALLOC_CAP_DMA` 分配的
+  大块（相机 DMA、部分驱动缓冲）都只能在内部 SRAM 里找。驱动自带的 PSRAM 模式开关
+  （`CONFIG_CAMERA_PSRAM_DMA` / 运行时 `esp_camera_set_psram_mode()`）是本板试过的**唯一**绕开途径，
+  但**实测不可用**（见上文）—— 所以只能从“减少内部连续块需求 / **永不 deinit 相机**”下手
+  （本板即如此：全程单一 JPEG 模式，见上）。
+- **失败路径必须如实返回**：当时 `video_stop` 失败仍回 `ok:true`，用户看到的是“一切正常 + 拍照莫名 500”，
+  排查成本全转嫁到了现象端（无重试、无降级、无错误文案）。
+
+**回归防护**：`scripts/tests/test_web_realtime_video.py` 的 `TestSingleCameraMode`：
+板级不得再出现 `Reinit`、`Capture()` 的 JPEG 分支只允许一行调用、
+`config.json` 两个变体都必须带 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT=y`、
+预览解码必须有两道越界保护（先读 JPEG 头定尺寸 + 把 `outbuf_size` 交给解码器）；
+另有 `test_img_src_set_only_after_device_ready`（`<img src>` 必须在 `video_start` 之后设）
++ `test_show_box_does_not_open_stream`（出框不许连流）。
+
+### 23. 拍照后实时视频再也出不了画（驱动帧不归还，2026-09 修复）
+
+**现象**（用户真机报告，两条路径都中招）：
+
+- 先开「📹 实时视频」→ 再拍照：**照片能拍成**，但拍完之后视频**再也不动**（定格/全黑）；
+- 先拍照 → 再开视频：视频**从头一帧都没有**；
+- 两者都**只能重启设备**恢复，且「停流 → 重开」也救不回来。
+
+真机日志（网页「🐞 系统日志」）特征极固定 —— 两条 WARN **成对出现、每 ~4 秒一次**：
+
+```
+W (149619) cam_hal: Failed to get frame: timeout
+W (149619) LocalVideo: fb_get failed
+W (153669) cam_hal: Failed to get frame: timeout
+W (153669) LocalVideo: fb_get failed
+I (153789) LocalVideo: stream server stopped
+I (153799) CompactWifiBoardS3CamAirobot: video stream stopped
+I (159979) LocalVideo: stream server started on port 81
+I (159979) CompactWifiBoardS3CamAirobot: video stream started (jpeg mode)
+W (164029) cam_hal: Failed to get frame: timeout   ← 停流重开照样失败
+```
+
+**关键线索**：间隔 **4.05 秒** —— 正好是驱动取帧超时 `FB_GET_TIMEOUT = 4000ms`
+（`managed_components/espressif__esp32-camera/driver/esp_camera.c:387`）。
+“超时”意味着驱动侧**根本没有可用帧**，与网络/编码无关，所以“停流重开”当然无效。
+
+**根因（驱动源码双证）**：本板 `fb_count=1`（帧池只有一块），cam_hal 判断某块帧“可用”看的是
+`frames[x].en`：`cam_give()`（= `esp_camera_fb_return()`）置 1、采集时置 0。
+`Esp32Camera::Capture()` 取走帧后放进 `current_fb_` **长期不还** —— 旧实现靠 `Reinit()` 里的
+`Release()` 顺手归还，所以从不暴露；而“单一 JPEG 模式永不 Reinit”之后，那块帧的 `en` 永远是 0，
+cam_task 的 `cam_get_next_frame()` 找不到空闲缓冲 → 相机停摆 → 之后每次 `esp_camera_fb_get()`
+都等满 4 秒返回 NULL。
+**拍照本身反而正常**（`Capture()` 读的是自己 `current_fb_` 里那份数据），所以现象看起来是“照片好、视频坏”。
+
+**为什么“先拍照”更惨**：网页拍照/AI 拍照都不归还，于是**开机后第一张照片就是相机停摆的时刻**，
+此后视频无论怎么开都拿不到帧 —— 与用户描述完全一致。
+
+**修复（2026-09）**：新增 `Esp32Camera::ReleaseCurrentFrame()`（幂等：还了就置空），拍照链路用完即还：
+
+| 链路 | 归还点 | 备注 |
+|---|---|---|
+| AI 拍照（`Explain()`）| 函数**最开头**的 `FrameReleaser` 守卫 | 覆盖全部出口（含 6 处 `throw`）；必须等编码线程 join 之后 |
+| 网页拍照（`LocalPhotoCapture()`）| `EncodeCurrentFrameToJpeg()` 之后 | 成功失败都要还：编码要读 `current_fb_` |
+| `Capture()` 自己 | 取新帧之前先 `ReleaseCurrentFrame()` | 连取两帧时先还再取，取帧失败也不会把旧帧扣住 |
+| 实时视频流（`local_video_stream.cc`）| 每帧 `fb_get` → 发送 → `fb_return(fb)` | 本来就是配对的，本次未改动 |
+
+> ⚠️ 不要图省事改成“等下一次 `Capture()` 再归还”：那样一次拍照之后到下次拍照之间帧一直被攥着，
+> 期间只要开视频（或视频正在跑）必然全黑 —— 那就正是本次的 bug。
+
+**真机验证要点**（上一节的“≥10 次来回”按这三条判）：
+
+1. 开视频 → 拍照（网页 + AI 各一次）→ 画面应在 1~2 帧内恢复；
+2. 拍照 → 开视频必须能出画；
+3. 日志里**不应**再出现 `cam_hal: Failed to get frame: timeout` + `LocalVideo: fb_get failed` 成对刷屏。
+
+**教训**：
+
+- `fb_count=1` 不只是“少占内存”，它把帧变成了**全局唯一资源**：谁 `Capture()` 谁就必须
+  **显式归还**，而且归还时机要写进接口注释（否则下一个改代码的人一定会漏）。
+- 单一模式/长生命周期对象会把“借用”变成“持有”：旧代码里那条顺手归还的路径一消失，问题才浮出来 ——
+  **删掉/绕过一条清理路径时，要顺查它顺带兜住了什么**。
+- 日志里**稳定的时间间隔**往往就是某个超时常量（这里 4.05s ≈ 4000ms）：先把它和源码对上，再往下查会少走很多弯路。
+
+**回归防护**：`scripts/tests/test_web_realtime_video.py` 的 `TestPhotoReturnsDriverFrame`（归还接口存在且幂等、
+`Explain()` 的守卫必须在启动编码线程之前就装好、`Capture()` 先还再取且不再手写裸 `fb_return`、
+网页拍照必须在编码后归还、取帧超时只重试不退出）
++ `test_airobot_web_photo.py::test_reuses_captured_frame`（“不得自己取帧”的另一半：**拍完必须归还**）。
+
 ## 与上游合并提示
 
 作为独立命名的 board（`bread-compact-wifi-s3cam-airobot`），其目录与 `config.json` 的 `type`/`name` 均为唯一标识，不会与上游同名板冲突。合并上游代码时注意保留 `main/Kconfig.projbuild` 与 `main/CMakeLists.txt` 中本板的注册分支。
 本板新增的 `local_photo.*`、`photo_store.*` 由 `main/CMakeLists.txt` 的 `file(GLOB boards/<BOARD_DIR>/*.cc)` 自动纳入，无需在核心 CMake 里登记。
+
+### 共享文件的改动面（2026-09 重构后，刻意压到最小）
+
+“相机全程单一 JPEG 模式”这个设计，落在共享文件 `main/boards/common/esp32_camera.cc` 上的改动只有两处：
+
+| 位置 | 改了什么 | 为什么不用改更多 |
+|---|---|---|
+| 文件头的匿名 namespace | **新增** `DecodeJpegPreview()`（约 55 行，纯新增，本项目自有区）| 解码逻辑集中在这里，不往上游函数里塞 |
+| `Capture()` | 上游那 2 行“JPEG 不解码、只打日志” → **1 行调用**；归还旧帧的 `if` 块（2 行）→ `ReleaseCurrentFrame()`（1 行）| 解上游冲突时只需手工解这几行 |
+| `Explain()` | 函数开头**新增** 1 个归还驱动帧的 `FrameReleaser` 守卫（+4 行注释）| 守卫放在函数出口，不逐条改 `return`/`throw`；见踩坑 23 |
+
+`EncodeCurrentFrameToJpeg()`（本项目自有方法）保持上游原样，
+JPEG 直通改由上游开关 `CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT` 提供（见「网页实时视频流 → 怎么配」）。
+同样，`Esp32Camera::Reinit()` 保留但本板不再调用（其它板可能用）。
+
+板级文件（`compact_wifi_board_s3cam_airobot.cc`）里唯一需要上游留意的是它对 `Board`/`Display` 接口的依赖：
+`DecodeJpegPreview()` 用了 `Board::GetInstance().GetDisplay()` + `LvglDisplay::SetPreviewImage()`，
+上游若改这两个接口的签名，这里要跟着改（编译期就能发现）。

@@ -55,6 +55,11 @@ class TestWebPhoto(unittest.TestCase):
         self.assertIn("->Capture()", self.local)
         self.assertNotIn("esp_camera_fb_get", self.local,
                          "不得自己取帧：fb_count=1 时 current_fb_ 被 Esp32Camera 持有，会阻塞")
+        # 反过来这一半同样致命：借来的帧必须在编码后还回去。
+        # 2026-09 真机现象（见 test_web_realtime_video.py 的 TestPhotoReturnsDriverFrame）：
+        # 拍照后实时视频流再也取不到帧，只能重启。
+        self.assertIn("ReleaseCurrentFrame()", self.local,
+                      "拍完必须归还驱动帧：fb_count=1 时攥着不放会把相机停摆")
 
     def test_encode_method_is_additive(self):
         """新增的编码方法必须是纯增量：只加方法，不改 Capture/Explain 的签名。"""

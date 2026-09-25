@@ -22,6 +22,43 @@
 #define TAG "HttpUpload"
 
 #define MUSIC_DIR "/sdcard/music"
+#define ANNOUNCE_DIR "/sdcard/announce"
+
+// 解析 "dir" 参数选择目标目录：缺省（或非 announce）=> 歌曲目录；announce => 提示音目录。
+// 两者差异只有两点：提示音只收 .mp3（无 .lrc 歌词），删除时不连带删歌词。
+static const char* DirFromQuery(const char* q) {
+    if (q != nullptr) {
+        char d[16] = {};
+        if (httpd_query_key_value(q, "dir", d, sizeof(d)) == ESP_OK && strcmp(d, "announce") == 0) {
+            return ANNOUNCE_DIR;
+        }
+    }
+    return MUSIC_DIR;
+}
+// 目录是否为提示音目录/提示音标识。
+// ⚠️ 这里必须同时接受两种形态：查询参数值 "announce"（WebSocket 与前端直接传的）
+// 和目录路径 "/sdcard/announce"（HTTP 上传经 DirFromQuery 得到的是路径）。
+// 只认一种会出现“上传成功但列表为空”——实际列的是歌曲目录，前端找不到 motion.mp3。
+static bool IsAnnounceDir(const char* dir) {
+    if (dir == nullptr) {
+        return false;
+    }
+    return strcmp(dir, "announce") == 0 || strcmp(dir, ANNOUNCE_DIR) == 0;
+}
+
+// 确保目录存在（对齐 photo_store.cc 的 EnsureDir）：/sdcard/music 通常早就有了，
+// 但 /sdcard/announce 可能从未被创建过——不建的话 fopen(..., "wb") 会直接失败
+//（页面报 "cannot create file on SD card"）。目录存在（且确实是目录）则返回 true。
+static bool EnsureDir(const char* dir) {
+    if (dir == nullptr || dir[0] == '\0') {
+        return false;
+    }
+    struct stat st = {};
+    if (stat(dir, &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+    return mkdir(dir, 0775) == 0;
+}
 
 // 上传成功回调（在 StartUploadServer 时注入），用于刷新上层歌曲列表缓存
 static std::function<void()> s_on_uploaded;
@@ -31,6 +68,8 @@ static esp_timer_handle_t s_wifi_timer = nullptr;
 static AlarmWebApi s_alarm_api;
 // 机器人控制回调(由板级 SetUnoWebApi 注入)
 static UnoWebApi s_uno_api;
+// 实时视频流回调(由板级 SetVideoWebApi 注入)
+static VideoWebApi s_video_api;
 // 网页拍照回调(由板级 SetCameraWebApi 注入)
 static CameraWebApi s_camera_api;
 
@@ -48,6 +87,7 @@ static int s_ws_count = 0;
 
 void SetAlarmWebApi(const AlarmWebApi& api) { s_alarm_api = api; }
 void SetUnoWebApi(const UnoWebApi& api) { s_uno_api = api; }
+void SetVideoWebApi(const VideoWebApi& api) { s_video_api = api; }
 void SetCameraWebApi(const CameraWebApi& api) { s_camera_api = api; }
 
 // URL 解码（%XX -> 字符，+ -> 空格），用于文件名
@@ -240,6 +280,9 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
     }
     UrlDecode(name, sizeof(name), name);
     SanitizeName(name);
+    // 目标目录由 dir 参数决定（缺省为歌曲目录，dir=announce 为提示音目录）
+    const char* target_dir = DirFromQuery(q);
+    bool is_announce = IsAnnounceDir(target_dir);
     bool is_mp3 = HasSuffix(name, ".mp3");
     bool is_lrc = HasSuffix(name, ".lrc");
     if (!is_mp3 && !is_lrc) {
@@ -247,9 +290,18 @@ static esp_err_t HandleUpload(httpd_req_t* req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "only .mp3 / .lrc files are allowed");
         return ESP_OK;  // 响应已通过 send_err 发送，返回 OK 避免 httpd 直接关闭 socket
     }
+    if (is_announce && !is_mp3) {
+        ESP_LOGE(TAG, "Upload: announce dir only accepts .mp3, name='%s'", name);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "announce dir only accepts .mp3");
+        return ESP_OK;
+    }
+
+    // 目录可能从未创建过（/sdcard/announce 不随固件生成）：先确保存在，
+    // 否则下面 fopen 会失败并返回 "cannot create file on SD card"
+    EnsureDir(target_dir);
 
     char path[320];
-    snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
+    snprintf(path, sizeof(path), "%s/%s", target_dir, name);
 
     if (!overwrite) {
         FILE* exist = fopen(path, "rb");
@@ -315,9 +367,9 @@ static std::string MusicActionJson(const char* body);
 
 // 生成 /sdcard/music 下所有 .mp3 歌曲的 JSON 数组字符串(含大小/修改时间)。
 // 纯函数(不依赖 httpd_req)，供 HTTP GET /music 与 WebSocket music_list 共用。
-static std::string MusicListJson() {
+static std::string MusicListJson(const char* list_dir = MUSIC_DIR) {
     cJSON* arr = cJSON_CreateArray();
-    DIR* dir = opendir(MUSIC_DIR);
+    DIR* dir = opendir(list_dir);
     if (dir != nullptr) {
         struct dirent* entry = nullptr;
         while ((entry = readdir(dir)) != nullptr) {
@@ -329,7 +381,7 @@ static std::string MusicListJson() {
                 continue;  // 只列出歌曲，.lrc 作为同名附属不单独显示
             }
             char path[320];
-            snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
+            snprintf(path, sizeof(path), "%s/%s", list_dir, name);
             // 用 stat() 一次性取文件大小与修改时间(上传时刻)，避免再单独 fopen
             struct stat st = {};
             long size = 0;
@@ -358,7 +410,8 @@ static std::string MusicListJson() {
 // 注意: 文件修改时间依赖 FATFS 时间戳(FATFS_TIMESTAMP)与设备同步的系统时间；未启用时 mtime 可能为 0。
 static esp_err_t HandleMusicList(httpd_req_t* req) {
     SetCors(req);
-    std::string body = MusicListJson();
+    const char* q = strchr(req->uri, '?');
+    std::string body = MusicListJson(DirFromQuery(q ? q + 1 : nullptr));
     return SendJson(req, body);
 }
 
@@ -386,6 +439,10 @@ static std::string MusicActionJson(const char* body) {
 
     if (strcmp(action, "delete") == 0) {
         cJSON* c_name = cJSON_GetObjectItem(root, "name");
+        // dir 可选：缺省/其他值删歌曲，announce 删提示音（提示音无歌词，不连带删除）
+        cJSON* c_dir = cJSON_GetObjectItem(root, "dir");
+        bool del_announce = (c_dir && c_dir->valuestring) ? IsAnnounceDir(c_dir->valuestring) : false;
+        const char* dir_path = del_announce ? ANNOUNCE_DIR : MUSIC_DIR;
         if (c_name && c_name->valuestring && c_name->valuestring[0] != '\0') {
             char name[256] = {};
             snprintf(name, sizeof(name), "%s", c_name->valuestring);
@@ -393,15 +450,18 @@ static std::string MusicActionJson(const char* body) {
             size_t nlen = strlen(name);
             bool is_mp3 = HasSuffix(name, ".mp3");
             bool is_lrc = HasSuffix(name, ".lrc");
+            if (del_announce && !is_mp3) {
+                is_lrc = false;  // 提示音目录只认 .mp3
+            }
             if (is_mp3 || is_lrc) {
                 char path[320];
-                snprintf(path, sizeof(path), "%s/%s", MUSIC_DIR, name);
+                snprintf(path, sizeof(path), "%s/%s", dir_path, name);
                 if (remove(path) == 0) {
-                    if (is_mp3) {
+                    if (is_mp3 && !del_announce) {
                         // 删除歌曲时连带删除同名歌词(如存在)
                         std::string base_name(name, nlen - 4);  // 去掉 .mp3 后缀
                         char lrc[320];
-                        snprintf(lrc, sizeof(lrc), "%s/%s.lrc", MUSIC_DIR, base_name.c_str());
+                        snprintf(lrc, sizeof(lrc), "%s/%s.lrc", dir_path, base_name.c_str());
                         remove(lrc);
                     }
                     resp = "{\"ok\":true}";
@@ -721,6 +781,27 @@ static void WsPushStatus() {
 // 对外接口：板级在状态变化时调用，把当前 uno 状态推给已连接的 web 前端(无连接则空操作)。
 void WebNotifyUnoStatus() { WsPushStatus(); }
 
+// 视频流状态回报：由板级的帧率统计回调触发（约每秒一次）。
+// 停止时也要推一条（video=0），前端才能把角标收回“--”。
+void WebNotifyVideoStat(float fps, int width, int height, bool running) {
+    cJSON* j = cJSON_CreateObject();
+    if (j == nullptr) {
+        return;
+    }
+    cJSON_AddNumberToObject(j, "video", running ? 1 : 0);
+    if (running) {
+        cJSON_AddNumberToObject(j, "fps", static_cast<double>(fps));
+        cJSON_AddNumberToObject(j, "w", width);
+        cJSON_AddNumberToObject(j, "h", height);
+    }
+    char* s = cJSON_PrintUnformatted(j);
+    if (s != nullptr) {
+        WsPush(s);
+        free(s);
+    }
+    cJSON_Delete(j);
+}
+
 // 处理一条来自前端的 JSON 消息(action)并返回响应 JSON 字符串。
 static std::string WsHandleMessage(const char* body) {
     cJSON* root = cJSON_Parse(body);
@@ -774,12 +855,15 @@ static std::string WsHandleMessage(const char* body) {
     } else if (strcmp(action, "uno_servo_home_get") == 0) {
         resp = s_uno_api.get_servo_home ? s_uno_api.get_servo_home() : std::string("{\"value\":82}");
     } else if (strcmp(action, "music_list") == 0) {
-        resp = MusicListJson();
+        cJSON* c_dir = cJSON_GetObjectItem(root, "dir");
+        resp = MusicListJson((c_dir && IsAnnounceDir(c_dir->valuestring)) ? ANNOUNCE_DIR : MUSIC_DIR);
     } else if (strcmp(action, "music_delete") == 0) {
         cJSON* del = cJSON_CreateObject();
         cJSON_AddStringToObject(del, "action", "delete");
         cJSON* c_name = cJSON_GetObjectItem(root, "name");
         if (c_name && c_name->valuestring) cJSON_AddStringToObject(del, "name", c_name->valuestring);
+        cJSON* c_dir = cJSON_GetObjectItem(root, "dir");
+        if (c_dir && c_dir->valuestring) cJSON_AddStringToObject(del, "dir", c_dir->valuestring);
         char* dstr = cJSON_PrintUnformatted(del);
         cJSON_Delete(del);
         if (dstr) { resp = MusicActionJson(dstr); free(dstr); }
@@ -855,6 +939,30 @@ static std::string WsHandleMessage(const char* body) {
         bool on = (c_on != nullptr) && (cJSON_IsBool(c_on) ? cJSON_IsTrue(c_on) : c_on->valueint != 0);
         LogCaptureSetUartMirror(on);
         resp = std::string("{\"ok\":true,\"mirror\":") + (on ? "1" : "0") + "}";
+    } else if (strcmp(action, "video_start") == 0) {
+        // 实时视频流：板级切相机到 JPEG 模式并启动 /stream（端口 81）。
+        // 没人连上 /stream 时不会抓帧，所以“勾选”本身不等于持续占带宽。
+        resp = s_video_api.start ? s_video_api.start()
+                                 : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
+    } else if (strcmp(action, "video_stop") == 0) {
+        resp = s_video_api.stop ? s_video_api.stop()
+                                : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
+    } else if (strcmp(action, "video_cfg_get") == 0) {
+        // 读视频参数（画面尺寸/帧率/质量）：打开设置弹窗时调
+        resp = s_video_api.get_cfg ? s_video_api.get_cfg()
+                                   : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
+    } else if (strcmp(action, "video_cfg_set") == 0) {
+        // 改视频参数并即时生效（帧率/镜像立即；尺寸/质量需重 init 相机 ≈300ms）
+        cJSON* c_size = cJSON_GetObjectItem(root, "size");
+        cJSON* c_fps = cJSON_GetObjectItem(root, "fps");
+        cJSON* c_quality = cJSON_GetObjectItem(root, "quality");
+        cJSON* c_flip = cJSON_GetObjectItem(root, "flip");
+        resp = s_video_api.set_cfg
+                   ? s_video_api.set_cfg(c_size ? c_size->valueint : 1,
+                                         c_fps ? c_fps->valueint : 20,
+                                         c_quality ? c_quality->valueint : 12,
+                                         c_flip ? c_flip->valueint : 0)
+                   : std::string("{\"ok\":false,\"error\":\"unavailable\"}");
     }
     cJSON_Delete(root);
     // 若请求带 id, 将 id 注入到响应 JSON 中, 便于前端精确匹配请求-回执。
@@ -990,6 +1098,7 @@ static esp_err_t HandleWs(httpd_req_t* req) {
 #else  // !CONFIG_HTTPD_WS_SUPPORT
 // 未启用 WebSocket 时, 状态推送为空操作(板级调用 WebNotifyUnoStatus 安全)
 void WebNotifyUnoStatus() {}
+void WebNotifyVideoStat(float, int, int, bool) {}
 #endif
 
 // GET /alarm?action=list：返回闹钟 JSON 数组(供网页/外部读取)

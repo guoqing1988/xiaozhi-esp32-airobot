@@ -8,6 +8,7 @@
 #include "button.h"
 #include "config.h"
 #include "log_capture.h"
+#include "espnow_home.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
 #include "led/single_led.h"
@@ -18,6 +19,7 @@
 #include "local_music_player.h"
 #include "http_upload_server.h"
 #include "local_photo.h"
+#include "local_video_stream.h"
 #include "photo_store.h"
 #include "alarm_manager.h"
 #include "assets/lang_config.h"
@@ -25,6 +27,8 @@
 
 #include <esp_log.h>
 #include <esp_netif.h>
+#include <esp_system.h>
+#include <dirent.h>
 #include <esp_timer.h>
 #include <driver/i2c_master.h>
 #include <driver/sdmmc_host.h>
@@ -87,6 +91,9 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
 #endif
  
 #define TAG "CompactWifiBoardS3CamAirobot"
+// ESP-NOW 的排查日志单独用一个 TAG：全局日志级别被压到 ERROR 了，
+// 用独立 TAG 单独放开 INFO，网页日志面板就能看到“节点消息收到没有 / 播报卡在哪一步”。
+#define TAG_ESPNOW "ESP-NOW"
 
 class CompactWifiBoardS3CamAirobot : public WifiBoard {
 private:
@@ -113,6 +120,27 @@ private:
     TaskHandle_t uno_status_task_ = nullptr;  // UART0 RX 解析任务
     // web 控制页是否有 WS 连接: 有连接期间强制 WiFi 性能模式(见 SetPowerSaveLevel override)
     std::atomic<bool> web_control_active_{false};
+
+    // ---- ESP-NOW 居家节点（数据驱动：设备自描述能力，见 espnow_home.h）----
+    // 主控不保存任何具体传感器字段/阈值：名字、能力、状态一律由节点上报后存进注册表。
+    std::unique_ptr<EspNowHome> espnow_home_;
+    // ESP-NOW 必须等 WiFi 起来后再初始化（esp_now_init 在 WiFi 未初始化时空指针崩溃），
+    // 而构造函数阶段 WiFi 还没起 → 用每秒轮询等到就绪（与 http_upload_server.cc 同一做法）
+    esp_timer_handle_t espnow_wait_timer_ = nullptr;
+    int espnow_wait_ticks_ = 0;  // 轮询次数（日志里能看到，用来确认轮询真的在跑）
+    int espnow_wait_logs_ = 0;   // 已经打过的等待日志条数（只打前几条，避免刷屏）
+    // 播报冷却按 (节点, 音频名) 两个维度：我的家同时触发 motion/beam 时，
+    // 只按节点冷却会让它们互相压制（现场表现为"播报时有时无"）。
+    struct AnnounceCool {
+        bool used = false;
+        int node_id = 0;
+        char name[16] = {0};
+        int64_t ts_ms = 0;
+    };
+    static constexpr int kAnnounceCoolSlots = 8;
+    AnnounceCool announce_cool_[kAnnounceCoolSlots];
+    int announce_cool_pos_ = 0;
+    static constexpr int64_t kAnnounceCooldownMs = 10000;        // 播报冷却窗口（同节点同音频）
 
     // ---- 待机全屏大时钟（AI 可控: self.clock.set(开关+主题合一) / self.clock.current, NVS 持久化）----
     bool clock_mode_ = false;                // 时钟显示开关
@@ -176,7 +204,18 @@ private:
                                          DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
-    void InitializeCamera() {
+    // 构造相机配置。format 决定像素格式（**本板全程固定 JPEG**，见下方 InitializeCamera 的注释）：
+    //   PIXFORMAT_JPEG    —— 模组自带 JPEG 编码，驱动直接回 JPEG 帧：推流零编码零拷贝，
+    //                       拍照也只需一次 memcpy（EncodeCurrentFrameToJpeg 直通），
+    //                       且 DMA 只要 16384 字节内部 SRAM（RGB565 要 30720）。
+    //   PIXFORMAT_RGB565  —— 需要软件编码才能得到 JPEG；本板已不再使用（保留给其它板）。
+    // grab 决定取帧策略：
+    //   实时视频用 CAMERA_GRAB_LATEST（总是拿最新帧，宁可丢旧帧也不排队 —— 遥控要的是低延时）；
+    //   本板单一初始化就用它：Capture() 会连取两帧丢掉旧帧，拍照同样拿得到新画面。
+    // 引脚/分辨率/质量与 format 无关，故抽成一个函数；切换模式时复用它避免两处不一致。
+    static camera_config_t MakeCameraConfig(
+        pixformat_t format, camera_grab_mode_t grab = CAMERA_GRAB_WHEN_EMPTY,
+        framesize_t frame_size = FRAMESIZE_VGA, int quality = 12) {
         camera_config_t config = {};
         config.pin_d0 = CAMERA_PIN_D0;
         config.pin_d1 = CAMERA_PIN_D1;
@@ -196,13 +235,32 @@ private:
         config.pin_pwdn = CAMERA_PIN_PWDN;
         config.pin_reset = CAMERA_PIN_RESET;
         config.xclk_freq_hz = XCLK_FREQ_HZ;
-        config.pixel_format = PIXFORMAT_RGB565;
-        config.frame_size = FRAMESIZE_VGA;
-        config.jpeg_quality = 12;
+        config.pixel_format = format;
+        config.frame_size = frame_size;
+        config.jpeg_quality = quality;
+        // 不能改成 2：cam_hal 会多占 ~30KB DMA **内部** RAM，本板内部 SRAM 扛不住
+        // （见 esp32_camera.h 里 EncodeCurrentFrameToJpeg 的说明）。
         config.fb_count = 1;
         config.fb_location = CAMERA_FB_IN_PSRAM;
-        config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-        camera_ = new Esp32Camera(config);
+        config.grab_mode = grab;
+        return config;
+    }
+
+    void InitializeCamera() {
+        LoadVideoCfg();  // 先读出网页保存的视频参数（内含把帧率同步给流模块）
+        // ⚠ 相机**只初始化这一次**，像素格式恒为 JPEG，之后再也不 deinit/Reinit。
+        //
+        // 为什么必须单一模式（真机实测，见 README 踩坑 22）：本板内部 SRAM 的最大连续块
+        // 实测只有 ~12800 字节，而两种像素格式各自要求：RGB565(拍照) 30720、JPEG(视频) 16384。
+        // 开机时堆是干净的，30720 拿得到；一旦开过视频（deinit/init 过一次），堆被切碎且
+        // **最大连续块不再回升**，此后两个模式都分配失败 —— 表现为「拍照 500」+
+        // 「视频也再开不起来」，只能重启。所以：初始化一次，之后只写 sensor 寄存器。
+        //
+        // 按最大档 SVGA 初始化是为了帧缓冲够大（fb_size 按初始化分辨率算），
+        // 运行时可用 set_framesize 在 QVGA~SVGA 间随便切；质量按拍照档起。
+        camera_ = new Esp32Camera(MakeCameraConfig(PIXFORMAT_JPEG, CAMERA_GRAB_LATEST,
+                                                   kVideoMaxFrameSize, kPhotoQuality));
+        ApplyPhotoSensorParams();  // 平时按拍照参数（VGA）待命；开流时再切到用户设的推流参数
     }
 
     // 应用 NVS 保存的摄像头翻转设置(开机调用, 断电重启仍保持)
@@ -542,17 +600,23 @@ private:
             "To find a specific song by name/artist, use self.music.search instead.",
             PropertyList(),
             [this](const PropertyList&) -> ReturnValue {
-                auto songs = GetMusicPlayer()->ListSongs();
                 std::string result;
                 const size_t kMaxShown = 30;  // 截断: 避免几百首歌名撑爆 AI 上下文
-                for (size_t i = 0; i < songs.size() && i < kMaxShown; ++i) {
-                    result += songs[i] + "\n";
-                }
-                if (songs.size() > kMaxShown) {
-                    result += "...(共 " + std::to_string(songs.size()) + " 首, 仅显示前 " +
+                size_t total = 0;
+                // 锁内遍历、零拷贝（原先为显示 30 首却拷贝整张歌单）：
+                // 需要总数所以不能提前退出，只把前 30 首拼进结果。
+                GetMusicPlayer()->ForEachSong([&](const std::string& name) {
+                    if (total < kMaxShown) {
+                        result += name + "\n";
+                    }
+                    total++;
+                    return true;
+                });
+                if (total > kMaxShown) {
+                    result += "...(共 " + std::to_string(total) + " 首, 仅显示前 " +
                               std::to_string(kMaxShown) + " 首)";
                 } else {
-                    result += "共 " + std::to_string(songs.size()) + " 首";
+                    result += "共 " + std::to_string(total) + " 首";
                 }
                 return result;
             });
@@ -565,11 +629,11 @@ private:
                 std::string kw = props["keyword"].value<std::string>();
                 std::string lower_kw = kw;
                 std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
-                auto songs = GetMusicPlayer()->ListSongs();
                 std::string result;
                 size_t matched = 0;
                 const size_t kMaxShown = 30;
-                for (const auto& s : songs) {
+                // 锁内遍历、零拷贝（原先为搜关键词整表拷贝一次）
+                GetMusicPlayer()->ForEachSong([&](const std::string& s) {
                     bool hit = kw.empty();
                     if (!hit) {
                         hit = s.find(kw) != std::string::npos;
@@ -585,7 +649,8 @@ private:
                     if (hit) {
                         matched++;
                     }
-                }
+                    return true;   // 需要统计全部匹配数，不能提前退出
+                });
                 if (matched == 0) {
                     return std::string("未找到包含 \"") + kw + "\" 的歌曲";
                 }
@@ -718,7 +783,7 @@ private:
         }
         bool ringing = false;
         auto* player = GetMusicPlayer();  // 懒创建(首次响铃时建对象 + 扫描 SD 卡)
-        if (player != nullptr && !player->ListSongs().empty()) {
+        if (player != nullptr && player->HasSongs()) {
             if (!a.song.empty()) {
                 // 指定铃声: PlaySong 成功返回以"已开始播放"/"正在播放"开头；未找到则回退随机
                 std::string r = player->PlaySong(a.song);
@@ -902,8 +967,10 @@ private:
         // 统一加 '@' 前缀并一次性写完整行(避免拆成多次 uart_write_bytes):
         // 多次调用之间若被高优先级任务(音频 prio 8)抢占, Arduino 会先收到孤立的 '@',
         // 其 readBytesUntil('\n') 默认超时 1000ms 会干等 -> web 控制出现约 1 秒延迟。
+        // 行首再补一个 '\n': 上位机 UART0 与 ESP-IDF 控制台同口, 若前次留下了半行字节,
+        // 这个换行先把脏行收尾, 保证本行对 Arduino 而言一定以 '@' 开头。
         char frame[80];
-        int flen = snprintf(frame, sizeof(frame), "@%s\n", command_str);
+        int flen = snprintf(frame, sizeof(frame), "\n@%s\n", command_str);
         if (flen <= 0 || flen >= (int)sizeof(frame)) {
             LogCaptureAppend("[UNO] x @%s （指令过长）\n", command_str);
             return std::string("指令发送失败: ") + command_str;
@@ -1112,12 +1179,515 @@ private:
                 // web 控制页 WS 连接数变化: 遥控期间保持 WiFi 性能模式。
                 // 待机态是 WIFI_PS_MAX_MODEM, WS 帧要等 DTIM beacon 才下发, 实测有几百毫秒延迟。
                 web_control_active_ = (count > 0);
+                // 最后一个控制页断开（关页面/断网）：把视频流停掉，
+                // 否则相机会一直留在 JPEG 模式，拍照也没有 LCD 预览了。
+                if (count == 0 && LocalVideoStreamRunning()) {
+                    VideoStreamStop();
+                }
                 // 连接建立后立即提升; 断开后主动降回省电(否则会一直停在性能模式)
                 SetPowerSaveLevel(web_control_active_ ? PowerSaveLevel::PERFORMANCE
                                                       : PowerSaveLevel::LOW_POWER);
             },
         });
+        // 网页实时视频流：勾选才切 JPEG + 起 /stream，取消就切回 RGB565（拍照与 LCD 预览恢复）
+        SetVideoWebApi({
+            .start = [this]() { return VideoStreamStart(); },
+            .stop = [this]() { return VideoStreamStop(); },
+            .get_cfg = [this]() { return VideoCfgJson(); },
+            .set_cfg = [this](int size, int fps, int quality, int flip) {
+                return VideoCfgApply(size, fps, quality, flip);
+            },
+        });
         ApplyServoHome();   // 开机把 NVS 保存的回正角度下发给下位机
+    }
+
+    // ---- 网页实时视频流 ----
+
+    // ---- 实时视频的可调参数（网页「⚙️ 视频设置」改，存 NVS，不用重烧固件）----
+    // size   ：画面尺寸（0=320×240 更流畅 / 1=640×480 默认 / 2=800×600 更清晰）
+    // fps    ：帧率上限（改完下一帧立即生效，不用重启流）
+    // quality：JPEG 质量（数字越大越糊、单帧越小、延时越低；10≈清晰 20≈标准 30≈省流）
+    // 三项都是「只写 sensor 寄存器」，不重 init 相机（见下方 ApplyVideoSensorParams）。
+    struct VideoCfg {
+        int size = 1;
+        int fps = 20;
+        int quality = 12;
+    };
+    VideoCfg video_cfg_;
+
+    // 相机初始化时就用的"最大档"分辨率：
+    // 帧缓冲 fb_size = 宽 × 高 / 5 是按「初始化时的分辨率」算的（cam_hal.c:588），
+    // 所以按最大档初始化（SVGA 800×600 → 96KB PSRAM），运行时就能用 sensor 的
+    // set_framesize 在 [QVGA..SVGA] 里随便切，而不用重启相机。
+    // 反例：按当前分辨率初始化再往大改 → cam_hal 的 FB-OVF 检查会 ll_cam_stop() 停摆。
+    // 必须 >= VideoFrameSizeOf(2)。
+    static constexpr framesize_t kVideoMaxFrameSize = FRAMESIZE_SVGA;
+
+    // 不推流时的"拍照参数"：分辨率 VGA + JPEG 质量 12。
+    // 与以前「停流时切回 RGB565」得到的画面完全一致（那时 init 固定 VGA、quality 12）。
+    static constexpr framesize_t kPhotoFrameSize = FRAMESIZE_VGA;
+    static constexpr int kPhotoQuality = 12;
+
+    static framesize_t VideoFrameSizeOf(int size) {
+        switch (size) {
+            case 0: return FRAMESIZE_QVGA;  // 320×240
+            case 2: return FRAMESIZE_SVGA;  // 800×600
+            default: return FRAMESIZE_VGA;  // 640×480
+        }
+    }
+
+    // 动态切换视频分辨率：只写 sensor 寄存器，不重启相机、不断流（下一帧生效）。
+    // 前提是目标分辨率不超过初始化时的 kVideoMaxFrameSize（否则帧缓冲装不下）。
+    void ApplyVideoFramesize() {
+        if (sensor_t *s = esp_camera_sensor_get()) {
+            s->set_framesize(s, VideoFrameSizeOf(video_cfg_.size));
+        }
+    }
+
+    // 把 sensor 调成「推流」参数：用户设的分辨率 + JPEG 质量。
+    // 两次 I2C 寄存器写，不分配任何内存、不重启相机（这是本板不再 Reinit 的基础）。
+    void ApplyVideoSensorParams() {
+        if (sensor_t *s = esp_camera_sensor_get()) {
+            s->set_framesize(s, VideoFrameSizeOf(video_cfg_.size));
+            s->set_quality(s, video_cfg_.quality);
+        }
+    }
+
+    // 把 sensor 调回「拍照」参数（VGA + 质量 12）：不推流时待命用，
+    // 保证网页拍照/AI 拍照的分辨率与画质和以前一致（不受视频设置影响）。
+    void ApplyPhotoSensorParams() {
+        if (sensor_t *s = esp_camera_sensor_get()) {
+            s->set_framesize(s, kPhotoFrameSize);
+            s->set_quality(s, kPhotoQuality);
+        }
+    }
+
+    void ClampVideoCfg() {
+        if (video_cfg_.size < 0) video_cfg_.size = 0;
+        if (video_cfg_.size > 2) video_cfg_.size = 2;
+        if (video_cfg_.fps < 1) video_cfg_.fps = 1;
+        if (video_cfg_.fps > 30) video_cfg_.fps = 30;
+        if (video_cfg_.quality < 4) video_cfg_.quality = 4;
+        if (video_cfg_.quality > 63) video_cfg_.quality = 63;
+    }
+
+    void LoadVideoCfg() {
+        Settings s("video", false);
+        video_cfg_.size = s.GetInt("size", 1);
+        video_cfg_.fps = s.GetInt("fps", 20);
+        video_cfg_.quality = s.GetInt("quality", 12);
+        ClampVideoCfg();
+        LocalVideoStreamSetFps(video_cfg_.fps);  // 让流模块的运行帧率与配置一致
+    }
+
+    void SaveVideoCfg() {
+        Settings s("video", true);
+        s.SetInt("size", video_cfg_.size);
+        s.SetInt("fps", video_cfg_.fps);
+        s.SetInt("quality", video_cfg_.quality);
+    }
+
+    // 镜像/翻转：与 MCP 工具 self.camera.set_flip 共用同一份 NVS（命名空间 camera 的 flip 键），
+    // 这样网页改的、AI 工具改的、开机读回的是同一个值，不会两套配置打架。
+    // flip 位含义：bit0 = 左右镜像，bit1 = 上下翻转。
+    // 注意：翻转值**不做内存缓存**。因为 MCP 工具 self.camera.set_flip 会自己直接写
+    // sensor + NVS（不经过下面的 SetCameraFlip），缓存会过期 → 网页弹窗显示旧值、
+    // 判断“有没有变化”也会判错。这里每次直接读 NVS（几十微秒，可忽略）。
+    int GetCameraFlip() {
+        Settings s("camera", false);
+        return s.GetInt("flip", 0);
+    }
+
+    void SetCameraFlip(int mode) {
+        if (mode < 0) mode = 0;
+        if (mode > 3) mode = 3;
+        if (camera_ != nullptr) {
+            // 只改 sensor 寄存器，立即生效（不用重开相机，视频画面当场就翻）
+            camera_->SetHMirror(mode & 1);
+            camera_->SetVFlip((mode & 2) != 0);
+        }
+        Settings s("camera", true);
+        s.SetInt("flip", mode);
+    }
+
+    // 四项参数都是原地生效：响应里不再需要 size_changed（改分辨率也不用重连 <img>，
+    // 因为 MJPEG 每帧是独立 JPEG 自带尺寸，浏览器逐帧替换）。
+    std::string VideoCfgJson() {
+        return std::string("{\"ok\":true,\"size\":") + std::to_string(video_cfg_.size) +
+               ",\"fps\":" + std::to_string(video_cfg_.fps) +
+               ",\"quality\":" + std::to_string(video_cfg_.quality) +
+               ",\"flip\":" + std::to_string(GetCameraFlip()) + "}";
+    }
+
+    // 网页保存参数：帧率/镜像/JPEG 质量都立即生效；只有画面尺寸需要重建相机，
+    // 正在播时顺带重启流（前端拿到 ok 后重连 <img>）。
+    // 网页保存参数：四项都即时生效（详见各分支注释）。
+    // 关键：**先算有没有真的变化**——没变就不写 NVS、不写 sensor 寄存器，
+    // 避免“什么都没改也点一下应用”带来的 flash 磨损、I2C 抖动和画面闪动。
+    std::string VideoCfgApply(int size, int fps, int quality, int flip) {
+        const VideoCfg old = video_cfg_;   // 旧值（clamp 之后再比较，判断才准）
+        video_cfg_.size = size;
+        video_cfg_.fps = fps;
+        video_cfg_.quality = quality;
+        ClampVideoCfg();
+        const bool size_changed = (video_cfg_.size != old.size);
+        const bool quality_changed = (video_cfg_.quality != old.quality);
+        const bool fps_changed = (video_cfg_.fps != old.fps);
+        const bool flip_changed = (flip != GetCameraFlip());  // 读 NVS，不缓存（见 GetCameraFlip 注释）
+        // NVS 只在有变化时落盘（写入有磨损寿命，而且会阻塞）
+        if (size_changed || quality_changed || fps_changed || flip_changed) {
+            SaveVideoCfg();
+        }
+        if (fps_changed) {
+            LocalVideoStreamSetFps(video_cfg_.fps);  // 帧率不用重启就生效
+        }
+        if (flip_changed) {
+            SetCameraFlip(flip);                     // 镜像/翻转立即生效（与是否在播无关）
+        }
+        // JPEG 质量只写 sensor 寄存器（ov2640.c 的 set_quality 就一行 write_reg），
+        // 不参与帧缓冲分配 → 推流中改也不用重启相机，下一帧就是新画质。
+        if (quality_changed && LocalVideoStreamRunning()) {
+            if (sensor_t *s = esp_camera_sensor_get()) {
+                s->set_quality(s, video_cfg_.quality);
+            }
+        }
+        // 画面尺寸也走动态切换：帧缓冲按 kVideoMaxFrameSize 分配好了，
+        // 只要不超过它就能用 sensor 的 set_framesize 直接换 → 不重启相机、不断流。
+        if (size_changed && LocalVideoStreamRunning()) {
+            ApplyVideoFramesize();
+        }
+        return VideoCfgJson();
+    }
+
+    // 开启：把 sensor 切到推流参数（分辨率+质量，两次寄存器写）→ 起独立 /stream 服务（端口 81）。
+    // 关闭：停 /stream → sensor 复位成拍照参数（VGA + 质量 12）。
+    // ⚠ 两边都**不 Reinit 相机**：像素格式全程是 JPEG，切换不再申请任何大块内存，
+    //   也就不会再有「切换失败 → 相机卡死 → 拍照/视频全废」这个故障面（见踩坑 22）。
+    // 说明：没有浏览器连着 /stream 时不会抓帧，所以只有真有人看时才占射频/CPU。
+    std::string VideoStreamStart() {
+        if (LocalVideoStreamRunning()) {
+            return "{\"ok\":true,\"msg\":\"视频已在运行\"}";
+        }
+        if (camera_ == nullptr) {
+            return "{\"ok\":false,\"error\":\"相机不可用\"}";
+        }
+        // 只改 sensor 寄存器：分辨率 + JPEG 质量（都立即生效，不重启相机、不断流）
+        ApplyVideoSensorParams();
+        // 视频流对延时敏感：待机态 WIFI_PS_MAX_MODEM 会让帧等 DTIM beacon（几百毫秒）
+        SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        if (!LocalVideoStreamStart([this](float fps, int w, int h) {
+                WebNotifyVideoStat(fps, w, h, fps > 0.0f);
+            })) {
+            ApplyPhotoSensorParams();  // 服务没起来：恢复拍照参数，不影响其它功能
+            SetPowerSaveLevel(web_control_active_ ? PowerSaveLevel::PERFORMANCE
+                                                 : PowerSaveLevel::LOW_POWER);
+            return "{\"ok\":false,\"error\":\"启动视频服务失败\"}";
+        }
+        ESP_LOGI(TAG, "video stream started (jpeg mode)");
+        return "{\"ok\":true,\"msg\":\"视频已开启\"}";
+    }
+
+    std::string VideoStreamStop() {
+        LocalVideoStreamStop();
+        WebNotifyVideoStat(0.0f, 0, 0, false);  // 立即把角标收回"--"，不等统计回调
+        // 把 sensor 复位成拍照参数（VGA + 质量 12）：与以前「切回 RGB565」得到的画面一致；
+        // 相机不动、不释放、不重 init，所以这一步不可能失败。
+        ApplyPhotoSensorParams();
+        // 恢复原有省电策略：若 web 控制页还连着则保持性能模式
+        SetPowerSaveLevel(web_control_active_ ? PowerSaveLevel::PERFORMANCE
+                                             : PowerSaveLevel::LOW_POWER);
+        ESP_LOGI(TAG, "video stream stopped");
+        return "{\"ok\":true,\"msg\":\"视频已关闭\"}";
+    }
+
+    // ---- ESP-NOW 居家节点 ----
+
+    // 事件播报：仅待机时播（不打断对话），同节点同音频 10 秒冷却
+    // （冷却按 (节点, 音频名)：我的家四路传感器同时命中时不得互相压制）
+    // 把 /sdcard/announce 里实际有哪些文件打出来：排查“文件到底传到哪了 / 名字对不对”
+    // 最直接的一行（走 ESP-NOW TAG，已单独放开到 INFO，网页日志一定能看到）。
+    void LogAnnounceDir() {
+        DIR* dir = opendir("/sdcard/announce");
+        if (dir == nullptr) {
+            ESP_LOGE(TAG_ESPNOW, "提示音目录 /sdcard/announce 打不开(没插卡? 目录不存在?)");
+            return;
+        }
+        // 固定缓冲拼文件名：这里刻意不用 std::string —— 报错路径（没插卡 / 文件名异常）
+        // 往往正是内存紧张的时候，绝不在这个时机做堆分配。
+        char names[8 * 32 + 1] = {0};
+        size_t used = 0;
+        int count = 0;
+        struct dirent* e = nullptr;
+        while ((e = readdir(dir)) != nullptr) {
+            if (e->d_name[0] == '.') {
+                continue;  // 跳过 . 与 ..
+            }
+            if (count < 8) {
+                size_t need = strlen(e->d_name);
+                if (used + need + 1 < sizeof(names)) {
+                    memcpy(names + used, e->d_name, need);
+                    used += need;
+                    names[used++] = ' ';
+                    names[used] = '\0';
+                }
+            }
+            count++;
+        }
+        closedir(dir);
+        ESP_LOGE(TAG_ESPNOW, "提示音目录 /sdcard/announce: %d 个文件 %s", count,
+                 (names[0] == '\0') ? "(空)" : names);
+    }
+
+    void Announce(int node_id, const char* name) {
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+        if (node_id < 1 || node_id > EspNowHome::kMaxNodes) {
+            ESP_LOGE(TAG_ESPNOW, "播报跳过: 节点号非法 (node=%d)", node_id);
+            return;
+        }
+        // 必须走 GetMusicPlayer() 懒创建：music_player_ 原本只在“放过歌 / 闹钟响过 /
+        // 网页上传过文件”之后才被创建。用户插卡拷好提示音、开机直接挥手触发时，
+        // 这里 music_player_ 还是 nullptr → 播报被静默跳过（而且日志是 WARN，
+        // 网页日志默认级别是 ERROR，用户什么都看不到）→ 现象就是“从来没播报过、也没日志”。
+        LocalMusicPlayer* player = GetMusicPlayer();
+        if (player == nullptr) {
+            ESP_LOGE(TAG_ESPNOW, "播报跳过: 播放器创建失败(未插卡?)");
+            return;
+        }
+        // 对话/播报中不插嘴：本地播放本身会把状态钉在 Speaking，天然串行
+        if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
+            ESP_LOGI(TAG_ESPNOW, "播报跳过: 设备忙(非待机), %s", name);
+            return;
+        }
+        int64_t now = EspNowHome::NowMs();
+        for (const auto& c : announce_cool_) {
+            if (c.used && c.node_id == node_id && strcmp(name, c.name) == 0 &&
+                (now - c.ts_ms) < kAnnounceCooldownMs) {
+                ESP_LOGI(TAG_ESPNOW, "播报跳过: 冷却中(还剩 %lld ms), %s",
+                         (long long)(kAnnounceCooldownMs - (now - c.ts_ms)), name);
+                return;
+            }
+        }
+        if (player->PlayAnnounce(name)) {
+            // 只有真的播起来才记冷却；同一 (节点,名字) 覆盖旧槽位，不刷爆表
+            AnnounceCool* slot = nullptr;
+            for (auto& c : announce_cool_) {
+                if (c.used && c.node_id == node_id && strcmp(name, c.name) == 0) {
+                    slot = &c;
+                    break;
+                }
+            }
+            if (slot == nullptr) {
+                for (auto& c : announce_cool_) {
+                    if (!c.used) {
+                        slot = &c;
+                        break;
+                    }
+                }
+            }
+            if (slot == nullptr) {
+                slot = &announce_cool_[announce_cool_pos_];
+                announce_cool_pos_ = (announce_cool_pos_ + 1) % kAnnounceCoolSlots;
+            }
+            slot->used = true;
+            slot->node_id = node_id;
+            snprintf(slot->name, sizeof(slot->name), "%s", name);
+            slot->ts_ms = now;
+            ESP_LOGI(TAG_ESPNOW, "播报开始: %s.mp3", name);
+        } else {
+            ESP_LOGE(TAG_ESPNOW,
+                     "播报失败: 打不开 /sdcard/announce/%s.mp3 (文件不存在/未插卡? "
+                     "从网页「歌曲管理」下方的提示音槽位上上传)",
+                     name);
+            LogAnnounceDir();  // 顺带列出目录里到底有什么，方便对照文件名
+        }
+#else
+        (void)node_id;
+        (void)name;
+#endif
+    }
+
+    // 上行事件在主任务上下文处理（传输层回调里已用 Schedule 切回来）
+    // 数据驱动：主控不认识任何事件名——kind=="say" 就播同名 MP3（文件不存在则静默跳过）；
+    // "evt" 只是状态上报（缓存由传输层维护），无需动作。
+    void OnHomeEvent(int node_id, const std::string& kind, const std::string& name,
+                     const std::string& arg, int64_t ts_ms) {
+        // 先把“收到了什么”记下来：排查时这是唯一的现场依据
+        ESP_LOGI(TAG_ESPNOW, "收到节点%d消息: kind=%s name=%s arg=%s", node_id, kind.c_str(),
+                 name.c_str(), arg.c_str());
+        (void)ts_ms;
+        if (kind == "say") {
+            Announce(node_id, name.c_str());
+        }
+    }
+
+    // WiFi STA 是否已就绪（拿到 IP）：ESP-NOW 强依赖 WiFi 驱动，且连接后信道才确定
+    static bool EspNowWifiReady() {
+        esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (netif == nullptr) {
+            return false;
+        }
+        esp_netif_ip_info_t ip = {};
+        if (esp_netif_get_ip_info(netif, &ip) != ESP_OK) {
+            return false;
+        }
+        return ip.ip.addr != 0;
+    }
+
+    // 等 WiFi 拿到 IP 的轮询回调：直接在这里启动 ESP-NOW，不绕回主任务。
+    // （为什么必须先等 WiFi：开机时 WiFi 还没初始化好，那时启动 ESP-NOW 会直接崩溃重启。）
+    static void OnEspNowWifiWait(void* arg) {
+        auto* self = static_cast<CompactWifiBoardS3CamAirobot*>(arg);
+        self->espnow_wait_ticks_++;
+        self->InitializeEspNowHome();
+    }
+
+    void InitializeEspNowHome() {
+        if (espnow_home_ != nullptr) {
+            return;   // 已启动（定时器重入 / 重复调用都安全）
+        }
+        if (!EspNowWifiReady()) {
+            // 开机时 WiFi 还没初始化好，这时候启动 ESP-NOW 会访问到未初始化的东西
+            // 直接崩溃重启（实测过），所以先每秒轮询，等 WiFi 拿到 IP 再回来启动。
+            //
+            // 这里原先一句日志都没有，出问题时只能靠猜，所以补上；
+            // 只打前几条，避免一秒一行刷屏。
+            if (espnow_wait_logs_ < 5) {
+                espnow_wait_logs_++;
+                ESP_LOGI(TAG, "ESP-NOW: still waiting for WiFi IP (tick=%d, heap=%u)",
+                         espnow_wait_ticks_, (unsigned)esp_get_free_heap_size());
+            }
+            if (espnow_wait_timer_ == nullptr) {
+                esp_timer_create_args_t args = {};
+                args.callback = &CompactWifiBoardS3CamAirobot::OnEspNowWifiWait;
+                args.arg = this;
+                args.name = "espnow_wifi_wait";
+                if (esp_timer_create(&args, &espnow_wait_timer_) == ESP_OK) {
+                    esp_timer_start_periodic(espnow_wait_timer_, 1000000);
+                }
+            }
+            return;
+        }
+        if (espnow_wait_timer_ != nullptr) {
+            esp_timer_stop(espnow_wait_timer_);
+            esp_timer_delete(espnow_wait_timer_);
+            espnow_wait_timer_ = nullptr;
+        }
+
+        ESP_LOGI(TAG, "ESP-NOW: WiFi ready, starting (heap=%u)", (unsigned)esp_get_free_heap_size());
+        espnow_home_ = std::make_unique<EspNowHome>();
+        bool ok = espnow_home_->Begin(
+            [this](int node_id, const std::string& kind, const std::string& name,
+                   const std::string& arg, int64_t ts_ms) {
+                // 传输层回调跑在 WiFi 任务上下文：必须切回主任务再动业务
+                // （AGENTS.md: callbacks may run outside the main task）
+                Application::GetInstance().Schedule([this, node_id, kind, name, arg, ts_ms]() {
+                    OnHomeEvent(node_id, kind, name, arg, ts_ms);
+                });
+            },
+            // 链路事件（信道变化 / 命令未确认 / 发送连续失败）：传输层零日志（UART0 共享），
+            // 由板级写到独立 TAG ESP-NOW —— 现场"命令失败/延迟"时这是唯一的现场依据。
+            [](const char* what, const char* detail) {
+                ESP_LOGI(TAG_ESPNOW, "链路事件(%s): %s", what, detail);
+            });
+        if (!ok) {
+            ESP_LOGE(TAG, "ESP-NOW: Begin() failed (esp_now_init/register/add_peer), disabled");
+            espnow_home_.reset();
+            return;
+        }
+        ESP_LOGI(TAG, "ESP-NOW: started");
+    }
+
+    // 把 self.home.* 这些工具注册给 AI。必须在主任务里做（也就是构造函数阶段），
+    // 因为 McpServer 登记工具时没有加锁，从定时器回调那种别的任务里注册不安全。
+    void RegisterHomeTools() {
+        auto& mcp = McpServer::GetInstance();
+        // 数据驱动：主控不知道任何能力名/动作名，只把设备自描述的清单给 AI。
+        mcp.AddTool(
+            "self.home.devices",
+            "列出所有居家节点及其能力(设备自描述): 设备名/能力清单(含参数说明)/最新状态/在线与否。"
+            "用于回答\"家里有哪些设备\"\"某个设备能做什么\"\"现在温度/距离多少\"。"
+            "节点上线后会自动上报能力, 因此该列表始终是最新的",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                if (!espnow_home_) {
+                    return std::string("{\"nodes\":[],\"error\":\"ESP-NOW 未启动\"}");
+                }
+                return espnow_home_->DevicesJson();
+            });
+
+        mcp.AddTool(
+            "self.home.control",
+            "控制居家节点的某个能力。id: 节点号; cap: 能力名(见 self.home.devices); "
+            "action: 动作(如 on/off/set/read); args: 参数(可选, 多个用空格分隔)。"
+            "调用一次即完成并自动返回, 不要重复调用、也不要再调用本工具确认。"
+            "若返回里附带设备清单, 说明该节点/能力不存在或已离线——请按清单里的名称重试",
+            PropertyList({Property("id", kPropertyTypeInteger, 1, 1, EspNowHome::kMaxNodes),
+                          Property("cap", kPropertyTypeString, std::string()),
+                          Property("action", kPropertyTypeString, std::string()),
+                          Property("args", kPropertyTypeString, std::string())}),
+            [this](const PropertyList& p) -> ReturnValue {
+                int id = p["id"].value<int>();
+                // AI 生成的字符串常带首尾空格；而空格是本协议的分隔符，
+                // 不 trim 会拼出 "do light  rgb"（空字段）→ 节点侧无法解析。
+                auto trim = [](std::string s) {
+                    size_t b = s.find_first_not_of(" \t\r\n");
+                    if (b == std::string::npos) {
+                        return std::string();
+                    }
+                    size_t e = s.find_last_not_of(" \t\r\n");
+                    return s.substr(b, e - b + 1);
+                };
+                std::string cap = trim(p["cap"].value<std::string>());
+                std::string action = trim(p["action"].value<std::string>());
+                // args 内部的分隔符原样保留（节点侧宽容解析数字）
+                std::string args = trim(p["args"].value<std::string>());
+                // 失败时一律附上设备清单：AI 不必先查后控，一次失败即可自愈
+                auto with_list = [this](const std::string& why) {
+                    return why + "; 当前设备清单: " +
+                           (espnow_home_ ? espnow_home_->DevicesJson() : std::string("[]"));
+                };
+                if (cap.empty() || action.empty()) {
+                    return with_list("缺少能力名或动作名");
+                }
+                if (!espnow_home_ || !espnow_home_->HasNode(id)) {
+                    return with_list("节点 " + std::to_string(id) + " 从未上线");
+                }
+                std::string name = espnow_home_->NodeName(id);
+                if (!espnow_home_->HasCap(id, cap)) {
+                    return with_list(name + " 没有名为 " + cap + " 的能力");
+                }
+                if (!espnow_home_->IsOnline(id)) {
+                    return with_list(name + " 当前离线");
+                }
+                std::string body = "do " + cap + " " + action;
+                if (!args.empty()) {
+                    body += " " + args;
+                }
+                if (!espnow_home_->SendTo(id, body)) {
+                    return with_list("指令发送失败(" + name + ")");
+                }
+                // 下发是"非阻塞 + ACK 重传"：首包入队即返回，节点回执后再更新状态缓存。
+                // 故意不回"失败/重试"这类词（踩坑 15：会被 AI 读成没成功并反复调用）。
+                return "已下发: " + name + " 的 " + cap + " " + action +
+                       (args.empty() ? "" : " " + args) +
+                       "; 节点执行后会回报, 最新状态可在 self.home.devices 查看。不要重复调用本工具";
+            });
+
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+        mcp.AddTool(
+            "self.home.announce",
+            "播放一段预录播报语音(自测/演示用)。name: 音频名, 对应 TF 卡 /sdcard/announce/<name>.mp3"
+            "(节点上报的事件名 motion/beam/hot 都有同名音频; 文件不存在则无法播放)",
+            PropertyList({Property("name", kPropertyTypeString, std::string("motion"))}),
+            [this](const PropertyList& p) -> ReturnValue {
+                std::string name = p["name"].value<std::string>();
+                LocalMusicPlayer* player = GetMusicPlayer();  // 懒创建(同上：不能直接判 music_player_)
+                if (player == nullptr || !player->PlayAnnounce(name)) {
+                    return "未找到播报文件 " + name + ".mp3(需放在 TF 卡 /sdcard/announce/)";
+                }
+                return "已开始播报: " + name;
+            });
+#endif
     }
 
     // 网络状态查询工具（可扩展的网络信息入口，当前返回 IP，后续可加 SSID/信号/MAC 等）
@@ -1199,10 +1769,14 @@ public:
         InitializeUnoTools();
         InitializeCameraTools();
         InitializeClockTools();
+        InitializeEspNowHome();
+        RegisterHomeTools();            // MCP 注册必须在主任务（AddTool 无锁）
         InitializeNetworkTools();
         InitializeDebugTools();
         // 默认把日志压到 ERROR, 避免 GPIO43 日志污染 Arduino 串口(平时命令更稳定)
         esp_log_level_set("*", ESP_LOG_ERROR);
+        // 只把 ESP-NOW 这一个 TAG 的日志放开到 INFO：网页日志面板能看到节点消息与播报结果
+        esp_log_level_set(TAG_ESPNOW, ESP_LOG_INFO);
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
