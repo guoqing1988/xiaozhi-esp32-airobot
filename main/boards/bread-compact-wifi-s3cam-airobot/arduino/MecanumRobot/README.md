@@ -10,7 +10,7 @@ Arduino 下位机固件，由上位机 ESP32（本板 `bread-compact-wifi-s3cam-
 - **Emakefun 电机驱动板**（I2C 地址 `0x60`）：
   - 4 个直流电机（麦克纳姆轮）：`motors[0~3]`（前左/前右/后左/后右）
   - 2 个舵机：`servo1`（头部）、`servo2`
-- **PS2 手柄**：`config_gamepad(13, 11, 10, 12)`，**可选**（未接时 `ps2_ready=false`，手柄轮询被跳过，见下文「注意事项」）
+- **PS2 手柄**：`config_gamepad(13, 11, 10, 12)`，**可选**（未接时 `ps2_ready=false`，手柄轮询被跳过；没连上时空闲每 3 秒自动重试一次，见下文「注意事项」）
 - **蜂鸣器**：A0（`NewTone`）
 
 ## 与 ESP32 连接
@@ -227,6 +227,8 @@ arduino-cli upload -v -p COM5 --fqbn arduino:avr:uno main/boards/bread-compact-w
 | L1 / R1 / L2 / R2 | 左前斜 / 右前斜 / 左后斜 / 右后斜 |
 | SELECT / START | 舵机1 微调(-2 / +2) |
 
+> **巡线期间手柄不会拖慢车速**：巡线分支里调的是 `handleGamepad(false, false)`——只读按键、**不刹车、不 `delay(30)`**。否则手柄接上后（`ps2_ready=true`）每轮无按键时的 `stopMove(10)` 会把巡线轮子 BRAKE 10ms，巡线速度掉到 ~1/4 且一顿一顿（板级 README 踩坑 6.1）。
+
 ## 注意事项
 
 - **看日志 / 烧录 ESP32 时请先断开 Arduino 与 ESP32 的接线**（ESP32 板载 USB-UART 走 GPIO43/44，与 Arduino 共用会干扰）。
@@ -234,4 +236,6 @@ arduino-cli upload -v -p COM5 --fqbn arduino:avr:uno main/boards/bread-compact-w
 - 解析用**固定 `char` 缓冲**（不用 `String`），适合 UNO 2KB SRAM，抗内存碎片。
 - **点动命令必须显式停车**：`moveForward()` 等只做 `runMotors(方向, t)` + `delay(t)`，**自身不停车**，`handleCommand()` 的 `go-*`/`tj-*` 分支末尾必须 `stopMove(0)`。**不要**依赖 `handleGamepad()` 无手柄时每轮 `stopMove(10)` 的副作用——它只对“无按键”生效，且 `ps2_ready=false` 时已直接返回；一旦被删，AI 动作执行完电机会一直转（板级 README 踩坑 5）。
 - **PS2 手柄未接时必须跳过轮询**：`setup()` 里 `ps2_ready = (ps2x.config_gamepad(...) == 0)`，`handleGamepad()` 开头 `if (!ps2_ready) return;`。否则 `read_gamepad()` 每轮失败重试 5 次 + 每次 `reconfig_gamepad()`（`read_delay` 升至 10），**单次阻塞约 250ms**，loop 周期变 ~300ms，web/AI 指令全部延时（板级 README 踩坑 6）。
+- **没连上时不能在 loop 里每轮重试**（会把上面的阻塞重新引入）——也不能像旧实现那样永久不重试（开机时手柄没插好/没开机 → **手柄永久失效**，板级 README 踩坑 6 备注）。现在由 `ps2RetryIfNeeded()` 做：`web_drive_` 为真或 `Serial.available()` 有命令待处理时**直接跳过**，其余空闲时刻每 `PS2_RETRY_MS`（3 秒）重试一次；连上后这个函数立刻变成空转。重试成功会打印 `@stat s{speed} v{servo} ps2:1`（网页「下位机指令记录」可见）。
+- **手柄“松手即停”靠的就是“无按键 → `stopMove(10)`”**（空闲分支默认行为），**不能删**；但**巡线分支要关掉它**（`handleGamepad(false, false)`）：巡线时电机由巡线控制，手柄每轮的 BRAKE 10ms 会把巡线速度压到 ~1/4 且一顿一顿（板级 README 踩坑 6.1）。
 - **烧录失败排查**：Windows + CH340 的 UNO 克隆板上传报 `cannot set com-state` 是 CH340 新版驱动（3.8+）在 Win11 的已知 bug，降级驱动到 3.5.2019.1 即可——详见板级 README「踩坑记录：CH340 新驱动导致 Arduino 上传失败」。

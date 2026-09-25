@@ -1153,7 +1153,9 @@ main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot/MecanumRobot.i
 
 ### 硬件
 - Emakefun 电机驱动板（I2C 0x60）：4 个直流电机（麦克纳姆轮）+ **2 个舵机**（servo1 头部 / servo2）
-- PS2 手柄（`config_gamepad(13,11,10,12)`）：**可选**。未接时 `setup()` 的 `config_gamepad()` 失败 → `ps2_ready=false`，`handleGamepad()` 每轮直接返回（**必须如此**，否则无手柄时 `read_gamepad()` 每轮阻塞约 300ms，见板级 README 踩坑 6）
+- PS2 手柄（`config_gamepad(13,11,10,12)`）：**可选**。未接时 `setup()` 的 `config_gamepad()` 失败 → `ps2_ready=false`，`handleGamepad()` 每轮直接返回（**必须如此**，否则无手柄时 `read_gamepad()` 每轮阻塞约 300ms，见踩坑 6）
+  - **不会“永久失效”**：没连上时 `loop()` 会在**空闲时刻**每 3 秒重试一次 `config_gamepad()`（`ps2RetryIfNeeded()`；web 摇杆驾驶中、或串口有命令待处理时**不**重试，避免把遥控延迟重新拖大）。手柄插好/开机后 3 秒内自动连上。
+  - 手柄状态在网页「下位机指令记录」里看：`@stat s200 v82 ps2:1`（`1`=已连上，`0`=没连上/正在重试）；末尾多这个字段对 ESP32 解析无影响（只取 s/v）。
 - 蜂鸣器（A0，NewTone）
 
 ### 与 ESP32 连接
@@ -1235,7 +1237,8 @@ ESP32 的 UART0 RX 解析任务维护状态（含 30 秒 busy 看门狗，防 `@
 - **巡线日志**：动作变化时打一行 `巡线: 前进 (0) 探头[0110]`（`探头` 4 位 = S1~S4，`1`=压到黑线），弯道/直角/丢线排查直接看这行；详见 `arduino/MecanumRobot/README.md`「代码实际动作 + 日志怎么看」。
 - **探头 / 指示灯 / 动作对照表**（调车时对着看）：见同一份 README 的「巡线：探头 / 指示灯 / 动作对照表」一节。
 - **若黑线电平反向**（黑线=LOW）：把 `LINE_ACTIVE` 改为 `false`；**若传感器左右朝向装反**：把 `readLinePosition()` 返回值取反。
-- **巡线中**：`@line-stop` 可随时急停（非阻塞检测）；PS2 手柄仍可用作干预。
+- **巡线中**：`@line-stop` 可随时急停（非阻塞检测）；PS2 手柄仍可干预（但**不刹车、不 `delay(30)`**：`handleGamepad(false, false)`，否则手柄每轮无按键时的 `stopMove(10)` 会把巡线速度压到 ~1/4 且一顿一顿——见踩坑 6.1）。
+- **不影响手柄/网页驾驶**：巡线不修改手柄/网页驾驶用的速度（`speed`），退出巡线时会把左右轮速拉回对称——否则巡线结束后用手柄走直线会跑偏（左右轮速被巡线的差速/原地转改过，且不再对称）。
 
 ### PS2 手柄键位
 | 按键 | 功能 |
@@ -1300,7 +1303,7 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno main/boards/br
 - **顺序执行**：Arduino 读一条执行一条（`runMotors` 内 `delay` 阻塞），先到先执行，**不会乱序**。
 - **RX 缓冲**：UNO 默认 HardwareSerial 接收缓冲仅 **64 字节（≈4-5 条指令）**。动作阻塞执行期间（如 `go-forward-15` 执行 1.5 秒）不读串口，后续指令积压在缓冲里，超出部分**溢出丢弃**（表现为“后面的指令跳过了”）。已通过编译期宏 `SERIAL_RX_BUFFER_SIZE=256`（≈17 条）加大——**注意该宏须在编译时传入**（见上文 arduino-cli `--build-property` / IDE `platform.local.txt`），.ino 内无法设置（`arduino:avr 1.8.8+` 无 `setRxBufferSize` API）；正常 AI 编排序列（3-10 条）不会丢；若实测超长序列仍丢，可再加大或让 ESP32 读 Arduino 回执（`Serial.println("F")` 等已存在）判断动作完成再发下一条。
 - **点动命令必须显式停车**：`moveForward()` 等只做 `runMotors(方向, t)` + `delay(t)`，**自身不停车**；`handleCommand()` 的 `go-*`/`tj-*` 分支末尾必须 `stopMove(0)`。**不要**依赖 `handleGamepad()` 无手柄时每轮 `stopMove(10)` 的副作用（`ps2_ready=false` 时它已直接返回，见踩坑 6），否则 AI 动作执行完电机停不下来（踩坑 5）。
-- **loop 周期**：未接 PS2 手柄时为亚毫秒级；接手柄时每轮有 `read_gamepad()` + `delay(30)`（约 35ms）。web 遥控驾驶分支（`web_drive_`）每轮 `drivePulse()` 的短脉冲为 `WEB_DRIVE_PULSE_MS`（30ms）。
+- **loop 周期**：未接 PS2 手柄时为亚毫秒级；接手柄时每轮有 `read_gamepad()` + `delay(30)`（约 35ms）。web 遥控驾驶分支（`web_drive_`）每轮 `drivePulse()` 的短脉冲为 `WEB_DRIVE_PULSE_MS`（30ms）。**巡线分支例外**：手柄只读按键（`handleGamepad(false, false)`），不加 `delay`、不刹车，否则巡线控制频率和轮速都会被拖垮（踩坑 6.1）。
 
 ## ⚠️ 踩坑记录
 
@@ -1406,7 +1409,20 @@ Select-String FATFS_API_ENCODING sdkconfig
 **为什么首帧要 600ms+**：命令到达时 loop 正阻塞在 `handleGamepad()`（最多 300ms）；该轮结束进入下一轮时 `web_drive_` 仍为 false → 又走 `else` 分支**再执行一次** `handleGamepad()`（再 300ms）→ 第三轮才进入 `web_drive_` 分支开始驱动。
 
 **修复**（Arduino）：`setup()` 记录 `ps2_ready = (config_gamepad(...) == 0)`，`handleGamepad()` 开头 `if (!ps2_ready) return;`。
-**注意**：该守卫是“一次性判定”，若手柄接触不良导致 `config_gamepad` 失败，手柄会一直不可用（旧实现每轮重试可自愈）——如需两者兼顾，可改为“失败后每 2 秒重试一次”。
+**注意（已改进）**：该守卫本身是“一次性判定”——手柄接触不良/开机时手柄还没开机导致 `config_gamepad` 失败时，手柄会**一直不可用**（旧实现每轮重试能自愈，但那正是本踩坑的根因）。现在改为**空闲时定期重试**：`loop()` 的 `else` 分支里 `ps2RetryIfNeeded()`，`ps2_ready=false` 时每 `PS2_RETRY_MS`（3 秒）重试一次。
+- **为什么只在空闲时重试**：重试一次失败要阻塞约 100~250ms（`read_gamepad()` 失败重试 5 次 + `reconfig_gamepad()` + `delay(read_delay)`）。若不加条件，等于把阻塞从“每轮”换成“每 3 秒一次”，摇杆遥控仍会周期性卡顿（回归踩坑 4/6）。所以 `web_drive_` 为真（正在摇杆驾驶）或 `Serial.available()` 有命令待处理时**直接跳过**，只在真空闲时重试 → 连上之前，遥控延迟与“完全跳过轮询”时一致。
+- 连上后每轮恢复 `read_gamepad()` + `delay(30)`（约 35ms/轮），这是用手柄的固有代价（见 1304 行的 loop 周期说明）。
+- **状态可见**：首次连上/重连成功时打印一行 `@stat s{speed} v{servo} ps2:1`（网页「下位机指令记录」可见），没连上就是 `ps2:0`。
+
+### 6.1 手柄接入后巡线变得“特别慢、一顿一顿”（2026-09 修复）
+
+**现象**：手柄后插上（能被识别了）后，进入巡线功能正常巡线，但速度只有原来的 1/4 左右，且一顿一顿。
+
+**根因**：巡线分支每轮都调 `handleGamepad()`，而手柄接上后（`ps2_ready=true`）它每轮执行 `read_gamepad()` + `delay(30)`，**无按键时还会 `stopMove(10)`**。于是每个循环：巡线刚把 4 个轮子设好方向/速度 → 手柄立刻 BRAKE 10ms → 再设 → 再 BRAKE，实际只有约 1/4 时间在转，所以又慢又颠。手柄没接时 `if (!ps2_ready) return;` 直接返回，故以前巡线正常——所以很容易让“修手柄”与“巡线变慢”看起来无关。
+
+**修复**：`handleGamepad(bool idle_brake = true, bool wait = true)`：空闲分支（手柄自用）仍传默认值（松手即停）；巡线分支传 `handleGamepad(false, false)`——只读按键、不刹车、不 `delay(30)`。
+**为何不直接不调 `handleGamepad()`**：保留“巡线中手柄可干预/急停”的设计（见巡线一节），同时消除它对巡线控制环路的干扰。
+**注意**：`handleGamepad()` 里“无按键 → `stopMove(10)`”是手柄“松手即停”的实现，也是旧代码停 AI 点动的副作用（踩坑 5），**不能直接删**，只能像这样在巡线时关掉。
 
 ### 7. 待机时 web 遥控有几百毫秒延迟（WiFi 省电，已修复）
 

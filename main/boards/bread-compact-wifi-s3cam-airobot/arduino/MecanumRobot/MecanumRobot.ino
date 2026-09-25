@@ -301,9 +301,9 @@ int readLinePosition() {
 // 丢线找线/原地猛拐: 一侧两轮倒转 + 另一侧两轮正转 -> 原地转(转弯半径最小)。
 // 方向复用本工程已验证的原地左转/右转定义(turnLeft/turnRight, 网页端 left/right 同此):
 //   左转 = 四轮 "B", 右转 = 四轮 "F"
-void pivotTurn(char dir, int speed) {
+void pivotTurn(char dir, int spd) {          // 参数名避开全局 speed, 防止误用
     for (int i = 0; i < 4; i++) {
-        motorSpeed[i] = speed;
+        motorSpeed[i] = spd;
     }
     if (dir == 'L') {
         runMotors("B", "B", "B", "B", 0);   // 同 turnLeft
@@ -396,11 +396,20 @@ void setLineFollow(bool enable) {
     if (enable) {
         line_start_ms_ = millis();
         line_lost_since_ = 0;
-        setSpeed(LINE_BASE_SPEED);
+        line_last_pos_ = 0;                // 清掉上次巡线残留的偏差方向
+        // 注意: 这里**不能**调 setSpeed(LINE_BASE_SPEED)。
+        // setSpeed() 改的是全局 speed(=手柄/网页驾驶/点动用的速度, 也是 @stat 报给网页的值),
+        // 而且退出时不恢复 -> 巡线一次后手柄就莫名变很慢。
+        // 巡线本身的左右轮速由 lineFollowOnce() 每轮显式设置, 不需要改全局 speed。
         Serial.setTimeout(20);             // 巡线中短超时, 避免 checkLineStopCommand 阻塞
         Serial.println("@busy line-follow");   // 上报巡线开始
     } else {
         stopMove(0);
+        // 巡线过程中 motorSpeed[] 被改成了左右不同(差速/原地转), 退出时必须拉回左右对称,
+        // 否则之后用手柄 / AI 点动走直线会跑偏 —— “手柄控制出问题”的根因。
+        for (int i = 0; i < 4; i++) {
+            motorSpeed[i] = speed;         // speed = 用户设定的速度(巡线不再修改它)
+        }
         Serial.setTimeout(1000);           // 恢复默认超时
         Serial.println("@done line-follow");   // 上报巡线结束
     }
@@ -468,11 +477,55 @@ void reportStat() {
 // PS2 手柄控制
 // ==================================================================
 
-// 读取 PS2 手柄按键并执行对应动作; 无按键时自动停止。
-void handleGamepad() {
+// PS2 手柄: 初始化失败后定期重试。
+// 背景(板级 README 踩坑 6): ps2_ready 原来是"一次性判定", 开机时手柄没插好/没开机 ->
+// config_gamepad() 失败 -> 手柄永久不可用(旧实现每轮重试能自愈, 但会把 loop 拖到 300ms/轮,
+// 网页遥控延迟极大, 所以才加了一次性守卫)。
+// 折中方案: 失败后每 PS2_RETRY_MS 重试一次, 且只在"没在 web 驾驶、没有待处理串口命令"
+// 时做 -> 那次 ~100~250ms 的阻塞只在空闲时刻发生, 不影响摇杆遥控/AI 指令的延迟。
+#define PS2_RETRY_MS 3000
+unsigned long ps2_retry_ms_ = 0;
+
+// 连接 PS2 手柄(引脚 13/11/10/12), 返回是否连上。
+bool ps2Connect() {
+    ps2_ready = (ps2x.config_gamepad(13, 11, 10, 12, true, true) == 0);
+    return ps2_ready;
+}
+
+// 上报手柄是否连上(网页「下位机指令记录」里能看到):
+//   @stat s200 v82 ps2:1   (1=已连上, 0=没连上/正在重试)
+// 末尾多一个字段对 ESP32 解析无影响(只取 s/v 两个字段), 也不影响前端(只用 servo)。
+void reportPs2() {
+    Serial.print("@stat s");
+    Serial.print(speed);
+    Serial.print(" v");
+    Serial.print(servo1Angle);
+    Serial.print(" ps2:");
+    Serial.println(ps2_ready ? 1 : 0);
+}
+
+// 空闲时重试连接手柄(见上面说明)。手柄一旦连上, 本函数直接返回, 不再有任何开销。
+void ps2RetryIfNeeded() {
+    if (ps2_ready) return;
+    if (web_drive_) return;          // web 摇杆驾驶中: 不重试, 保住遥控延迟
+    if (Serial.available()) return;  // 有命令待处理: 先让命令走
+    unsigned long now = millis();
+    if (now - ps2_retry_ms_ < PS2_RETRY_MS) return;
+    ps2_retry_ms_ = now;
+    if (ps2Connect()) {
+        reportPs2();                 // 只在"连上了"这一刻上报, 不刷屏
+    }
+}
+
+// 读取 PS2 手柄按键并执行对应动作。
+// @param idle_brake 无按键时是否刹停: true(默认)=手柄单用时“松手即停”的实现;
+//   巡线分支里传 false —— 巡线期间电机由巡线控制, 若每轮再 BRAKE 10ms(外加 delay(30)),
+//   巡线速度会被压到 ~1/4 而且一顿一顿(实测: 手柄后接入能被识别后, 巡线突然变得特别慢)。
+// @param wait 是否 delay(30) 节流按键重复率: 巡线中关掉, 保住巡线控制频率。
+void handleGamepad(bool idle_brake = true, bool wait = true) {
     if (!ps2_ready) return;   // 无手柄: 跳过, 避免 read_gamepad 反复重试阻塞 loop
     ps2x.read_gamepad(false, 0);
-    delay(30);
+    if (wait) delay(30);
 
     if (ps2x.ButtonDataByte()) {
         if (ps2x.Button(PSB_PAD_RIGHT))       moveRight(10);
@@ -489,7 +542,7 @@ void handleGamepad() {
         if (ps2x.ButtonPressed(PSB_R2))       moveRightBackward(10);
         if (ps2x.Button(PSB_SELECT))          servo1Control(-2);
         if (ps2x.Button(PSB_START))           servo1Control(2);
-    } else {
+    } else if (idle_brake) {
         stopMove(10);
     }
 }
@@ -785,10 +838,12 @@ void setup() {
     // 否则 PS2X 的 read_gamepad() 会重试 5 次 + 每次 reconfig_gamepad(), 单次阻塞
     // 约 300~400ms, 且 read_delay 动态增长 -> 非 web 驾驶时每轮 loop 都被拖慢,
     // 表现为 web/AI 命令延时高且忽大忽小。
-    ps2_ready = (ps2x.config_gamepad(13, 11, 10, 12, true, true) == 0);   // PS2 手柄引脚
+    ps2Connect();                       // PS2 手柄引脚 13/11/10/12 (失败不致命: loop 里会定期重试)
     delay(300);
 
     Serial.begin(115200);               // 与上位机 ESP32 通信波特率
+    ps2_retry_ms_ = millis();           // 手柄重试计时基准
+    reportPs2();                        // 上报手柄连接状态(网页「下位机指令记录」可见)
     servo1->writeServo(servo1Zero, 10);
     servo2->writeServo(servo2Angle, 10);
     pinMode(A0, OUTPUT);                // 蜂鸣器
@@ -811,18 +866,25 @@ void loop() {
             setLineFollow(false);   // 丢线超时/超时上限 -> 自动退出并回传 @done line-follow
         }
         checkLineStopCommand();
-        handleGamepad();
+        // 手柄只读按键, 不刹车/不 delay: 否则每轮 BRAKE 10ms 会把巡线速度压到 ~1/4
+        handleGamepad(false, false);
     } else if (web_drive_) {
         // web 遥感驾驶: 非阻塞持续控制(方向+速度), 心跳看门狗自动停
         serialCommand();         // 统一读串口并分发: drive 心跳/停止 + AI 点动(不互相吞)
         handleWebDrive();        // 持续脉冲驱动 + 超时保护
     } else {
         serialCommand();         // 统一读串口并分发: drive-* + 点动命令(修复 AI 控制被吞)
+        ps2RetryIfNeeded();      // 没接上手柄时在空闲里定期重试(避免开机没插好 -> 手柄永久失效)
         handleGamepad();         // 解析手柄
     }
 }
 
-// 巡线模式下非阻塞读取串口, 只响应 @line-stop(急停), 其他命令忽略。
+// 巡线模式下非阻塞读取串口。
+// 旧实现只认 @line-stop, 其它命令(包括网页摇杆心跳 @drive-* 和网页「停止」按钮的
+// @drive-stop)一律读走丢弃 -> 巡线中网页那排控件(摇杆/停止)推了没反应。
+// 手柄在巡线时本来就可以干预(loop 里调了 handleGamepad), 网页端却不行, 这里对齐:
+//   @line-stop / @drive-stop -> 立即退出巡线
+//   @drive-*                  -> 人工意图优先, 退出巡线并交给摇杆驾驶
 void checkLineStopCommand() {
     while (Serial.available()) {
         static char line[64];
@@ -833,8 +895,11 @@ void checkLineStopCommand() {
         while (*p == ' ' || *p == '\t') p++;
         if (*p != '@') continue;
         p++;
-        if (strcmp(p, "line-stop") == 0) {
+        if (strcmp(p, "line-stop") == 0 || strcmp(p, "drive-stop") == 0) {
             setLineFollow(false);
+        } else if (strncmp(p, "drive-", 6) == 0) {
+            setLineFollow(false);
+            handleDrive(p + 6);
         }
     }
 }
