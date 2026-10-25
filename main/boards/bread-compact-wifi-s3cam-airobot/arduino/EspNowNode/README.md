@@ -81,6 +81,8 @@ ESP32-S3 节点固件，用 **arduino-esp32 核心自带**的 `ESP_NOW` 类（`E
 | DHT11 | 5s | 失败重试 3 次仍失败 → `evt err dht`；≥28℃ 播 `hot` 一次，≤26℃ 复位（迟滞） |
 | 红外避障 | 50ms | 读 OUT + 二次采样去抖；**只在边沿变化**时 `evt beam`，检测到障碍才播 `beam`；上电首帧只记录、不播（避免前方已有东西时误播）|
 | RGB 灯 | 收到命令时 | 亮度 = `rgb × bright ÷ 255`，共阳模块再取反（低电平点亮） |
+| MQ-2 燃气（节点 4） | 200ms | 相对“干净空气基线”归一到 0~100（EMA 平滑）；变化 ≥5 或 10 秒保活才上报；预热 3 分钟只上报不告警；DO 翻低或浓度 ≥60 报警并 `say smoke`，回落到 ≤40 才解除 |
+| 火焰（节点 4） | 50ms | 连读两次一致才认（去抖），只在边沿发 `evt flame`；有火 `say flame`；上电首帧只记录不播报 |
 
 > 这些“自动动作”（开灯、播报、阈值判断）全在节点里，主控完全不知道 ——
 > 想改成“人来自动开风扇”，只需改 `sonarTick()`，主控与协议都不用动。
@@ -89,7 +91,7 @@ ESP32-S3 节点固件，用 **arduino-esp32 核心自带**的 `ESP_NOW` 类（`E
 
 - arduino-esp32 核心 **3.2.0+**（实测 3.3.10 正常；`arduino-cli core list` 查看已装版本）
 - **节点 1（客厅灯）**：零第三方库（灯用核心自带 `ledc`，无线用核心自带 `ESP_NOW`）
-- **节点 4（厨房，设计见下文）**：零第三方库（MQ-2 / 火焰传感器都是直读模拟量 + 数字电平）
+- **节点 4（厨房，实现见 `node4_kitchen.h`）**：零第三方库（MQ-2 / 火焰传感器都是直读模拟量 + 数字电平）
 - **节点 2（玄关感应）/ 节点 3（我的家）**：需要 DHT 库：
 
 ```bash
@@ -258,8 +260,10 @@ DHT11 与红外避障模块因 GPIO4/5 已被 RGB 占用，改用 **GPIO16 / GPI
 两个模块都同时提供**模拟输出 AO** 和**数字输出 DO**（都带蓝色电位器调阈值），
 本设计**以 DO 判报警、AO 看浓度趋势**。
 
-> ⚠️ **本节是接线与语义规格，固件尚未实现 `NODE_ID 4`**（`.ino` 目前只支持 1/2/3）。
-> 按本节改完 `.ino` 的 `#if NODE_ID == 4` 块后即可使用；主控侧依然**零改动**（节点自描述能力）。
+> ✅ **本节的接线与语义已固化到固件**：节点 4 的硬件代码单独放在 **`node4_kitchen.h`**，
+> 主文件 `EspNowNode.ino` 只在 `NODE_ID == 4` 时 `#include` 它；主控侧依然**零改动**（节点自描述能力）。
+
+![节点 4 接线图](wiring-node4.svg)
 
 | 元件 | 元件引脚 | 接到 ESP32-S3 | 说明 |
 |---|---|---|---|
@@ -295,39 +299,43 @@ DHT11 与红外避障模块因 GPIO4/5 已被 RGB 占用，改用 **GPIO16 / GPI
 > 火焰传感器朝**灶台方向**固定；两个模块都要与 ESP32-S3 **共地**。
 > ⚠️ 本节点**只监测、只播报**，不控制燃气阀门/排风扇 —— 演示固件不能当生命安全设备使用。
 
-#### 固件侧实现清单（`NODE_ID 4`）
+#### 固件侧实现（`NODE_ID 4`）
 
-1. 顶部 `NODE_ID` 注释补一行 `4=厨房(烟雾+火焰)`；
-2. 引脚宏放进 `#if NODE_ID == 4` 块：`PIN_GAS_DO 4` / `PIN_GAS_AO 1` / `PIN_FLAME_DO 5` / `PIN_FLAME_AO 2`，
-   `setup()` 里 `pinMode(..., INPUT)`；
-3. 能力表（2 个能力，`info` 报文远小于 200B，不占用主控 `kMaxCaps = 4` 的额度）：
+节点 4 的硬件代码全部隔离在独立文件 **`node4_kitchen.h`**（引脚、阈值、状态、两个 tick、setup 钩子），
+主文件只保留两处钩子调用与能力表：
+
+| 位置 | 内容 |
+|---|---|
+| `node4_kitchen.h` 顶部 | 可调宏：`GAS_ACTIVE_LOW 1`、`FLAME_ACTIVE_LOW 1`、`GAS_WARMUP_MS 180000`、`GAS_TRIGGER 60`、`GAS_RELEASE 40`、`GAS_FULL_SCALE_MV 1500`、`GAS_PERIOD_MS 200`、`FLAME_PERIOD_MS 50` 等 |
+| `node4_kitchen.h` 引脚 | `PIN_GAS_DO 4` / `PIN_GAS_AO 1` / `PIN_FLAME_DO 5` / `PIN_FLAME_AO 2`；`kitchenSetup()` 里 `pinMode(..., INPUT)` + AO 用 `analogSetPinAttenuation(..., ADC_11db)` |
+| `node4_kitchen.h` 采样 | `gasTick()`（200ms）、`flameTick()`（50ms）、`kitchenTick()`（主 `loop()` 的钩子） |
+| `node4_kitchen.h` 能力 | `capSmokeRead()` / `capFlameRead()`（只返回缓存值，不在 handler 里采样） |
+| `EspNowNode.ino` 能力表 | 2 个能力（`info` 报文远小于 200B，不占用主控 `kMaxCaps = 4` 的额度） |
 
 ```cpp
-#elif NODE_ID == 4
-// 厨房：MQ-2 烟雾/可燃气 + 火焰
+// EspNowNode.ino（NODE_ID == 4 分支）
 static const CapDef kCaps[] = {
     {"smoke", "(烟雾浓度0=清洁100=浓,只读):read()", capSmokeRead},
-    {"flame", "(火焰0=无1=有,只读):read()",         capFlameRead},
+    {"flame", "(火焰0=无1=有,只读):read()", capFlameRead},
 };
 static const char kNodeName[] = "厨房";
-#endif
 ```
 
-4. 两个 tick（照 `laserTick()` 的写法）：
-   - `gasTick()`，周期 **200ms**：`analogReadMilliVolts(PIN_GAS_AO)` 取电压 → 减去预热期建立的"干净空气基线" →
-     归一到 **0~100**（EMA 平滑）；变化 ≥5 或 10 秒保活才 `evt smoke`；DO 低电平（且已过预热）→ 告警，
-     迟滞 `GAS_TRIGGER = 60 / GAS_RELEASE = 40`，触发时 `say smoke`；
-   - `flameTick()`，周期 **50ms**：连读两次一致才认（去抖），**只在边沿**发 `evt flame 0/1`；`1` 时 `say flame`；
-     上电首帧只记录、不播报（同 `laserTick()`）；
-5. 阈值/极性宏放文件顶部（都属于本节点语义，主控不关心）：
-   `GAS_ACTIVE_LOW 1`、`FLAME_ACTIVE_LOW 1`、`GAS_WARMUP_MS 180000`、`GAS_TRIGGER 60`、`GAS_RELEASE 40`；
-6. 提示音：把 `smoke.mp3`（「厨房检测到烟雾或可燃气，请立即检查并开窗通风。」）与
-   `flame.mp3`（「检测到明火，请立即关火并检查灶台。」）上传到 TF 卡 `/sdcard/announce/`
-   （网页「歌曲管理」→ 上传，`POST /upload?dir=announce&name=smoke.mp3`）。
-   `say` 名字 **≤15 字符**、主控对同一 (节点, 名字) 有 **10 秒冷却**，`smoke` / `flame` 都合规；
-7. 接线示意图本目录还只有 `wiring-node1/2/3.svg`，画好后按上表补一张 `wiring-node4.svg`。
+采样逻辑：
 
-#### 实现后应看到的日志与验证
+- `gasTick()`，周期 **200ms**：`analogReadMilliVolts(PIN_GAS_AO)` 取电压 → 减去预热期建立的“干净空气基线” →
+  归一到 **0~100**（EMA 平滑）；变化 ≥5 或 10 秒保活才 `evt smoke`；DO 低电平（且已过预热）→ 告警，
+  迟滞 `GAS_TRIGGER = 60 / GAS_RELEASE = 40`，触发时 `say smoke`；
+- `flameTick()`，周期 **50ms**：连读两次一致才认（去抖），**只在边沿**发 `evt flame 0/1`；`1` 时 `say flame`；
+  上电首帧只记录、不播报（同 `laserTick()`）；
+- 预热期（`GAS_WARMUP_MS`，默认 3 分钟）**只上报不告警**：基线用慢速 EMA 跟随漂移，预热结束后冻结；
+- 接线示意图：`wiring-node4.svg`（本目录）；
+- 提示音：把 `smoke.mp3`（「厨房检测到烟雾或可燃气，请立即检查并开窗通风。」）与
+  `flame.mp3`（「检测到明火，请立即关火并检查灶台。」）上传到 TF 卡 `/sdcard/announce/`
+  （网页「歌曲管理」→ 上传，`POST /upload?dir=announce&name=smoke.mp3`）。
+  `say` 名字 **≤15 字符**、主控对同一 (节点, 名字) 有 **10 秒冷却**，`smoke` / `flame` 都合规。
+
+#### 应看到的日志与验证
 
 | 日志 | 含义 |
 |---|---|
@@ -364,6 +372,12 @@ arduino-cli upload  --fqbn esp32:esp32:esp32s3 -p /dev/cu.usbserial-XXXX .
 # 节点 3（我的家：四个传感器接在同一块板）—— 把 #define NODE_ID 改成 3 后重新编译烧录
 #   ⚠️ 节点 3 的 DHT11/红外避障接 GPIO16/17（不是节点 2 的 4/5），接线见上节
 #   ⚠️ 节点 3 有 4 个能力，主控侧 kMaxCaps 需为 4（本仓库已是 4）
+arduino-cli compile --fqbn esp32:esp32:esp32s3 .
+arduino-cli upload  --fqbn esp32:esp32:esp32s3 -p /dev/cu.usbserial-XXXX .
+
+# 节点 4（厨房：MQ-2 烟雾 + 火焰）—— 把 #define NODE_ID 改成 4 后重新编译烧录
+#   实现文件是 node4_kitchen.h（由 .ino 在 NODE_ID == 4 时 include），零第三方库
+#   ⚠️ MQ-2 的 DO/AO 必须 1kΩ 串 + 2kΩ 对地分压（5V → 3.3V），接线见上节
 arduino-cli compile --fqbn esp32:esp32:esp32s3 .
 arduino-cli upload  --fqbn esp32:esp32:esp32s3 -p /dev/cu.usbserial-XXXX .
 ```
@@ -461,15 +475,19 @@ arduino-cli monitor -p COM11 -c baudrate=115200   # 看日志（波特率 = #def
 | `[温度] 读取失败（重试 3 次，上次成功 26°C 55%）` | DHT11 读取失败（同时会 `evt err dht`） |
 | `[避障] 上电首帧：无障碍（引脚=HIGH）` | 上电后第一帧只记录：确认模块在工作（**不播报**，避免前方已有东西时误播） |
 | `[避障] 检测到障碍（引脚=LOW）` / `[避障] 无障碍（引脚=HIGH）` | 避障状态**变化**时一行。`引脚=` 是**引脚真实电平**（红外避障低电平=检测到障碍），拿万用表量 DO 应能对上 |
+| `[燃气] 预热中（剩 120 秒），只上报不告警` | 节点 4：MQ-2 未热稳（限频 30 秒一行）；这段读数会一路往下漂，不判报警 |
+| `[燃气] 浓度 12（DO=HIGH）` / `[燃气] 浓度 78（DO=LOW，超过电位器阈值）` | 节点 4：变化 ≥5 或 10 秒一行；`DO=` 是**引脚真实电平**（5V 供电经分压后高电平≈3.3V） |
+| `[燃气] 浓度 78（DO=LOW）超过阈值，报警` / `[燃气] 浓度回落到 35（DO=HIGH），告警解除` | 节点 4：进入/退出告警（进入时清 `say smoke`）；迟滞 60/40，不会在阈值上反复报 |
+| `[火焰] 上电首帧：无火焰（引脚=HIGH）` / `[火焰] 检测到火焰（引脚=LOW）` | 节点 4：与避障一样只在边沿一行；首帧只记录不播报 |
 | `[警告] 本节点已连上路由器，信道被锁死 -> 无法扫描信道` | 节点不该连路由器，需清掉 NVS 里保存的 WiFi |
 
 > 按现象怎么定位，见文末「排错」表（每行都注明了该看哪一行日志）。
 
-## 现场可调项（都在文件顶部）
+## 现场可调项（主文件顶部；节点 4 的宏在 `node4_kitchen.h` 顶部）
 
 | 宏 | 默认 | 作用 |
 |---|---|---|
-| `NODE_ID` | 3 | 1=客厅灯(RGB+超声波)，2=玄关感应(DHT11+红外避障)，3=我的家(四件套)，4=厨房(烟雾+火焰，见上文，**固件待实现**)。**仓库内是 3，要烧哪个节点就改这一行** |
+| `NODE_ID` | 3 | 1=客厅灯(RGB+超声波)，2=玄关感应(DHT11+红外避障)，3=我的家(四件套)，4=厨房(烟雾+火焰，实现见 `node4_kitchen.h`)。**仓库内是 3，要烧哪个节点就改这一行** |
 | `RGB_COMMON_ANODE` | 1 | 共阳模块设 1；颜色反相/关不掉时改成 0 |
 | `OBSTACLE_ACTIVE_LOW` | 1 | 1=红外避障（**低电平**=检测到障碍）；0=激光接收模块（高电平）。现象相反时取反 |
 | `MOTION_TRIGGER_CM` / `MOTION_RELEASE_CM` | 30 / 40 | 人体靠近的迟滞触发与复位距离 |
@@ -515,6 +533,11 @@ static const uint8_t kLmk[16] = "xiaozhi-lmk-01";
 | 障碍检测反了（没东西也说有人 / 靠近反而说通畅）| 红外避障是低电平有效；拿万用表量 `DO` 对 GND（挡住应变 0V）。对不上就把 `OBSTACLE_ACTIVE_LOW` 取反；再看 `[避障] …（引脚=…）` 是否跟实测一致 |
 | 障碍一直不触发 | 距离太远（>30cm）或物体太黑（吸光）；拧模块上的蓝色电位器调灵敏度；红外怕强光，别对着窗 |
 | 温度一直失败 | DHT11 数据线接触、供电 3.3V；DHT11 本身 ≤1Hz，5 秒一次属正常节奏 |
+| 节点 4（厨房）一直不报警 | 是否还在预热（`[燃气] 预热中`）；MQ-2 是否接 **5V**（3V3 供电会灵敏度不足）；DO 电位器是否拧到能翻转；看 `[燃气] 浓度` 放气时有没有上升 |
+| 节点 4 每次上电都误报 | 预热被跳过（`GAS_WARMUP_MS` 改太小）；或电位器太灵敏（干净空气里 DO 就 = LOW，重拧到不动作） |
+| 节点 4 浓度一直是 0 | AO 没接/接错脚（必须是 GPIO1）；分压电阻没接好；或预热期就有污染源（基线被抬高，通风后重新上电） |
+| 火焰一直报警 / 没火也报 | 对着窗户/白炽灯（红外干扰）；拧模块电位器；现象相反就把 `FLAME_ACTIVE_LOW` 取反 |
+| 节点 4 读数乱跳 / 偶发重启 | MQ-2 用 5V 供电时 DO/AO 都是 5V 域，没加分压会顶开 GPIO 的 ESD 钳位（必须 1kΩ 串 + 2kΩ 对地） |
 | 偶发重启 | 接串口看 backtrace（115200），用 `xtensa-esp32s3-elf-addr2line -pfiaC -e <elf> <地址>` 解析 |
 | 现场丢包（偶发不响应） | 调大主控 `esp_now_set_wake_window()`（见板级 README） |
 | 编译报 `invalid character '\x00' …` | 构建缓存被中断写坏：删 `%LOCALAPPDATA%\arduino\sketches\<hash>` 后重编 |
@@ -528,5 +551,8 @@ static const uint8_t kLmk[16] = "xiaozhi-lmk-01";
    拿开后 30 秒灯自动灭（串口 `[人感] 自动关灯`）；若亮灯期间用语音调过颜色 → 不再自动灭；
 4. 节点 2 / 节点 3：**手靠近红外避障模块（2~30cm）** → 播报 `beam.mp3`（串口 `[避障] 检测到障碍（引脚=LOW）`）；
    问「室内多少度」→ 返回温湿度；温度 ≥28℃ 播 `hot.mp3` 一次；
-5. 拔电重插 → 自动重新上线，能力不丢（能力清单会重报）；
-6. 串口（115200）全程能看到 `[信道] 扫描中…` → `[信道] 已锁定主控` → `[收到]`/`[发送]`，无 `发送失败`、无 `[警告] 上行队列已满`。
+5. 节点 4（厨房）：上电 3 分钟内只看到 `[燃气] 预热中`，**不告警**；预热后打火机**不点火**放气靠近 MQ-2
+   → 浓度上升 → `say smoke` → 播 `smoke.mp3`，气散后回落、告警解除；打火机点火/火柴在 1 米内对着
+   火焰传感器 → `flame.mp3`，移开后 `evt flame 0`；问「厨房有没有烟雾」→ AI 调 `smoke` 的 `read()` 拿缓存值；
+6. 拔电重插 → 自动重新上线，能力不丢（能力清单会重报）；
+7. 串口（115200）全程能看到 `[信道] 扫描中…` → `[信道] 已锁定主控` → `[收到]`/`[发送]`，无 `发送失败`、无 `[警告] 上行队列已满`。

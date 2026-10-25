@@ -9,7 +9,9 @@
  *
  * 节点 1（客厅灯）: 三通道 PWM RGB 灯 + HC-SR04P 超声波
  * 节点 2（玄关感应）: DHT11 温湿度 + 激光头模块
- *   —— 靠下面 NODE_ID 切换角色（编译节点 2 时改成 2）。
+ * 节点 3（我的家）: 一台板接齐 RGB + 超声波 + DHT11 + 红外避障
+ * 节点 4（厨房）: MQ-2 烟雾/可燃气 + 火焰传感器（只监测、只播报）
+ *   —— 靠下面 NODE_ID 切换角色（烧哪个节点就改成几）。
  *
  * 协议（与主控 espnow_home.cc 一致，@ 前缀文本行；序号 `#<seq>` 放在**信封**里，
  * 正文格式与首版一致 → 两侧任一没更新也不会彻底不能用）：
@@ -26,14 +28,16 @@
  *   重复到达时直接重发上次回执，不重复动作（对 speed+ 这类非幂等动作必须如此）。
  *
  * 编译: arduino-cli compile --fqbn esp32:esp32:esp32s3 <此目录>
- * 依赖: 灯与 ESP-NOW 用核心自带 API，零第三方库；
- *       仅节点 2 的 DHT11 需要 "DHT sensor library"(Adafruit)，且只在 NODE_ID==2 时包含。
+ * 依赖: 灯、ESP-NOW、ADC 都用核心自带 API，零第三方库；
+ *       仅节点 2/3 的 DHT11 需要 "DHT sensor library"(Adafruit)，且只在 NODE_ID==2/3 时包含。
+ *       节点 4 的 MQ-2 / 火焰模块都是直读模拟量 + 数字电平，同样零第三方库。
  */
 
 // ============================ 现场可调参数 ============================
 // 注意：这些宏必须在下面的 #if 之前定义（预处理按顺序求值）。
 
-#define NODE_ID 3                    // 1=客厅灯(RGB+超声波) 2=玄关感应(DHT11+激光) 3=我的家(四件套)
+#define NODE_ID 3                    // 1=客厅灯(RGB+超声波) 2=玄关感应(DHT11+激光)
+                                     // 3=我的家(四件套) 4=厨房(MQ-2烟雾+火焰)
 #define HOP_INTERVAL_MS 500    // 每个信道停留时长。主控稳态每 3000ms 广播一次，但
                                // "AP 换信道 / 命令未确认"时主控会切到 500ms 快速窗口；
                                // 节点停 500ms → 一圈 13×0.5=6.5s，快速窗口内必然撞上一次
@@ -89,6 +93,9 @@
 // 现象是“没东西也说有人 / 挡住反而说通畅”时，把这一行取反。
 #define OBSTACLE_ACTIVE_LOW 1
 
+// ---- 厨房（节点 4）：MQ-2 烟雾/可燃气 + 火焰传感器 ----
+// 它的引脚、阈值、状态、采样实现全部在 node4_kitchen.h（下面按 NODE_ID 条件引入）。
+
 // ---- 引脚（与设计文档一致，两节点同编号便于接线）----
 #define PIN_RGB_R 4
 #define PIN_RGB_G 5
@@ -100,10 +107,11 @@
 // （GPIO16/17 在 S3 上是普通 IO，不撞 flash/PSRAM/USB）
 #define PIN_DHT 16
 #define PIN_LASER 17
-#else
+#elif NODE_ID == 2
 #define PIN_DHT 4
 #define PIN_LASER 5
 #endif
+// 厨房（节点 4）的引脚定义在 node4_kitchen.h（它不接灯/超声波，也不使用 PIN_DHT）。
 
 // 三通道 RGB 模块共阳时 PWM 反相（现象：颜色反相或关不掉时改这里）
 #define RGB_COMMON_ANODE 1
@@ -271,6 +279,14 @@ static const char* nextField(const char* p, char* out, size_t out_len) {
     return (sp == nullptr) ? (p + strlen(p)) : (sp + 1);
 }
 
+// ===================== 节点专属传感器模块 =====================
+// 节点 4（厨房：MQ-2 + 火焰）的全部实现单独放在 node4_kitchen.h：
+// 引脚/阈值/状态/能力 handler/采样 tick/setup 钩子都在里面。
+// 它在主文件里的位置有要求 —— 必须早于下面的能力表（表里要引用 capSmokeRead/capFlameRead）。
+#if NODE_ID == 4
+#include "node4_kitchen.h"
+#endif
+
 // ===================== 能力处理函数（动作 → 结果文本）=====================
 // 约定：成功把结果写进 out 并返回 true；动作不认识则返回 false（上层回 unknown-action）。
 // 动作名建议用标准词汇 on/off/set/rgb/read —— AI 首次调用命中率最高；
@@ -400,7 +416,7 @@ static const CapDef kCaps[] = {
 };
 static const char kNodeName[] = "玄关感应";
 
-#else
+#elif NODE_ID == 3
 // 我的家：一台设备接全部四个传感器。
 // 4 个能力的 info 报文实测约 194B，未超主控 200B 单包上限（描述文案别再拉长）。
 static const CapDef kCaps[] = {
@@ -411,6 +427,19 @@ static const CapDef kCaps[] = {
 };
 static const char kNodeName[] = "我的家";
 
+#elif NODE_ID == 4
+// 厨房：MQ-2 烟雾/可燃气 + 火焰。两个能力都只读：
+// 本节点只监测、只播报，不控制燃气阀门/排风扇（演示固件不能当生命安全设备）。
+// info 报文远小于 200B，不占用主控 kMaxCaps = 4 的额度。
+// 两个 handler 与采样逻辑都在 node4_kitchen.h（上面的 #include）。
+static const CapDef kCaps[] = {
+    {"smoke", "(烟雾浓度0=清洁100=浓,只读):read()", capSmokeRead},
+    {"flame", "(火焰0=无1=有,只读):read()", capFlameRead},
+};
+static const char kNodeName[] = "厨房";
+
+#else
+#error "NODE_ID 只能是 1(客厅灯)/2(玄关感应)/3(我的家)/4(厨房)"
 #endif
 
 // 能力数用 sizeof 推导：避免新增/删除能力时忘同步计数
@@ -1063,6 +1092,8 @@ static void laserTick() {
 }
 #endif
 
+// 厨房（节点 4）的采样实现见上部 #include 的 node4_kitchen.h
+
 // ============================== Arduino ==============================
 
 void setup() {
@@ -1100,6 +1131,10 @@ void setup() {
     pinMode(PIN_LASER, INPUT);
     dht = new DHT(PIN_DHT, DHT11);
     dht->begin();
+#endif
+
+#if NODE_ID == 4
+    kitchenSetup();   // 厨房（节点 4）的引脚/ADC 初始化，实现见 node4_kitchen.h
 #endif
 
     // 2) WiFi/ESP-NOW：不连接任何 AP，只用 ESP-NOW
@@ -1174,5 +1209,8 @@ void loop() {
 #if NODE_ID == 2 || NODE_ID == 3
     dhtTick();
     laserTick();
+#endif
+#if NODE_ID == 4
+    kitchenTick();   // 燃气 + 火焰采样（node4_kitchen.h）
 #endif
 }
