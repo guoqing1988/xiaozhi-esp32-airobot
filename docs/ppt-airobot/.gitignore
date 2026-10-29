@@ -1,0 +1,9 @@
+# PPT 构建中间产物（pptx 已内嵌这些图，原始照片在外部「项目资料」目录）
+images/_crops/
+images/01-robot-cover.png
+images/05-shoot-strip3.png
+images/07-web-console-square.png
+images/08-home-nodes-square.png
+
+# 本地导出的预览 PDF（8 MB，需要时从 pptx 重新导出）
+*-预览.pdf
