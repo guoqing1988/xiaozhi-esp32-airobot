@@ -199,7 +199,7 @@ class TestPhotoStore(unittest.TestCase):
         self.assertIsNotNone(m)
         body = m.group(1)
         self.assertIn("stopLogPolling()", body)
-        self.assertIn("if (id === 'photos') loadPhotos();", body)
+        self.assertIn("if (id === 'photos' && webStorageAvailable) loadPhotos();", body)
 
     def test_take_shows_saved_status(self):
         """拍照后要告诉用户这张有没有存到卡上（写卡失败不影响当次显示）。"""

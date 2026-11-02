@@ -796,9 +796,9 @@
     </div>
 
     <div class="tabs">
-      <button class="tab active" onclick="showTab('upload',this)">🎵 歌曲管理</button>
-      <button class="tab" onclick="showTab('alarm',this)">⏰ 闹钟提醒</button>
-      <button class="tab" onclick="showTab('uno',this)">🎮 机器人控制</button>
+      <button class="tab active" id="tab-upload" onclick="showTab('upload',this)">🎵 歌曲管理</button>
+      <button class="tab" id="tab-alarm" onclick="showTab('alarm',this)">⏰ 闹钟提醒</button>
+      <button class="tab" id="tab-uno" onclick="showTab('uno',this)">🎮 机器人控制</button>
       <button class="tab" onclick="showTab('photos',this)">📷 照片</button>
       <button class="tab" onclick="showTab('log',this)">🐞 系统日志</button>
     </div>
@@ -1057,11 +1057,16 @@
         只有 <code>!</code> = 被防抖挡了；什么都没有 = 指令没走到发送环节。
       </div> -->
       <div class="row" style="align-items:center">
-        <span style="font-size:12.5px;color:#6b7280;flex:1;line-height:1.4">下位机指令记录（<code>&gt;</code> 已发出 ·
+        <span style="font-size:12.5px;color:#6b7280;flex:1;line-height:1.4">下位机指令记录（<code>&gt;</code> 已提交串口 ·
           <code>!</code> 被防抖拦截 · <code>×</code> 发送失败 · <code>&lt;</code> 下位机回执）</span>
         <button class="btn-quiet" onclick="copyPre('unoCmdView', this)">📋 复制</button>
       </div>
       <pre id="unoCmdView"></pre>
+      <div class="row" style="align-items:center;flex-wrap:wrap;margin-top:10px">
+        <button class="btn-quiet" id="unoDiagPing" onclick="runUnoDiagnostic(-1)">检测 Arduino 连接</button>
+        <button class="btn-quiet" id="unoDiagServo" onclick="runUnoDiagnostic(Number(document.getElementById('servoRange').value))">测试当前舵机角度</button>
+      </div>
+      <div id="unoDiagResult" role="status" style="font-size:13px;min-height:20px">仅点击时检测；舵机测试会转动头部。</div>
 
     </div>
 
@@ -1069,7 +1074,7 @@
     <!-- 照片相册：列表只拉元数据，图片逐个按需拉取（设备从 TF 卡逐张读发，
          一次拉 100 张会把单线程 httpd 卡住）。12 张/批 + 滚到底自动加载。 -->
     <div class="panel" id="panel-photos">
-      <div class="hint">TF 卡里的照片。<b>网页拍照</b>存在 <code>photos</code> 目录，<b>AI 拍照</b>留档在
+      <div class="hint" id="photoStorageHint">TF 卡里的照片。<b>网页拍照</b>存在 <code>photos</code> 目录，<b>AI 拍照</b>留档在
         <code>photos_ai</code>；每个目录最多保留 100 张（超出自动删最旧的）。</div>
 
       <!-- 网页拍照（原在「🎮 机器人控制」面板，2026-09 搬到本 Tab）：设备侧抓帧 → JPEG 存 PSRAM →
@@ -1087,6 +1092,7 @@
         </div>
       </div>
 
+      <div id="photoAlbum">
       <div class="row" style="align-items:center">
         <span style="font-size:13px;color:#6b7280">相册</span>
         <select id="photoKind" onchange="loadPhotos()">
@@ -1104,6 +1110,7 @@
       <div id="photoEmpty" class="hint" style="display:none">还没有照片。</div>
       <div class="row" style="justify-content:center">
         <button class="btn" id="photoMoreBtn" style="display:none" onclick="loadMorePhotos()">加载更多</button>
+      </div>
       </div>
     </div>
 
@@ -1142,7 +1149,7 @@
   <script>
     // ===== WebSocket 通道(官方 httpd_ws_*, 替代高频 HTTP 短连接) =====
     // 一条长连接承载音乐/闹钟/uno 控制与状态, 避免每请求一连接占满 LWIP socket 池(抢走小智 UDP 音频通道)。
-    let ws = null, wsOk = false, wsId = 1;
+    let ws = null, wsOk = false, wsId = 1, webStorageAvailable = false;
     let wsFirstOpen = true;        // 仅首次连上时补一次首屏数据(重连不重复拉取)
     const wsPending = new Map();   // id -> resolve
     function wsConnect() {
@@ -1151,7 +1158,31 @@
         wsOk = true; setWsStatus('已连接', true);
         // 首屏数据必须等 WS 就绪后再拉: 页面加载瞬间 readyState 还是 CONNECTING,
         // 那时发请求会被 wsSend 直接拒掉(表格显示"接口不可用"), 与就绪时序存在竞态。
-        if (wsFirstOpen) { wsFirstOpen = false; loadActivePanel(); }
+        if (wsFirstOpen) {
+          wsFirstOpen = false;
+          wsSend({ action: 'capabilities' }).then(function (caps) {
+            webStorageAvailable = caps.storage === true;
+            if (!webStorageAvailable) {
+              document.getElementById('tab-upload').style.display = 'none';
+              document.getElementById('tab-alarm').style.display = 'none';
+              document.getElementById('photoAlbum').style.display = 'none';
+              document.getElementById('photoStorageHint').textContent = '未启用 TF 卡存储：可拍照查看当前照片，不保存相册。';
+              showTab('uno', document.getElementById('tab-uno'));
+            } else {
+              document.getElementById('tab-upload').style.display = '';
+              document.getElementById('tab-alarm').style.display = '';
+              document.getElementById('photoAlbum').style.display = '';
+              loadActivePanel();
+            }
+          }).catch(function () {
+            wsFirstOpen = true;
+            document.getElementById('tab-upload').style.display = 'none';
+            document.getElementById('tab-alarm').style.display = 'none';
+            document.getElementById('photoAlbum').style.display = 'none';
+            showTab('uno', document.getElementById('tab-uno'));
+            logWs('未能获取设备能力，请检查连接');
+          });
+        }
       };
       ws.onclose = function () { wsOk = false; setWsStatus('断开，重连中…', false); setTimeout(wsConnect, 1000); };
       ws.onerror = function () { ws.close(); };
@@ -1427,7 +1458,7 @@
       }
       if (id === 'alarm') loadAlarms();
       if (id === 'upload') { loadSongs(); loadAnnounces(); }
-      if (id === 'photos') loadPhotos();
+      if (id === 'photos' && webStorageAvailable) loadPhotos();
       if (id === 'uno') { startUnoPolling(); }   // 由 WS 推送更新状态, 此处只主动问一次
       else { stopUnoPolling(); unoStop(); }
       // 视频流只在「机器人控制」面板可见时拉：切走即断开（设备随即停止抓帧，不白占空口），
@@ -1614,7 +1645,7 @@
       if (p.id === 'panel-upload') { loadSongs(); loadAnnounces(); }
       else if (p.id === 'panel-alarm') loadAlarms();
       else if (p.id === 'panel-uno') { loadServoHome(); startLogPolling(); }
-      else if (p.id === 'panel-photos') loadPhotos();
+      else if (p.id === 'panel-photos' && webStorageAvailable) loadPhotos();
     }
     // ===== 上传弹窗 =====
     // dir: 'music'(默认) | 'announce'；fixedName: 提示音槽位名(不含 .mp3)，上传时强制用它当文件名
@@ -2481,6 +2512,42 @@
       if (m) m.addEventListener('click', function (e) { if (e.target === this) closeVideoCfg(); });
     })();
 
+    // 按需诊断：仅等待本次请求，不自动重发串口命令。
+    let unoDiagRunning = false;
+    async function runUnoDiagnostic(angle) {
+      if (unoDiagRunning) return;
+      const out = document.getElementById('unoDiagResult');
+      const buttons = [document.getElementById('unoDiagPing'), document.getElementById('unoDiagServo')];
+      unoDiagRunning = true;
+      buttons.forEach(b => b.disabled = true);
+      out.textContent = '正在提交…';
+      try {
+        const start = await wsSend({ action: 'uno_diag_start', angle: angle });
+        if (!start.ok) throw new Error(start.error || '设备忙或不可用');
+        const end = Date.now() + 6500;
+        while (Date.now() < end && document.getElementById('panel-uno').classList.contains('active')) {
+          await new Promise(resolve => setTimeout(resolve, 400));
+          const result = await wsSend({ action: 'uno_diag_status', diagnostic_id: start.diagnostic_id });
+          if (!result.ok) throw new Error(result.error || '状态不可用');
+          if (result.state === 'ok') {
+            out.textContent = 'Arduino 已响应（' + result.elapsed_ms + 'ms）。' +
+              (angle >= 0 ? '舵机命令已处理，但不能确认实际到位。' : '仅证明本次双向通信有响应。');
+            return;
+          }
+          if (result.state === 'rejected') { out.textContent = 'Arduino 拒绝命令，可能正处于驾驶或巡线模式。'; return; }
+          if (result.state === 'failed') { out.textContent = 'ESP32 串口写入失败。'; return; }
+          if (result.state === 'timeout') { out.textContent = '未收到回应：请检查 Arduino、双向接线和固件版本；结果未知。'; return; }
+          out.textContent = result.state === 'queued' ? '已排队，等待发送…' : '已提交串口，等待 Arduino 响应…';
+        }
+        out.textContent = '检测已停止或超时，结果未知。';
+      } catch (e) {
+        out.textContent = '检测失败：' + e.message + '；请检查网页连接后重试。';
+      } finally {
+        buttons.forEach(b => b.disabled = false);
+        unoDiagRunning = false;
+      }
+    }
+
     // ===== 机器人控制(遥感摇杆) =====
     // 手感参数集中在此处便于微调(改完需重新编译固件 + 浏览器强刷 Ctrl+F5)
     const JOY_R = 72, JOY_DEAD = 0.14;         // 摇杆半径(px) / 回中死区
@@ -2529,7 +2596,9 @@
       unoCurDir = ''; unoCurSpeed = 0;
       if (unoInterval) { clearInterval(unoInterval); unoInterval = null; }
       if (unoPendTimer) { clearTimeout(unoPendTimer); unoPendTimer = null; }   // 停止时丢弃待补发的 drive
-      wsSend({ action: 'uno_stop' }).catch(() => { });
+      wsSend({ action: 'uno_stop' })
+        .then(j => { if (!j.ok) throw new Error(j.msg || '停止提交失败'); })
+        .catch(() => logWs('停止命令未确认，请检查连接'));
       document.getElementById('joyLabel').textContent = '松手回中';
       document.getElementById('joySpeed').textContent = '速度 0';
       const knob = document.getElementById('joyKnob'); if (knob) knob.style.transform = 'translate(-50%,-50%)';
@@ -2653,7 +2722,9 @@
       document.getElementById('servoLabel').textContent = deg + '°';
       if (deg === servoDeg) return;
       servoDeg = deg;
-      if (send) wsSend({ action: 'uno_servo', degree: deg }).catch(() => logWs('舵机命令发送失败，请重试'));
+      if (send) wsSend({ action: 'uno_servo', degree: deg })
+        .then(j => { if (!j.ok) throw new Error(j.msg || '发送失败'); })
+        .catch(() => logWs('舵机命令发送失败，请重试'));
     }
     function servoStep(delta) { setServoDeg(servoDeg + delta, true); }
 
@@ -2666,7 +2737,7 @@
       servoHomeDeg = deg;
       el.value = deg;
       wsSend({ action: 'uno_servo_home_set', value: deg })
-        .then(() => setServoDeg(deg, false))
+        .then(j => { if (!j.ok) throw new Error(j.error || '发送失败'); setServoDeg(deg, false); })
         .catch(() => { servoHomeDeg = prev; el.value = prev; logWs('回正值设置失败，请重试'); });
     }
     function homeStep(delta) { applyServoHome(servoHomeDeg + delta); }
@@ -2681,7 +2752,9 @@
     function servoHome() {
       const deg = clampServoDeg(document.getElementById('servoHomeVal').value);
       setServoDeg(deg === null ? servoHomeDeg : deg, false);
-      wsSend({ action: 'uno_servo_home' }).catch(() => logWs('回正发送失败，请重试'));
+      wsSend({ action: 'uno_servo_home' })
+        .then(j => { if (!j.ok) throw new Error(j.msg || '发送失败'); })
+        .catch(() => logWs('回正发送失败，请重试'));
     }
     function loadServoHome() {
       wsSend({ action: 'uno_servo_home_get' }).then(t => {

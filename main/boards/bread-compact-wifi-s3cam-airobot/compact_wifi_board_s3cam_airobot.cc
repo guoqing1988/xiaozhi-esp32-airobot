@@ -8,6 +8,8 @@
 #include "button.h"
 #include "config.h"
 #include "log_capture.h"
+#include "uno_line_parser.h"
+#include "uno_tx_queue.h"
 #include "espnow_home.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
@@ -15,11 +17,11 @@
 #include "esp32_camera.h"
 #include "driver/gpio.h"
 #include "settings.h"
-#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
-#include "local_music_player.h"
 #include "http_upload_server.h"
 #include "local_photo.h"
 #include "local_video_stream.h"
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+#include "local_music_player.h"
 #include "photo_store.h"
 #include "alarm_manager.h"
 #include "assets/lang_config.h"
@@ -28,6 +30,7 @@
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_system.h>
+#include <esp_random.h>
 #include <dirent.h>
 #include <esp_timer.h>
 #include <driver/i2c_master.h>
@@ -95,6 +98,56 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
 // 用独立 TAG 单独放开 INFO，网页日志面板就能看到“节点消息收到没有 / 播报卡在哪一步”。
 #define TAG_ESPNOW "ESP-NOW"
 
+namespace {
+UnoTxQueue uno_tx_queue;
+portMUX_TYPE uno_tx_mux = portMUX_INITIALIZER_UNLOCKED;
+TaskHandle_t uno_tx_task = nullptr;
+struct UnoDiagnostic {
+    uint32_t id = 0;
+    int64_t started_us = 0;
+    int64_t completed_us = 0;
+    enum State { kIdle, kQueued, kSent, kOk, kRejected, kTimeout, kFailed } state = kIdle;
+};
+UnoDiagnostic uno_diag;
+constexpr int64_t kUnoDiagnosticTimeoutUs = 5000000;
+
+void UnoTxLoop(void*) {
+    char command[UnoTxQueue::kCommandSize];
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        while (true) {
+            const int64_t pop_time = esp_timer_get_time();
+            portENTER_CRITICAL(&uno_tx_mux);
+            const bool available = uno_tx_queue.Pop(command, pop_time);
+            portEXIT_CRITICAL(&uno_tx_mux);
+            if (!available) break;
+            unsigned long diagnostic_id = 0;
+            if (sscanf(command, "diag %lu", &diagnostic_id) == 1) {
+                const int64_t now = esp_timer_get_time();
+                portENTER_CRITICAL(&uno_tx_mux);
+                const bool current = uno_diag.id == diagnostic_id &&
+                                     uno_diag.state == UnoDiagnostic::kQueued &&
+                                     now - uno_diag.started_us < kUnoDiagnosticTimeoutUs;
+                if (current) uno_diag.state = UnoDiagnostic::kSent;
+                portEXIT_CRITICAL(&uno_tx_mux);
+                if (!current) continue;
+            }
+            char frame[UnoTxQueue::kCommandSize + 3];
+            const int len = snprintf(frame, sizeof(frame), "\n@%s\n", command);
+            const int written = uart_write_bytes(ECHO_UART_PORT_NUM, frame, len);
+            if (written == len) LogCaptureAppend("[UNO] > @%s\n", command);
+            else {
+                LogCaptureAppend("[UNO] x @%s （UART 写入失败）\n", command);
+                portENTER_CRITICAL(&uno_tx_mux);
+                if (diagnostic_id && uno_diag.id == diagnostic_id && uno_diag.state == UnoDiagnostic::kSent)
+                    uno_diag.state = UnoDiagnostic::kFailed;
+                portEXIT_CRITICAL(&uno_tx_mux);
+            }
+        }
+    }
+}
+}
+
 class CompactWifiBoardS3CamAirobot : public WifiBoard {
 private:
  
@@ -106,8 +159,8 @@ private:
     std::unique_ptr<AlarmManager> alarm_manager_;
     esp_timer_handle_t alarm_chime_timer_ = nullptr;  // 无歌兜底: 几声提示音连播的定时器
     std::atomic<int> alarm_chime_left_ = 0;           // 剩余要补播的提示音次数(跨任务, 用原子)
-    bool sd_card_mounted_ = false;
 #endif
+    bool sd_card_mounted_ = false;
     esp_timer_handle_t ip_timer_ = nullptr;  // 待机状态底部显示 IP 的定时器
     // Arduino 下位机双向状态(RX 解析任务写, MCP 工具读)
     std::atomic<bool> uno_busy_{false};       // Arduino 正在执行动作
@@ -362,24 +415,24 @@ private:
         }
     }
 
+#endif  // CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+
     void InitializeUploadServer() {
-        if (!sd_card_mounted_) {
-            ESP_LOGW(TAG, "SD card not mounted, skip upload server");
-            return;
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+        if (sd_card_mounted_) {
+            // TF 卡照片仓库：确保 /sdcard/photos 与 /sdcard/photos_ai 存在。
+            PhotoStoreInit();
+            // JPEG 只在回调期间有效，必须当场写卡。
+            if (camera_ != nullptr) {
+                camera_->SetJpegObserver([](const uint8_t* jpeg, size_t len) {
+                    if (!PhotoStoreGetAiSave()) {
+                        return;
+                    }
+                    PhotoStoreSave(PhotoKind::kAi, jpeg, len);
+                });
+            }
         }
-        // TF 卡照片仓库：确保 /sdcard/photos 与 /sdcard/photos_ai 存在（失败则相册不可用）
-        PhotoStoreInit();
-        // AI 拍照也留档到 TF 卡（网页/AI 都能开关，默认开）。
-        // 回调运行在 Explain() 的**编码线程**里，jpeg 指针只在回调期间有效
-        // → 必须当场同步写卡（不能只记下指针稍后再读）。
-        if (camera_ != nullptr) {
-            camera_->SetJpegObserver([](const uint8_t* jpeg, size_t len) {
-                if (!PhotoStoreGetAiSave()) {
-                    return;  // 用户关掉了 AI 拍照留档
-                }
-                PhotoStoreSave(PhotoKind::kAi, jpeg, len);
-            });
-        }
+#endif
         // 网页拍照：JPEG 常驻 PSRAM(128KB 配额，VGA JPEG 约 30~60KB)，失败不影响其它功能。
         // 与 AI 拍照共用同一个 camera 驱动，本地已加互斥(见 local_photo.cc)。
         LocalPhotoInit(camera_, 128 * 1024);
@@ -388,10 +441,13 @@ private:
             .data = []() -> const uint8_t* { return LocalPhotoData(); },
             .size = []() -> size_t { return LocalPhotoSize(); },
         });
-        // 上传成功回调：刷新歌曲列表缓存，AI 立刻能查到新歌(无需重启)
-        StartUploadServer([this]() { GetMusicPlayer()->ScanSongs(); });
+        // 网页服务不依赖存储；无卡时不注册文件相关操作。
+#ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+        StartUploadServer(sd_card_mounted_, [this]() { GetMusicPlayer()->ScanSongs(); });
+#else
+        StartUploadServer(false);
+#endif
     }
-#endif  // CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
 
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
     // 唤醒词检测到：立即打断本地音乐播放（配合 Application 的板级回调钩子）
@@ -861,6 +917,9 @@ private:
         // 未接 Arduino 时 GPIO44(RX) 悬空, 噪声会触发 RX 中断风暴(偶发中断看门狗复位);
         // 内部上拉稳定电平; 接 Arduino 时上拉不影响正常通信
         gpio_set_pull_mode(UART_ECHO_RXD, GPIO_PULLUP_ONLY);
+        if (xTaskCreate(UnoTxLoop, "uno_tx", 3072, nullptr, 4, &uno_tx_task) != pdPASS) {
+            uno_tx_task = nullptr;
+        }
         SendUartMessage("w2");
         // 启动 UART0 RX 解析任务, 读取 Arduino 回执(@busy/@done), 供 web /uno 接口查询下位机状态
         xTaskCreate(UnoStatusTask, "uno_status", 4096, this, 3, &uno_status_task_);
@@ -874,6 +933,7 @@ private:
 
     void UnoStatusLoop() {
         char line[64];
+        UnoLineParser parser;
         while (true) {
             // 看门狗: @busy 后 30 秒未收到 @done(下位机复位/串口丢失)自动清零,
             // 防止状态卡死在 moving 导致 AI 无限轮询
@@ -886,12 +946,23 @@ private:
             if (len <= 0) {
                 continue;
             }
-            line[len] = '\0';
-            // 按行解析 @busy / @done(可能一次读到多行); 状态变化后置位 pending, 在锁外推送
+            // UART 不保证读到完整行，保留跨读取的半行并丢弃过长帧。
             bool status_changed = false;
-            char* tok = strtok(line, "\r\n");
-            while (tok != nullptr) {
-                if (strncmp(tok, "@busy", 5) == 0) {
+            parser.Feed(line, static_cast<size_t>(len), [&](char* tok) {
+                unsigned long diagnostic_id = 0;
+                char diagnostic_result[12] = {};
+                if (sscanf(tok, "@diag %lu %11s", &diagnostic_id, diagnostic_result) == 2) {
+                    const int64_t now = esp_timer_get_time();
+                    portENTER_CRITICAL(&uno_tx_mux);
+                    if (uno_diag.id == diagnostic_id && uno_diag.state == UnoDiagnostic::kSent &&
+                        now - uno_diag.started_us < kUnoDiagnosticTimeoutUs) {
+                        if (strcmp(diagnostic_result, "ok") == 0) uno_diag.state = UnoDiagnostic::kOk;
+                        else if (strcmp(diagnostic_result, "reject") == 0) uno_diag.state = UnoDiagnostic::kRejected;
+                        uno_diag.completed_us = now;
+                    }
+                    portEXIT_CRITICAL(&uno_tx_mux);
+                    LogCaptureAppend("[UNO] < %s\n", tok);
+                } else if (strncmp(tok, "@busy", 5) == 0) {
                     uno_busy_ = true;
                     uno_busy_since_us_ = esp_timer_get_time();
                     std::lock_guard<std::mutex> lock(uno_status_mutex_);
@@ -920,8 +991,7 @@ private:
                     status_changed = true;
                     LogCaptureAppend("[UNO] < %s\n", tok);
                 }
-                tok = strtok(nullptr, "\r\n");
-            }
+            });
             // 状态变化时经 WebSocket 推送给 web 前端(锁已在上面作用域释放, 此处可安全读)
             if (status_changed) {
                 WebNotifyUnoStatus();
@@ -937,52 +1007,96 @@ private:
         // 不同指令(动作切换/组合编排)不受影响，照常发送。
         // 窗口按命令类型区分: 动作类(go-*/tj-*)执行耗时长(特技最长约 7.5 秒), 窗口须大于
         // 服务端重试间隔; 状态类(servo-*/speed-*)瞬时生效, 1 秒足够。
-        static char s_last_cmd[32] = {};
-        static int64_t s_last_us = 0;       // 上次调用(含被拦截)的时间, 用于续期窗口
-        static int64_t s_last_sent_us = 0;  // 上次**真正发出**的时间, 用于告诉 AI“多久前已执行”
-        int64_t now = esp_timer_get_time();
-        const bool is_action = (strncmp(command_str, "go-", 3) == 0 ||
-                                strncmp(command_str, "tj-", 3) == 0);
+        static char s_last_cmd[UnoTxQueue::kCommandSize] = {};
+        static int64_t s_last_us = 0;
+        const bool is_stop_command = strcmp(command_str, "drive-stop") == 0 ||
+                                     strcmp(command_str, "go-stop-0") == 0 ||
+                                     strcmp(command_str, "line-stop") == 0;
+        if (is_stop_command) debounce = false;
+        const int64_t now = esp_timer_get_time();
+        const bool is_action = strncmp(command_str, "go-", 3) == 0 ||
+                               strncmp(command_str, "tj-", 3) == 0;
         const int64_t window_us = is_action ? 3000000 : 1000000;
-        if (debounce && strcmp(s_last_cmd, command_str) == 0 && (now - s_last_us) < window_us) {
-            // 命中时刷新时间戳(续期): 只要 AI 持续重复调用同一指令就一直拦截。
-            // 旧实现命中时不刷新, 窗口变成"距上次实际发送的时间", 导致每 2 次调用放行 1 次
-            // (实测每 1.8 秒下发一条), 特技/动作被反复触发(表现为"一直摇头/一直前进停不下来")。
-            int64_t ago_ms = (s_last_sent_us > 0) ? (now - s_last_sent_us) / 1000 : 0;
+        bool duplicate = false;
+        bool accepted = false;
+        size_t cancelled = 0;
+        portENTER_CRITICAL(&uno_tx_mux);
+        if (debounce && strcmp(s_last_cmd, command_str) == 0 && now - s_last_us < window_us) {
             s_last_us = now;
-            // 记到网页调试面板: 否则“AI 反复调用但什么都没发生”时分不清是被防抖挡了还是没发出去
-            LogCaptureAppend("[UNO] ! @%s （重复调用已忽略，%lld 毫秒前已执行）\n", command_str,
-                             static_cast<long long>(ago_ms));
-            // 必须返回“已完成”语义: 曾返回"指令已发送(防抖): xxx", AI 把“防抖”读成“没发出去”从而
-            // 无限重试(实测每 0.7~1 秒一次刷几十遍), 而续期逻辑又让窗口永不失效 -> 工具调用死循环
-            // -> 对话永久卡在 speaking。这里给出确定性答复 + “多久前已执行”的时间证据, AI 才会停手。
-            return std::string("该指令已于 ") + std::to_string(ago_ms) +
-                   " 毫秒前执行完成（" + command_str +
-                   "），本次重复调用已忽略，动作会自动完成并停止，无需再次调用";
+            duplicate = true;
+        } else if (uno_tx_task != nullptr && uno_tx_queue.Push(command_str, now)) {
+            accepted = true;
+            cancelled = uno_tx_queue.Cancelled();
+            if (is_stop_command) {
+                s_last_cmd[0] = '\0';
+                s_last_us = 0;
+            } else if (debounce) {
+                memcpy(s_last_cmd, command_str, strlen(command_str) + 1);
+                s_last_us = now;
+            }
         }
-        if (debounce) {
-            snprintf(s_last_cmd, sizeof(s_last_cmd), "%s", command_str);
-            s_last_us = now;
+        portEXIT_CRITICAL(&uno_tx_mux);
+        if (duplicate) {
+            LogCaptureAppend("[UNO] ! @%s （重复调用已忽略）\n", command_str);
+            return std::string("重复调用已忽略，之前的指令已提交，无需等待、查询或再次调用: ") + command_str;
         }
-        // 统一加 '@' 前缀并一次性写完整行(避免拆成多次 uart_write_bytes):
-        // 多次调用之间若被高优先级任务(音频 prio 8)抢占, Arduino 会先收到孤立的 '@',
-        // 其 readBytesUntil('\n') 默认超时 1000ms 会干等 -> web 控制出现约 1 秒延迟。
-        // 行首再补一个 '\n': 上位机 UART0 与 ESP-IDF 控制台同口, 若前次留下了半行字节,
-        // 这个换行先把脏行收尾, 保证本行对 Arduino 而言一定以 '@' 开头。
-        char frame[80];
-        int flen = snprintf(frame, sizeof(frame), "\n@%s\n", command_str);
-        if (flen <= 0 || flen >= (int)sizeof(frame)) {
-            LogCaptureAppend("[UNO] x @%s （指令过长）\n", command_str);
-            return std::string("指令发送失败: ") + command_str;
+        if (!accepted) {
+            LogCaptureAppend("[UNO] x @%s （发送队列忙或不可用）\n", command_str);
+            return std::string("指令发送失败，队列忙或不可用: ") + command_str;
         }
-        int written = uart_write_bytes(ECHO_UART_PORT_NUM, frame, flen);
-        if (written < 0) {
-            LogCaptureAppend("[UNO] x @%s （UART 写入失败）\n", command_str);
-            return std::string("指令发送失败: ") + command_str;
+        if (cancelled != 0) LogCaptureAppend("[UNO] ! 停止取消 %u 条待发送动作\n", (unsigned)cancelled);
+        xTaskNotifyGive(uno_tx_task);
+        return std::string("指令已提交，无需等待、查询或再次调用: ") + command_str;
+    }
+
+    std::string StartUnoDiagnostic(int angle) {
+        if (uno_status_task_ == nullptr) return "{\"ok\":false,\"error\":\"receiver unavailable\"}";
+        if (angle < -1 || angle > 180) return "{\"ok\":false,\"error\":\"invalid angle\"}";
+        const int64_t now = esp_timer_get_time();
+        uint32_t id = esp_random();
+        if (id == 0) id = 1;
+        char command[UnoTxQueue::kCommandSize];
+        if (angle == -1) snprintf(command, sizeof(command), "diag %lu ping", (unsigned long)id);
+        else snprintf(command, sizeof(command), "diag %lu servo %d", (unsigned long)id, angle);
+        bool accepted = false;
+        portENTER_CRITICAL(&uno_tx_mux);
+        const bool busy = (uno_diag.state == UnoDiagnostic::kQueued || uno_diag.state == UnoDiagnostic::kSent) &&
+                          now - uno_diag.started_us < kUnoDiagnosticTimeoutUs;
+        if (!busy && uno_tx_task != nullptr && uno_tx_queue.Push(command, now)) {
+            uno_diag.id = id;
+            uno_diag.started_us = now;
+            uno_diag.completed_us = 0;
+            uno_diag.state = UnoDiagnostic::kQueued;
+            accepted = true;
         }
-        s_last_sent_us = now;
-        LogCaptureAppend("[UNO] > @%s\n", command_str);
-        return std::string("指令已发送: ") + command_str;
+        portEXIT_CRITICAL(&uno_tx_mux);
+        if (!accepted) return "{\"ok\":false,\"error\":\"busy or unavailable\"}";
+        xTaskNotifyGive(uno_tx_task);
+        return std::string("{\"ok\":true,\"diagnostic_id\":") + std::to_string(id) + "}";
+    }
+
+    static std::string GetUnoDiagnostic(uint32_t id) {
+        const int64_t now = esp_timer_get_time();
+        UnoDiagnostic snapshot;
+        portENTER_CRITICAL(&uno_tx_mux);
+        if ((uno_diag.state == UnoDiagnostic::kQueued || uno_diag.state == UnoDiagnostic::kSent) &&
+            now - uno_diag.started_us >= kUnoDiagnosticTimeoutUs) uno_diag.state = UnoDiagnostic::kTimeout;
+        snapshot = uno_diag;
+        portEXIT_CRITICAL(&uno_tx_mux);
+        if (id == 0 || id != snapshot.id) return "{\"ok\":false,\"error\":\"unknown diagnostic\"}";
+        const char* state = "unknown";
+        switch (snapshot.state) {
+            case UnoDiagnostic::kQueued: state = "queued"; break;
+            case UnoDiagnostic::kSent: state = "sent"; break;
+            case UnoDiagnostic::kOk: state = "ok"; break;
+            case UnoDiagnostic::kRejected: state = "rejected"; break;
+            case UnoDiagnostic::kTimeout: state = "timeout"; break;
+            case UnoDiagnostic::kFailed: state = "failed"; break;
+            default: break;
+        }
+        const int64_t elapsed = (snapshot.completed_us ? snapshot.completed_us : now) - snapshot.started_us;
+        return std::string("{\"ok\":true,\"state\":\"") + state + "\",\"elapsed_ms\":" +
+               std::to_string(elapsed / 1000) + "}";
     }
 
     // 设置头部舵机回正角度: 存 NVS + 下发给下位机, 返回统一 JSON(web /uno 调用)。
@@ -1054,7 +1168,7 @@ private:
 
         mcp_server.AddTool(
             "self.uno.action",
-            "麦克纳姆轮机器人控制。调用本工具一次即完成整个动作并自动停止，返回即代表已执行完毕，不要重复调用、也不要再调用本工具确认。action: 0=停止(瞬时完成),1=前进,2=后退,3=左转,4=右转,5=左移,6=右移,7=左上斜移,8=右上斜移,9=左下斜移,10=右下斜移; steps: 动作执行步数(1-100, 越大动作时间越长; 左转/右转每步 0.01 秒, 其它动作每步 0.1 秒)",
+            "麦克纳姆轮机器人控制。指令提交后无需等待、查询或重复调用，请继续处理用户请求。action: 0=停止(瞬时完成),1=前进,2=后退,3=左转,4=右转,5=左移,6=右移,7=左上斜移,8=右上斜移,9=左下斜移,10=右下斜移; steps: 动作执行步数(1-100, 越大动作时间越长; 左转/右转每步 0.01 秒, 其它动作每步 0.1 秒)",
             PropertyList({Property("action", kPropertyTypeInteger, 0),
                           Property("steps", kPropertyTypeInteger, 10, 1, 100)}),
             [this](const PropertyList& properties) -> ReturnValue {
@@ -1091,23 +1205,7 @@ private:
                 }
                 char cmd[32];
                 snprintf(cmd, sizeof(cmd), "go-%s-%d", action_str, steps);
-                std::string result = SendUartMessage(cmd);
-                if (is_stop) {
-                    // 不能回"动作约500毫秒后自动停止": 那等于告诉 AI "动作还没完成"，它会等
-                    // 一会儿再调一次确认，正是"狂发 stop + 卡在 speaking"的诱因之一。
-                    result += "，机器人已停止，无需再次调用确认";
-                } else {
-                    // 附上确定性的动作时长，让 AI 知道动作会自动完成停止，无需查状态确认
-                    int t_ms = is_turn ? steps * 10 : steps * 100;
-                    if (t_ms % 1000 == 0) {
-                        result += "，动作约" + std::to_string(t_ms / 1000) +
-                                  "秒后自动停止，无需再次调用确认";
-                    } else {
-                        result += "，动作约" + std::to_string(t_ms) +
-                                  "毫秒后自动停止，无需再次调用确认";
-                    }
-                }
-                return result;
+                return SendUartMessage(cmd, !is_stop);
             });
 
         mcp_server.AddTool(
@@ -1118,12 +1216,12 @@ private:
                 int degree = properties["degree"].value<int>();
                 char cmd[16];
                 snprintf(cmd, sizeof(cmd), "servo-%d", degree);
-                return SendUartMessage(cmd) + "，舵机约0.5秒后到位";
+                return SendUartMessage(cmd);
             });
 
         mcp_server.AddTool(
             "self.uno.teji",
-            "执行特技，调用一次即执行完毕，不要重复调用。action: 1摇头 2闪电走位 3转圈 4蛇形走位 5调头 6开灯 7关灯",
+            "执行特技，提交后无需等待、查询或重复调用，请继续处理用户请求。action: 1摇头 2闪电走位 3转圈 4蛇形走位 5调头 6开灯 7关灯",
             PropertyList({Property("action", kPropertyTypeInteger, 1)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 int action = properties["action"].value<int>();
@@ -1140,7 +1238,7 @@ private:
                 }
                 char cmd[32];
                 snprintf(cmd, sizeof(cmd), "tj-%s", action_str);
-                return SendUartMessage(cmd) + "，特技执行完毕后自动结束";
+                return SendUartMessage(cmd);
             });
 
         mcp_server.AddTool(
@@ -1173,6 +1271,8 @@ private:
                 return SendUartMessage(cmd.c_str(), !is_drive_pulse);
             },
             .get_status = [this]() { return UnoStatusJson(); },
+            .start_diagnostic = [this](int angle) { return StartUnoDiagnostic(angle); },
+            .get_diagnostic = [](uint32_t id) { return GetUnoDiagnostic(id); },
             .set_servo_home = [this](int value) { return SetServoHome(value); },
             .get_servo_home = [this]() { return GetServoHome(); },
             .on_client_change = [this](int count) {
@@ -1440,6 +1540,7 @@ private:
 
     void Announce(int node_id, const char* name) {
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
+        if (!sd_card_mounted_) return;
         if (node_id < 1 || node_id > EspNowHome::kMaxNodes) {
             ESP_LOGE(TAG_ESPNOW, "播报跳过: 节点号非法 (node=%d)", node_id);
             return;
@@ -1681,6 +1782,7 @@ private:
             PropertyList({Property("name", kPropertyTypeString, std::string("motion"))}),
             [this](const PropertyList& p) -> ReturnValue {
                 std::string name = p["name"].value<std::string>();
+                if (!sd_card_mounted_) return std::string("TF 卡未挂载，无法播放提示音");
                 LocalMusicPlayer* player = GetMusicPlayer();  // 懒创建(同上：不能直接判 music_player_)
                 if (player == nullptr || !player->PlayAnnounce(name)) {
                     return "未找到播报文件 " + name + ".mp3(需放在 TF 卡 /sdcard/announce/)";
@@ -1760,10 +1862,12 @@ public:
         InitializeClock();              // 应用 NVS 时钟设置 + 启动每秒刷新定时器
 #ifdef CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD
         InitializeSDCard();
-        InitializeUploadServer();
-        InitializeMusicTools();
-        InitializeAlarmTools();
+        if (sd_card_mounted_) {
+            InitializeMusicTools();
+            InitializeAlarmTools();
+        }
 #endif
+        InitializeUploadServer();
         InitializeIpDisplay();
         InitializeEchoUart();
         InitializeUnoTools();

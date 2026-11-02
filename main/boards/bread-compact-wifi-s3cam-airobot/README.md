@@ -320,7 +320,7 @@ packages/bread-compact-wifi-s3cam-airobot-no-tfcard-merged-20260830.bin
 
 ### 无 TF 卡模式（编译变体，砍掉音乐/上传功能）
 
-板子支持编译成**不依赖 TF 卡**的版本：接线完全不变，只是不挂载 SD 卡、不提供本地音乐播放与网页上传（`self.music.*` 工具、歌词、上传页均无）。适合没插卡或不需要本地音乐的场景。
+板子支持编译成**不依赖 TF 卡**的版本：不挂载 SD 卡，不提供本地音乐、文件上传、持久化闹钟和相册；Web 仍保留机器人控制、按需诊断、系统日志、实时视频及临时拍照。TF 卡版启动时未成功挂载也保留这些非存储功能。
 
 开关：`CONFIG_XIAOZHI_AIROBOT_ENABLE_TF_CARD`（默认 `y`，开启全部 TF 卡功能）。
 
@@ -346,7 +346,7 @@ TF Card Features
 python3 scripts/build.py bread-compact-wifi-s3cam-airobot --name bread-compact-wifi-s3cam-airobot-no-tfcard
 ```
 
-> 无 TF 卡版保留：AI 对话、摄像头（拍照/翻转）、屏幕、按钮、唤醒词、Arduino 双向通信、IP 显示；仅跳过 SD 卡挂载、音乐播放、网页上传。
+> 无 TF 卡版保留：AI 对话、摄像头（拍照/翻转）、屏幕、按钮、唤醒词、Arduino 双向通信、IP 显示和非存储 Web 功能。`idf.py build` 使用当前 menuconfig，不读取 `config.json`。
 >
 > **引脚自动切换（重要）**：无 TF 卡模式下功放恢复与**原始板 `bread-compact-wifi-s3cam` 完全一致**的接线：DOUT=`39`、BCLK=`40`、LRCK=`41`（TF 版为 `3/14/46`），背光也恢复 `38`（TF 版为 NC）。若你的功放仍按 `3/14/46` 接线（TF 版），无 TF 卡版会无声——此时把功放三根线改回 `39/40/41` 即可。
 
@@ -1177,6 +1177,8 @@ main/boards/bread-compact-wifi-s3cam-airobot/arduino/MecanumRobot/MecanumRobot.i
 | `@tj-yaotou` / `@tj-shandian` / `@tj-zhuanquan` / `@tj-sxzw` / `@tj-diaotou` | 特技动作 |
 | `@line-start` / `@line-stop` | 巡线模式（沿地面黑线自动行驶）开始/停止 |
 
+**按需诊断**：网页「机器人控制」可点击「检测 Arduino 连接」（无动作）或「测试当前舵机角度」（头部会转动）。仅点击时发送，不执行周期检测或自动重试；ESP32 与 Arduino 两端均须烧录支持该功能的新固件。检测超时仅表示本次未收到回执，不能区分接线、电平、下位机忙或旧固件。舵机回执仅表示命令处理，不代表物理到位。
+
 **双向回执（Arduino → ESP32）**：
 - 耗时动作（`go-*` / `tj-*` / 巡线）开始执行时回传 `@busy {动作}`，执行完毕回传 `@done {动作}`；
 - 速度/舵机1角度变化时回传状态快照 `@stat s{速度} v{舵机1角度}`（事件驱动，非周期轮询；后续扩充在此追加字段，如 ToF 距离 ` d{cm}`）。
@@ -1203,12 +1205,12 @@ ESP32 的 UART0 RX 解析任务维护状态（含 30 秒 busy 看门狗，防 `@
 
 | 标记 | 含义 |
 |------|------|
-| `[UNO] > @go-forward-10` | ESP32 **确实发出了**该指令 |
-| `[UNO] ! @go-forward-10 （重复调用已忽略，2300 毫秒前已执行）` | 命中防抖窗口，**本次没有发出**（AI 重复调用时常见，属正常拦截），并给出“上次真正发出的时间”供排查 |
+| `[UNO] > @go-forward-10` | ESP32 UART 驱动已接收完整指令，不能证明 Arduino 已收到或执行 |
+| `[UNO] ! @go-forward-10 （重复调用已忽略）` | 命中防抖窗口，**本次没有发出**；不能据此判断上次是否执行 |
 | `[UNO] x @... （指令过长 / UART 写入失败）` | 发送失败 |
 | `[UNO] < @busy go-forward-10` | Arduino 回执：**开始执行**（`@done` 为执行完毕，`@stat` 为速度/舵机快照）|
 
-  排查经验：**有 `>` 无 `<`** = 指令发出了但 Arduino 没执行或回执没回来（看接线/供电）；**只有 `!`** = 被防抖挡了；**什么都没有** = 指令没走到发送环节（问题在上层/MCP 调用）。
+  排查经验：**有 `>` 无 `<`** 可能是下位机未收到、未执行或回执未返回；**只有 `!`** 表示防抖拦截；**什么都没有**也可能是日志被覆盖、网页断线或未及时拉取，不能据此断言指令没发出。发送队列有限，忙时请求会返回失败；停止优先，旧摇杆方向会被清除或过期。
 - **AI 侧逃生与调试工具**（网页打不开时用语音）：
   - `self.debug.log_to_serial(on)`：0=关闭（默认，日志只在网页）、1=打开串口日志（会干扰 Arduino）。
   - `self.debug.set_log_level(level)`：0~4 切换日志级别。

@@ -103,6 +103,10 @@ arduino-cli upload -v -p COM5 --fqbn arduino:avr:uno main/boards/bread-compact-w
   arduino-cli compile -v --build-property "compiler.cpp.extra_flags=-DSERIAL_RX_BUFFER_SIZE=256" ...
   ```
 
+## 网页按需诊断
+
+需同步更新 ESP32 和 Arduino 固件。网页可手动触发无动作连接检测或单次舵机测试；无周期心跳、无自动重试。测试期间请确保头部可安全转动。诊断回执只说明处理结果，无法证明舵机物理到位；Arduino 忙于阻塞动作时检测也可能超时。检查 UNO TX 到 ESP32 RX 的电平转换及共地。
+
 ## 上位机串口指令（ESP32 下发，均以 `@` 开头）
 
 | 指令 | 效果 |

@@ -611,6 +611,26 @@ void handleWebDrive() {
     }
 }
 
+// 按需诊断：不创建后台心跳，也不重试带动作的命令。
+void handleDiagnostic(const char* p) {
+    char* end = nullptr;
+    unsigned long id = strtoul(p, &end, 10);
+    if (end == p || *end != ' ' || id == 0) return;
+    p = end + 1;
+    const char* result = "reject";
+    if (strcmp(p, "ping") == 0) {
+        result = "ok";
+    } else if (strncmp(p, "servo ", 6) == 0 && !line_following_ && !web_drive_) {
+        char* tail = nullptr;
+        long angle = strtol(p + 6, &tail, 10);
+        if (tail != p + 6 && *tail == '\0' && angle >= 0 && angle <= 180) {
+            setServo1((int)angle);
+            result = "ok";
+        }
+    }
+    Serial.print("@diag "); Serial.print(id); Serial.print(' '); Serial.println(result);
+}
+
 // 统一从串口读取并按前缀分发命令(每次循环只读一次)。
 // 旧实现 checkDriveCommand() 用 while(Serial.available()) 把缓冲里所有命令读走并
 // 丢弃非 drive- 前缀的命令, 导致后续 executeCommand() 再也读不到 AI 的点动命令
@@ -626,7 +646,9 @@ void serialCommand() {
         while (*p == ' ' || *p == '\t') p++;
         if (*p != '@') continue;
         p++;
-        if (strncmp(p, "drive-", 6) == 0) {
+        if (strncmp(p, "diag ", 5) == 0) {
+            handleDiagnostic(p + 5);
+        } else if (strncmp(p, "drive-", 6) == 0) {
             handleDrive(p + 6);   // web 摇杆驾驶命令
         } else {
             handleCommand(p);     // AI/舵机点动命令
@@ -895,7 +917,9 @@ void checkLineStopCommand() {
         while (*p == ' ' || *p == '\t') p++;
         if (*p != '@') continue;
         p++;
-        if (strcmp(p, "line-stop") == 0 || strcmp(p, "drive-stop") == 0) {
+        if (strncmp(p, "diag ", 5) == 0) {
+            handleDiagnostic(p + 5);
+        } else if (strcmp(p, "line-stop") == 0 || strcmp(p, "drive-stop") == 0) {
             setLineFollow(false);
         } else if (strncmp(p, "drive-", 6) == 0) {
             setLineFollow(false);

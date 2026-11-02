@@ -7,7 +7,7 @@
 
 // 启动 WiFi 网页上传服务：浏览器打开 http://<设备IP>/ 即可上传 MP3 到 TF 卡 /sdcard/music。
 // on_uploaded：每次成功上传后回调（可选），用于刷新歌曲列表缓存。
-void StartUploadServer(std::function<void()> on_uploaded = nullptr);
+void StartUploadServer(bool storage_available, std::function<void()> on_uploaded = nullptr);
 
 // 闹钟管理回调：由板级注入，供 web 页面读写闹钟。
 // get_alarms_json: 返回闹钟 JSON 数组字符串（供列表渲染）。
@@ -31,6 +31,8 @@ void SetAlarmWebApi(const AlarmWebApi& api);
 struct UnoWebApi {
     std::function<std::string(const std::string& cmd)> send_drive;
     std::function<std::string()> get_status;
+    std::function<std::string(int)> start_diagnostic;  // -1=连接检测，0..180=舵机测试
+    std::function<std::string(uint32_t)> get_diagnostic;
     std::function<std::string(int value)> set_servo_home;   // 存 NVS + 下发回正角度, 返回说明
     std::function<std::string()> get_servo_home;            // 返回当前回正角度 JSON
     std::function<void(int count)> on_client_change;        // WS 连接数变化通知(可空)

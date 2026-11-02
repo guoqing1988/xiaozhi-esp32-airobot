@@ -32,7 +32,7 @@ void LogCaptureInit();
 // 与系统日志共用缓冲、共用网页拉取通道，因此不额外占内存；正常运行时日志级别是
 // ERROR、几乎没有系统日志，指令流不会被冲掉。
 // 约定格式（前端据此高亮/过滤）：
-//   [UNO] > @go-forward-10      实际发出的指令
+//   [UNO] > @go-forward-10      已写入 UART 驱动缓冲，不代表对端收到
 //   [UNO] ! @go-forward-10 （防抖丢弃）  被防抖拦下、并未发出
 //   [UNO] < @done go-forward-10 收到的下位机回执
 void LogCaptureAppend(const char* fmt, ...) __attribute__((format(printf, 1, 2)));

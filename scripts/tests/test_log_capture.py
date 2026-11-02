@@ -226,10 +226,9 @@ class TestUnoCommandTrace(unittest.TestCase):
 
     def test_tx_is_recorded(self):
         """实际发出的指令要记录。"""
-        m = re.search(r"static std::string SendUartMessage\((.*?)\n    \}", self.board, re.S)
-        self.assertIsNotNone(m, "未找到 SendUartMessage")
-        body = m.group(1)
-        self.assertIn('LogCaptureAppend("[UNO] > @%s\\n", command_str)', body)
+        m = re.search(r"void UnoTxLoop\(void\*\)\s*\{(.*?)\n\}\n\}", self.board, re.S)
+        self.assertIsNotNone(m, "未找到 UnoTxLoop")
+        self.assertIn('LogCaptureAppend("[UNO] > @%s\\n", command)', m.group(1))
 
     def test_debounced_and_failed_are_recorded(self):
         """防抖丢弃/发送失败必须也有痕迹，否则分不清“被拦”和“没发”。"""
@@ -243,8 +242,8 @@ class TestUnoCommandTrace(unittest.TestCase):
         m = re.search(r"void UnoStatusLoop\(\)\s*\{(.*?)\n    \}", self.board, re.S)
         self.assertIsNotNone(m, "未找到 UnoStatusLoop")
         body = m.group(1)
-        self.assertEqual(body.count('LogCaptureAppend("[UNO] < %s\\n", tok)'), 3,
-                         "@busy/@stat/@done 三个分支都要记录回执")
+        self.assertEqual(body.count('LogCaptureAppend("[UNO] < %s\\n", tok)'), 4,
+                         "诊断和 @busy/@stat/@done 四种回执都要记录")
 
     def test_web_shows_uno_commands(self):
         self.assertIn('id="unoCmdView"', self.web)

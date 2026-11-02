@@ -62,6 +62,7 @@ static bool EnsureDir(const char* dir) {
 
 // 上传成功回调（在 StartUploadServer 时注入），用于刷新上层歌曲列表缓存
 static std::function<void()> s_on_uploaded;
+static bool s_storage_available = false;
 // 等待 WiFi 就绪的轮询定时器
 static esp_timer_handle_t s_wifi_timer = nullptr;
 // 闹钟管理回调(由板级 SetAlarmWebApi 注入)
@@ -482,6 +483,20 @@ static std::string MusicActionJson(const char* body) {
     return resp;
 }
 
+// 返回的是入队结果，而不是下位机执行结果。
+static std::string UnoSendResultJson(const std::string& message) {
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return "{\"ok\":false,\"error\":\"no memory\"}";
+    cJSON_AddBoolToObject(root, "ok", message.find("失败") == std::string::npos);
+    cJSON_AddStringToObject(root, "msg", message.c_str());
+    char* raw = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!raw) return "{\"ok\":false,\"error\":\"no memory\"}";
+    std::string result(raw);
+    cJSON_free(raw);
+    return result;
+}
+
 // GET /uno：返回下位机(Arduino)状态 JSON(供前端遥控页面轮询)
 static esp_err_t HandleUnoGet(httpd_req_t* req) {
     SetCors(req);
@@ -519,28 +534,26 @@ static esp_err_t HandleUnoPost(httpd_req_t* req) {
                 resp = "{\"ok\":false,\"error\":\"missing cmd\"}";
             } else {
                 std::string dcmd = MakeDriveCmd(cmd, spd);
-                resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive(dcmd) + "\"}";
+                resp = UnoSendResultJson(s_uno_api.send_drive(dcmd));
             }
         } else if (strcmp(action, "stop") == 0) {
-            resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("drive-stop") + "\"}";
+            resp = UnoSendResultJson(s_uno_api.send_drive("drive-stop"));
         } else if (strcmp(action, "speed") == 0) {
             cJSON* c_speed = cJSON_GetObjectItem(root, "speed");
             int spd = c_speed ? c_speed->valueint : 200;
             if (spd < 70) spd = 70;
             if (spd > 255) spd = 255;
-            resp = std::string("{\"ok\":true,\"msg\":\"") +
-                   s_uno_api.send_drive(MakeCmd("speed", spd)) + "\"}";
+            resp = UnoSendResultJson(s_uno_api.send_drive(MakeCmd("speed", spd)));
         } else if (strcmp(action, "servo") == 0) {
             // 舵机(头部)角度控制 0~180
             cJSON* c_degree = cJSON_GetObjectItem(root, "degree");
             int deg = c_degree ? c_degree->valueint : 90;
             if (deg < 0) deg = 0;
             if (deg > 180) deg = 180;
-            resp = std::string("{\"ok\":true,\"msg\":\"") +
-                   s_uno_api.send_drive(MakeCmd("servo", deg)) + "\"}";
+            resp = UnoSendResultJson(s_uno_api.send_drive(MakeCmd("servo", deg)));
         } else if (strcmp(action, "servo-home") == 0) {
             // 头部舵机回正(回到当前回正角度)
-            resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("servo-home") + "\"}";
+            resp = UnoSendResultJson(s_uno_api.send_drive("servo-home"));
         } else if (strcmp(action, "servo-home-set") == 0) {
             // 设置回正角度(0-180), 存储到 NVS
             cJSON* c_value = cJSON_GetObjectItem(root, "value");
@@ -604,14 +617,14 @@ static esp_err_t HandlePhotoTake(httpd_req_t* req) {
     std::string file;
     const uint8_t* data = s_camera_api.data ? s_camera_api.data() : nullptr;
     const size_t len = s_camera_api.size ? s_camera_api.size() : 0;
-    if (data != nullptr && len > 0) {
+    if (s_storage_available && data != nullptr && len > 0) {
         saved = PhotoStoreSave(PhotoKind::kWeb, data, len, &file);
     }
     char body[192];
     snprintf(body, sizeof(body),
              "{\"ok\":true,\"size\":%u,\"saved\":%d,\"file\":\"%s\",\"count\":%d}",
              static_cast<unsigned>(len), saved ? 1 : 0, file.c_str(),
-             PhotoStoreCount(PhotoKind::kWeb));
+             s_storage_available ? PhotoStoreCount(PhotoKind::kWeb) : 0);
     return SendJson(req, body);
 }
 
@@ -813,8 +826,30 @@ static std::string WsHandleMessage(const char* body) {
     int req_id = (c_id && c_id->valuestring) ? atoi(c_id->valuestring) : (c_id ? c_id->valueint : -9999);
     std::string resp = "{\"ok\":false,\"error\":\"unknown action\"}";
 
-    if (strcmp(action, "uno_status") == 0) {
+    if (strcmp(action, "capabilities") == 0) {
+        resp = s_storage_available ? "{\"storage\":true}" : "{\"storage\":false}";
+    } else if (!s_storage_available && (strncmp(action, "music_", 6) == 0 ||
+               strncmp(action, "alarm_", 6) == 0 || strncmp(action, "photos_", 7) == 0)) {
+        resp = "{\"ok\":false,\"error\":\"storage unavailable\"}";
+    } else if (strcmp(action, "uno_status") == 0) {
         if (s_uno_api.get_status) resp = s_uno_api.get_status();
+    } else if (strcmp(action, "uno_diag_start") == 0) {
+        cJSON* c_angle = cJSON_GetObjectItem(root, "angle");
+        if (!cJSON_IsNumber(c_angle) || c_angle->valuedouble != c_angle->valueint ||
+            c_angle->valueint < -1 || c_angle->valueint > 180) {
+            resp = "{\"ok\":false,\"error\":\"invalid angle\"}";
+        } else if (s_uno_api.start_diagnostic) {
+            resp = s_uno_api.start_diagnostic(c_angle->valueint);
+        }
+    } else if (strcmp(action, "uno_diag_status") == 0) {
+        cJSON* c_diag_id = cJSON_GetObjectItem(root, "diagnostic_id");
+        if (!cJSON_IsNumber(c_diag_id) || c_diag_id->valuedouble < 1 ||
+            c_diag_id->valuedouble > 4294967295.0 ||
+            c_diag_id->valuedouble != static_cast<uint32_t>(c_diag_id->valuedouble)) {
+            resp = "{\"ok\":false,\"error\":\"invalid diagnostic id\"}";
+        } else if (s_uno_api.get_diagnostic) {
+            resp = s_uno_api.get_diagnostic(static_cast<uint32_t>(c_diag_id->valuedouble));
+        }
     } else if (strcmp(action, "uno_drive") == 0) {
         cJSON* c_cmd = cJSON_GetObjectItem(root, "cmd");
         cJSON* c_speed = cJSON_GetObjectItem(root, "speed");
@@ -825,26 +860,24 @@ static std::string WsHandleMessage(const char* body) {
         if (cmd[0] == '\0') { resp = "{\"ok\":false,\"error\":\"missing cmd\"}"; }
         else if (s_uno_api.send_drive) {
             std::string dcmd = MakeDriveCmd(cmd, spd);
-            resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive(dcmd) + "\"}";
+            resp = UnoSendResultJson(s_uno_api.send_drive(dcmd));
         }
     } else if (strcmp(action, "uno_stop") == 0) {
-        if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("drive-stop") + "\"}";
+        if (s_uno_api.send_drive) resp = UnoSendResultJson(s_uno_api.send_drive("drive-stop"));
     } else if (strcmp(action, "uno_speed") == 0) {
         cJSON* c_speed = cJSON_GetObjectItem(root, "speed");
         int spd = c_speed ? c_speed->valueint : 200;
         if (spd < 70) spd = 70;
         if (spd > 255) spd = 255;
-        if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") +
-            s_uno_api.send_drive(MakeCmd("speed", spd)) + "\"}";
+        if (s_uno_api.send_drive) resp = UnoSendResultJson(s_uno_api.send_drive(MakeCmd("speed", spd)));
     } else if (strcmp(action, "uno_servo") == 0) {
         cJSON* c_degree = cJSON_GetObjectItem(root, "degree");
         int deg = c_degree ? c_degree->valueint : 90;
         if (deg < 0) deg = 0;
         if (deg > 180) deg = 180;
-        if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") +
-            s_uno_api.send_drive(MakeCmd("servo", deg)) + "\"}";
+        if (s_uno_api.send_drive) resp = UnoSendResultJson(s_uno_api.send_drive(MakeCmd("servo", deg)));
     } else if (strcmp(action, "uno_servo_home") == 0) {
-        if (s_uno_api.send_drive) resp = std::string("{\"ok\":true,\"msg\":\"") + s_uno_api.send_drive("servo-home") + "\"}";
+        if (s_uno_api.send_drive) resp = UnoSendResultJson(s_uno_api.send_drive("servo-home"));
     } else if (strcmp(action, "uno_servo_home_set") == 0) {
         cJSON* c_value = cJSON_GetObjectItem(root, "value");
         int val = c_value ? c_value->valueint : 82;
@@ -1219,18 +1252,18 @@ static void StartHttpServer() {
         .uri = "/photos/file", .method = HTTP_GET, .handler = HandlePhotoFile, .user_ctx = nullptr,
     };
     if (httpd_register_uri_handler(server, &index_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &upload_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &music_get_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &music_post_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &uno_get_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &uno_post_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &alarm_get_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &photo_jpeg_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &photo_take_uri) != ESP_OK ||
+        (s_storage_available && (httpd_register_uri_handler(server, &upload_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &music_get_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &music_post_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &alarm_get_uri) != ESP_OK ||
+        httpd_register_uri_handler(server, &alarm_post_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &photo_list_uri) != ESP_OK ||
         httpd_register_uri_handler(server, &photo_post_uri) != ESP_OK ||
-        httpd_register_uri_handler(server, &photo_file_uri) != ESP_OK) {
+        httpd_register_uri_handler(server, &photo_file_uri) != ESP_OK))) {
         ESP_LOGE(TAG, "Failed to register uri handlers");
         return;
     }
@@ -1292,7 +1325,8 @@ static void OnWifiReadyTimer(void* arg) {
     StartHttpServer();
 }
 
-void StartUploadServer(std::function<void()> on_uploaded) {
+void StartUploadServer(bool storage_available, std::function<void()> on_uploaded) {
+    s_storage_available = storage_available;
     s_on_uploaded = std::move(on_uploaded);
     if (WifiIpReady()) {
         StartHttpServer();
